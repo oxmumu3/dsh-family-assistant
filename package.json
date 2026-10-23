@@ -1,0 +1,74 @@
+{
+  "name": "dsh-family-assistant",
+  "version": "0.2.0-preview.6",
+  "description": "家庭版 AI 分身：一个 Host，多位长辈的独立微信助手与 Owner 每日服务简报",
+  "type": "module",
+  "license": "MIT",
+  "author": "奥克斯木木山",
+  "engines": {
+    "node": ">=22.13",
+    "dsh": "0.2.1-rc.2"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "web/",
+    "scripts/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/install.md",
+    "docs/public-verification.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "demo": "node scripts/demo.mjs",
+    "start": "node scripts/server.mjs",
+    "build": "node scripts/build-client.mjs",
+    "prepack": "node scripts/build-client.mjs"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/cordis": "4.0.5"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oxmumu3/dsh-family-assistant.git"
+  },
+  "homepage": "https://github.com/oxmumu3/dsh-family-assistant#readme",
+  "bugs": {
+    "url": "https://github.com/oxmumu3/dsh-family-assistant/issues"
+  }
+}

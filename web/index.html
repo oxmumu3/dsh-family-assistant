@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>家庭助手</title>
+  <link rel="stylesheet" href="/family/style.css">
+  <script src="/family/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">跳到主要内容</a>
+  <div id="app-shell" class="app-shell">
+    <header class="topbar">
+      <div class="product-name"><span class="product-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-7h6v7"/></svg></span><div>家庭助手<small>家里的事，有个助手一起照应。</small></div></div>
+      <div class="top-actions"><span id="run-status" class="status">正在读取状态</span><button id="add-family" type="button" class="secondary">添加家人</button><button id="settings-open" type="button" class="text-button">设置</button></div>
+    </header>
+    <nav class="workbench-nav" aria-label="家庭助手页面">
+      <button id="nav-chat" type="button" aria-current="page">和助手聊</button>
+      <button id="nav-family" type="button">我的家人</button>
+      <button id="nav-inbox" type="button">待我回应 <span id="nav-count" class="nav-count" hidden></span></button>
+      <button id="nav-activity" type="button">服务轨迹</button>
+    </nav>
+    <div id="notice-toast" class="notice-toast" hidden><p id="notice" class="notice" role="status" aria-live="polite" hidden></p><button id="notice-dismiss" class="notice-dismiss" type="button" aria-label="关闭提示">×</button></div>
+    <p id="error" class="error" role="alert" hidden></p>
+    <div class="workbench">
+      <section class="conversation-column" aria-label="与家庭助手对话">
+        <div class="conversation-heading"><h1 id="chat-title">家里的事，直接和我说。</h1><p id="chat-subtitle">说清你的想法，我来整理、安排，带着结果回来。</p></div>
+        <section id="owner-setup" class="owner-setup" hidden aria-labelledby="owner-setup-title"><div><h2 id="owner-setup-title">先认识一下你</h2><p>设置你的称呼与时区，作为家里的安排人和简报接收人。保存后再由你本人扫码连接微信。</p></div><button id="setup-owner" type="button" class="primary">设置我自己</button></section>
+        <main id="workspace" class="workspace" tabindex="-1" aria-label="当前工作内容"><p class="empty-state">正在读取家庭工作台…</p></main>
+        <div class="composer-area">
+          <form id="composer-form" class="composer">
+            <label for="owner-input" class="composer-context"><span class="tiny-mark" aria-hidden="true"></span>你正在和家庭助手说话</label>
+            <div id="composer-context-strip" class="context-strip" hidden><span id="composer-context-label"></span><button id="context-clear" type="button">回到一般对话</button></div>
+            <textarea id="owner-input" rows="1" maxlength="4000" placeholder="直接说吧：家人喜欢什么、想怎么安排，或有什么需要一起处理…" aria-describedby="composer-progress composer-storage"></textarea>
+            <section id="voice-panel" class="voice-panel" aria-label="语音输入" hidden>
+              <div class="voice-status-row"><p id="voice-status" role="status" aria-live="polite"></p><span id="voice-time" class="voice-time" aria-label="录音时长" hidden></span><meter id="voice-level" min="0" max="1" value="0" aria-label="麦克风音量" hidden></meter></div>
+              <p id="voice-detail" class="voice-detail" hidden></p>
+              <p id="voice-transcript" class="voice-transcript" hidden></p>
+              <div class="voice-actions"><button id="voice-prepare" type="button" hidden>下载并准备</button><button id="voice-stop" class="primary" type="button" hidden>停止并转文字</button><button id="voice-insert" type="button" hidden>插入到当前草稿</button><button id="voice-cancel" class="text-button" type="button" hidden>取消</button><button id="voice-cancel-setup" class="text-button" type="button" hidden>取消准备</button></div>
+            </section>
+            <div class="composer-tools"><button id="voice-start" type="button" class="voice-button" aria-controls="voice-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg><span id="voice-start-label">说话</span></button><span class="composer-tip">Enter 发送 · Shift + Enter 换行</span><button id="send-owner" type="submit" class="primary send-button" disabled>发送</button></div>
+            <p id="composer-progress" class="hint" role="status" aria-live="polite"></p>
+          </form>
+          <p id="composer-storage" class="composer-footnote">未发送文字暂存在当前窗口。家人的微信会话各自独立，发送状态不代表手机实收。</p>
+        </div>
+      </section>
+      <aside class="context-rail" aria-label="家人及待回应事项">
+        <section class="rail-section"><div class="section-title"><h2>家里的人</h2><button id="rail-add-family" type="button" class="text-button">添加</button></div><p id="people-empty" class="muted small">还没有家人资料。</p><nav id="people-list" class="people-list" aria-label="选择家庭成员"></nav><p class="hint">每个人单独扫码，聊天与提醒各自独立。</p></section>
+        <section class="rail-section"><div class="section-title"><h2>需要你回应</h2><span id="rail-request-count" class="muted small"></span></div><div id="rail-requests"></div></section>
+        <section class="rail-brief"><p class="eyebrow">给你的每日一页</p><h2>家庭服务简报</h2><p>只整理已发生的服务，以及家人同意分享的内容。</p><button id="brief-open" class="text-button" type="button">查看简报与安排</button></section>
+        <p class="rail-footer">电脑与宿主需保持在线，定时服务才能运行。</p>
+      </aside>
+    </div>
+  </div>
+  <div id="drawer-overlay" class="drawer-overlay" hidden>
+    <section id="drawer-panel" class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">
+      <header class="drawer-header"><div><p id="drawer-kicker" class="eyebrow">家庭助手</p><h2 id="drawer-title">详情</h2></div><button id="drawer-close" class="icon-button" type="button" aria-label="关闭详情">×</button></header>
+      <p id="drawer-notice" class="notice" role="status" aria-live="polite" hidden></p>
+      <p id="drawer-error" class="error" role="alert" hidden></p>
+      <div id="drawer-content" class="drawer-content">
+        <section id="person-panel" hidden><p id="welcome" class="muted">请先选择一位家人。</p>
+        <div id="person-detail" hidden>
+          <div class="person-heading"><div><p id="person-role" class="eyebrow"></p><h2 id="person-name"></h2></div><span id="connection-badge" class="status"></span></div>
+          <section class="section connection" aria-labelledby="connection-title">
+            <div><h3 id="connection-title">连接微信</h3><p id="connection-text" class="muted"></p><p id="connection-error" class="error" hidden></p>
+              <div class="actions"><button id="login" class="primary" type="button">生成登录二维码</button><button id="connect" type="button">恢复已有连接</button><button id="disconnect" class="text-button" type="button">断开连接</button></div>
+              <form id="verify-login" hidden><label for="verification-code">微信验证码</label><input id="verification-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required><p id="verification-prompt" class="hint"></p><button type="submit">提交验证码</button></form><p class="hint">请让当前成员本人用微信扫码，并在手机确认。发送接口确认不代表手机实际收到或已读。</p>
+            </div><div id="qr-wrap" class="qr-wrap" hidden><img id="qr-image" width="188" height="188" alt="当前成员的微信登录二维码"><p id="qr-caption" class="hint"></p></div>
+          </section>
+          <section class="section" aria-labelledby="preferences-title">
+            <div class="section-title"><h3 id="preferences-title">让陪伴更合适</h3><span class="muted small">只用于这位家人的服务</span></div>
+            <form id="preferences">
+              <div class="form-grid"><div><label for="person-label">称呼</label><input id="person-label" name="label" maxlength="60" required></div><div><label for="person-zone">所在时区</label><input id="person-zone" name="timeZone" list="time-zones" required></div></div>
+              <label for="person-interests">喜欢的话题</label><input id="person-interests" name="interests" maxlength="500" placeholder="散步、园艺、家常菜，用逗号分隔">
+              <label for="person-notes">陪伴偏好</label><textarea id="person-notes" name="notes" rows="2" maxlength="2000" placeholder="例如：说话简短一些，少用生僻词"></textarea>
+              <div id="elder-preferences">
+                <div class="daily-row"><label class="check"><input id="daily-enabled" type="checkbox" name="dailyEnabled">每天主动问候</label><label class="inline-field" for="daily-time">当地时间 <input id="daily-time" name="dailyTime" type="time" value="08:00" required></label></div>
+                <label for="person-sharing">向简报接收人分享什么</label><select id="person-sharing" name="shareWithOwner"><option value="none">不分享</option><option value="summary">仅服务摘要，不展示聊天原文</option><option value="full">摘要与完整聊天记录</option></select>
+                <p class="hint">摘要包含服务次数、提醒、连接问题和 AI 整理的话题小结。完整记录还会开放聊天原文；请先向本人说明。</p>
+                <label id="consent-row" class="check consent" hidden><input id="share-consent" type="checkbox">已向本人说明以上分享范围，并获得明确同意</label>
+              </div>
+              <div class="actions"><button class="primary" type="submit">保存偏好</button><span id="preferences-draft" class="hint"></span></div>
+            </form>
+          </section>
+          <section class="section" aria-labelledby="reminders-title">
+            <div class="section-title"><h3 id="reminders-title">记得要做的事</h3><span id="reminder-count" class="muted small"></span></div>
+            <ul id="reminder-list" class="record-list"></ul>
+            <details id="reminder-editor"><summary>添加提醒</summary><form id="add-reminder">
+              <label for="reminder-text">提醒什么</label><input id="reminder-text" name="text" maxlength="1000" required placeholder="例如：给阳台的花浇水">
+              <div class="form-grid"><div><label id="reminder-due-label" for="reminder-due">首次提醒时间</label><input id="reminder-due" name="dueAt" type="datetime-local" required></div><div><label for="reminder-repeat">重复</label><select id="reminder-repeat" name="repeat"><option value="once">只提醒一次</option><option value="daily">此后每天，在家人当地同一时间</option></select></div></div>
+              <p class="hint">首次时间按这台电脑的时区填写；每日重复会换算为家人所在时区。</p><button type="submit">保存提醒</button>
+            </form></details>
+          </section>
+          <section id="owner-command-section" class="section" aria-labelledby="owner-command-title" hidden>
+            <div class="section-title"><h3 id="owner-command-title">微信指令记录</h3><span id="owner-command-count" class="muted small"></span></div>
+            <p class="hint">记录你在微信里交代的操作与执行状态，不展示长辈聊天或日报正文。发送状态仅表示接口处理结果。</p>
+            <ul id="owner-command-list" class="record-list owner-command-list"></ul>
+          </section>
+          <section class="section" aria-labelledby="history-title">
+            <div class="section-title"><h3 id="history-title">最近的服务</h3><span id="history-count" class="muted small"></span></div>
+            <p id="history-privacy" class="muted"></p><ul id="history-list" class="history-list"></ul>
+            <details><summary>给这位家人发一条消息</summary><form id="send-message"><label id="message-label" for="message-text">消息内容</label><textarea id="message-text" name="text" required maxlength="4000" rows="3"></textarea><p class="hint">点击后只发送给当前选择的家人；结果不明时不会自动重发。</p><button id="send-message-button" type="submit">发送消息</button></form></details>
+          </section>
+        </div>
+        </section>
+        <section id="settings-panel" hidden>
+          <section class="section"><h3>成员资料</h3><p class="hint">主要通过对话添加家人；未接通模型时，也可以直接填写基本资料。</p><button id="manual-add-open" type="button">手动添加家人</button></section>
+          <section class="section run-section"><div class="section-title"><h3>服务开关</h3><button id="run-toggle" class="primary" type="button" disabled>开始服务</button></div><p class="hint">暂停后停止自动回复与发送；已连接通路的来信仅归档。</p></section>
+        <section class="section brief-section" aria-labelledby="brief-title"><p class="eyebrow">给你的每日一页</p><h2 id="brief-title">家庭服务简报</h2><p class="muted">只整理已发生的服务，以及家人同意分享的内容。</p><p id="brief-recipient" class="small"></p>
+          <div id="brief-preview" class="brief-preview">先预览，再决定是否发送。</div><div class="actions"><button id="preview-brief" type="button">预览今天的简报</button><button id="send-brief" class="primary" type="button">发送给我</button></div>
+          <form id="brief-schedule"><label class="check"><input id="brief-enabled" name="ownerBriefEnabled" type="checkbox">每日定时发送简报</label><label for="brief-time">接收人的当地时间</label><input id="brief-time" name="ownerBriefTime" type="time" value="20:00" required><button type="submit">保存简报安排</button></form>
+        </section>
+        <section class="section" aria-labelledby="service-title"><h3 id="service-title">服务设置</h3><p id="model-status" class="hint"></p><form id="service-settings"><label for="service-zone">默认时区</label><input id="service-zone" name="timeZone" list="time-zones" required><label for="model-provider">模型服务</label><input id="model-provider" name="provider" list="model-providers" placeholder="选择模型服务" autocomplete="off"><label for="model-name">模型</label><input id="model-name" name="model" list="model-names" placeholder="选择模型" autocomplete="off"><button type="submit">保存服务设置</button></form></section>
+        <p class="footnote">电脑与宿主需保持在线，定时服务才能运行。暂停会停止自动服务；暂停时仍可主动连接微信，来信仅归档，不触发 AI 回复或自动发送。</p>
+        <button id="refresh" class="text-button" type="button">刷新服务状态</button><p id="last-updated" class="hint"></p>
+        </section>
+        <section id="add-panel" hidden><p class="muted">只有自己选择“我自己”。其他家人的资料，也可以在主对话里描述后让助手整理。</p><button id="add-toggle" type="button" class="text-button" aria-expanded="true" aria-controls="add-person">填写资料</button>
+        <form id="add-person" class="add-person">
+          <h3>添加一位家人</h3>
+          <label for="add-role">身份</label><select id="add-role" name="role"><option value="owner">我自己（简报接收人）</option><option value="elder">长辈</option></select>
+          <label for="add-label">怎么称呼</label><input id="add-label" name="label" required maxlength="60" placeholder="例如：我、爸爸、妈妈" autocomplete="off">
+          <label for="add-zone">所在时区</label><input id="add-zone" name="timeZone" list="time-zones" value="Asia/Shanghai" required autocomplete="off">
+          <p class="hint">长辈的记录默认不向简报接收人分享。</p>
+          <button type="submit" class="primary">添加家人</button>
+        </form>
+        </section>
+        <section id="request-panel" hidden><p class="hint">这里只记录家人同意转达的事项与这件事的后续。</p><div id="request-thread" class="request-thread"></div><form id="request-reply-form"><label id="request-reply-label" for="request-reply-text">以我的身份回应这件事</label><textarea id="request-reply-text" rows="4" maxlength="4000" required></textarea><p class="hint">将注明是你的回应，并关联原事项。接口接收后继续等待后续。</p><div class="actions"><button id="request-send" class="primary" type="submit">确认并发送回应</button><button id="request-resolve" type="button">我已处理，结束跟进</button></div></form><p id="request-closed" class="hint" hidden>这件事已结束跟进。结束不代表手机已收到回应。</p></section>
+      </div>
+    </section>
+  </div>
+  <datalist id="time-zones"><option value="Asia/Shanghai">中国</option><option value="America/Mexico_City">墨西哥城</option><option value="Europe/London">伦敦</option><option value="America/Los_Angeles">洛杉矶</option><option value="America/New_York">纽约</option><option value="Asia/Tokyo">东京</option></datalist><datalist id="model-providers"></datalist><datalist id="model-names"></datalist>
+</body>
+</html>
