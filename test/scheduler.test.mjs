@@ -13,3 +13,19 @@ test('once reminders enqueue once with expiry and complete; stale reminders expi
 test('daily reminders advance to next local clock across DST and skip old backlog',()=>{const {store}=setup('2026-11-01T13:05:00Z');store.updatePerson('elder',{dailyEnabled:false});const r=store.addReminder({personId:'elder',text:'每日问候',dueAt:'2026-10-30T12:00:00Z',repeat:'daily',time:'08:00',timeZone:'America/New_York'});const out=scheduleTick(store,{now:'2026-11-01T13:05:00Z'}).filter(o=>o.kind==='reminder');assert.equal(out.length,1);assert.match(out[0].sourceKey,/2026-11-01T13:00:00.000Z$/);assert.equal(store.reminders('elder').find(x=>x.id===r.id).dueAt,'2026-11-02T13:00:00.000Z');assert.deepEqual(scheduleTick(store,{now:'2026-11-01T13:05:00Z'}),[]);});
 test('spring-forward nonexistent daily reminder time skips to next valid day',()=>{const {store}=setup('2026-03-08T08:00:00Z');store.updatePerson('elder',{dailyEnabled:false});const r=store.addReminder({personId:'elder',text:'晨间提醒',dueAt:'2026-03-07T07:30:00Z',repeat:'daily',time:'02:30',timeZone:'America/New_York'});assert.deepEqual(scheduleTick(store,{now:'2026-03-08T08:00:00Z'}),[]);assert.equal(store.reminders('elder').find(x=>x.id===r.id).dueAt,'2026-03-09T06:30:00.000Z');});
 test('unbound people are skipped independently and cancelling reminder blocks previously queued occurrence',()=>{const {store}=setup();store.addPerson({id:'unbound',role:'elder',label:'未绑定',dailyEnabled:true});store.addReminder({personId:'unbound',text:'没有路由',dueAt:'2026-10-21T00:00:00Z'});const r=store.addReminder({personId:'elder',text:'取消测试',dueAt:'2026-10-21T00:00:00Z'});const out=scheduleTick(store,{now:'2026-10-21T00:00:00Z'});assert.equal(out.filter(o=>o.kind==='reminder').length,1);store.cancelReminder('elder',r.id);assert.equal(store.snapshot().outbox.find(o=>o.kind==='reminder').status,'cancelled');});
+
+test('replacement binding never schedules a previous account reminder and same-account reconnect preserves it',()=>{
+ const {store}=setup();store.updatePerson('elder',{dailyEnabled:false});store.configure({ownerBriefEnabled:false});const due='2026-10-21T02:00:00Z';
+ const reminder=store.addReminder({personId:'elder',text:'旧账号私密日程',dueAt:due});
+ store.bindPerson('elder',{accountId:'replacement',peerId:'replacement-peer'});scheduleTick(store,{now:due});
+ assert.equal(store.snapshot().outbox.filter(row=>row.kind==='reminder').length,0);assert.equal(store.reminders('elder').find(row=>row.id===reminder.id).status,'active');
+ const current=store.addReminder({personId:'elder',text:'新账号日程',dueAt:due});store.bindPerson('elder',{accountId:'replacement',peerId:'replacement-peer'});scheduleTick(store,{now:due});
+ assert.equal(store.snapshot().outbox.filter(row=>row.kind==='reminder').length,1);assert.match(store.pending()[0].text,/新账号日程/);assert.equal(store.reminders('elder').find(row=>row.id===current.id).status,'completed');
+});
+
+test('legacy unbound reminders become eligible on first binding only and are archived after replacement',()=>{
+ const {store}=setup();store.updatePerson('elder',{dailyEnabled:false});store.configure({ownerBriefEnabled:false});store.addPerson({id:'legacy',role:'elder',label:'合成旧成员'});
+ const first=store.addReminder({personId:'legacy',text:'首次绑定可用',dueAt:'2026-10-21T00:00:00Z'}),later=store.addReminder({personId:'legacy',text:'替换后不可继承',dueAt:'2026-10-22T00:00:00Z'});assert.equal(first.bindingGeneration,undefined);
+ store.bindPerson('legacy',{accountId:'legacy-first',peerId:'legacy-first-peer'});scheduleTick(store,{now:first.dueAt});assert.equal(store.snapshot().outbox.filter(row=>row.kind==='reminder').length,1);
+ store.bindPerson('legacy',{accountId:'legacy-second',peerId:'legacy-second-peer'});scheduleTick(store,{now:later.dueAt});assert.equal(store.snapshot().outbox.filter(row=>row.kind==='reminder').length,1);assert.equal(store.reminders('legacy').find(row=>row.id===later.id).status,'active');
+});

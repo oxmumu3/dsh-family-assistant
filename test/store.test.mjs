@@ -21,3 +21,48 @@ test('revoking sharing cancels pending owner brief so previously copied private 
 test('pending text enrichment is cloned and cannot modify dispatching content or exceed transport limit',()=>{const {store:s}=setup();bound(s);s.configure({paused:false});const q=s.enqueue({personId:'elder',text:'template',kind:'elder_daily',sourceKey:'daily-template'});const result=s.updatePendingText(q.id,'个性化内容');result.text='mutation';assert.equal(s.pending()[0].text,'个性化内容');assert.throws(()=>s.updatePendingText(q.id,'x'.repeat(3201)));s.updatePerson('elder',{dailyEnabled:true});s.transition(q.id,'dispatching');assert.throws(()=>s.updatePendingText(q.id,'too late'));});
 test('terminal send failures do not add history and in-flight rebinding never permits stale success',()=>{const {store:s}=setup();bound(s);s.configure({paused:false});const q=s.enqueue({personId:'elder',text:'reject me',kind:'chat',sourceKey:'rejected'});s.transition(q.id,'dispatching');assert.equal(s.transition(q.id,'failed','业务拒绝').status,'failed');assert.deepEqual(s.messages('elder'),[]);const racing=s.enqueue({personId:'elder',text:'racing',kind:'chat',sourceKey:'racing'});s.transition(racing.id,'dispatching');s.bindPerson('elder',{accountId:'a-new',peerId:'p-new'});assert.equal(s.snapshot().outbox.find(o=>o.id===racing.id).status,'uncertain');assert.throws(()=>s.transition(racing.id,'api_accepted'));});
 test('successful connection status clears obsolete error text while preserving activity metadata',()=>{const {store:s}=setup();bound(s);s.setConnection('elder',{status:'error',lastError:'旧错误',lastInboundAt:fixed});s.setConnection('elder',{status:'connected'});assert.equal(s.binding('elder').lastError,undefined);assert.equal(s.binding('elder').lastInboundAt,fixed);});
+
+test('member reminder edit keeps canonical ID and original time for text-only changes',()=>{
+ const {store:s,directory}=setup();bound(s);elder(s,'other');
+ const r=s.addReminder({personId:'elder',text:'散步',dueAt:'2026-10-22T01:00:00Z'});
+ assert.throws(()=>s.updateReminder('other',r.id,{text:'越权'},{requestId:'u0'}),/其他成员/);
+ const updated=s.updateReminder('elder',r.id,{text:'公园散步'},{requestId:'u1'});
+ assert.equal(updated.id,r.id);assert.equal(updated.dueAt,r.dueAt);assert.equal(updated.text,'公园散步');
+ s.updateReminder('elder',r.id,{text:'慢走'},{requestId:'u2'});
+ const reloaded=createStore({directory,now:()=>fixed});
+ assert.equal(reloaded.updateReminder('elder',r.id,{text:'公园散步'},{requestId:'u1'}).text,'慢走');
+ assert.throws(()=>s.updateReminder('elder',r.id,{personId:'other'},{requestId:'bad'}));
+});
+
+test('reschedule atomically cancels old pending occurrence and never retracts an in-flight alarm',()=>{
+ const {store:s}=setup();bound(s);s.configure({paused:false});
+ const r=s.addReminder({personId:'elder',text:'散步',dueAt:'2026-10-21T01:00:00Z'});
+ const pending=s.enqueue({personId:'elder',text:'旧提醒',kind:'reminder',sourceKey:`reminder:${r.id}:${r.dueAt}`});
+ const updated=s.updateReminder('elder',r.id,{dueAt:'2026-10-22T01:00:00Z'},{requestId:'move'});
+ assert.equal(updated.id,r.id);assert.equal(s.snapshot().outbox.find(o=>o.id===pending.id).status,'cancelled');
+ assert.throws(()=>s.updateReminder('elder',r.id,{dueAt:r.dueAt},{requestId:'reuse'}),/发生|使用|处理/);
+ const inFlight=s.enqueue({personId:'elder',text:'新提醒',kind:'reminder',sourceKey:`reminder:${r.id}:${updated.dueAt}`});s.transition(inFlight.id,'dispatching');
+ assert.throws(()=>s.updateReminder('elder',r.id,{dueAt:'2026-10-23T01:00:00Z'},{requestId:'late'}),/发送|确认/);
+ assert.equal(s.reminders('elder')[0].dueAt,updated.dueAt);assert.equal(s.snapshot().outbox.find(o=>o.id===inFlight.id).status,'dispatching');
+});
+
+test('message binding generation is server derived for inbound, manual and accepted outbound history',()=>{
+ const {store:s,directory}=setup();bound(s);s.configure({paused:false});
+ assert.equal(s.recordInbound('elder',{id:'private-old',peerId:'peer-elder',text:'私密旧便条'}).message.bindingGeneration,1);
+ assert.equal(s.addMessage('elder',{dir:'out',text:'旧偏好确认'}).bindingGeneration,1);
+ const queued=s.enqueue({personId:'elder',text:'旧回复',kind:'chat',sourceKey:'old-reply'});s.transition(queued.id,'dispatching');s.transition(queued.id,'api_accepted');assert.equal(s.messages('elder').at(-1).bindingGeneration,1);
+ assert.throws(()=>s.addMessage('elder',{dir:'in',text:'伪造',bindingGeneration:1}),/字段/);
+ assert.throws(()=>s.recordInbound('elder',{id:'forged',peerId:'peer-elder',text:'伪造',bindingGeneration:1}),/字段/);
+ s.bindPerson('elder',{accountId:'new-account',peerId:'new-peer'});assert.equal(s.recordInbound('elder',{id:'new-chat',peerId:'new-peer',text:'新成员'}).message.bindingGeneration,2);
+ const reloaded=createStore({directory,now:()=>fixed});assert.deepEqual(reloaded.messages('elder').map(row=>row.bindingGeneration),[1,1,1,2]);
+ const state=s.snapshot();state.messages[0].bindingGeneration=0;writeFileSync(join(directory,'family.json'),JSON.stringify(state));assert.throws(()=>createStore({directory}),/版本|绑定/);
+});
+
+test('new reminders capture the trusted binding and cannot be edited or cancelled by a replacement binding',()=>{
+ const {store:s}=setup();bound(s);const reminder=s.addReminder({personId:'elder',text:'旧账号安排',dueAt:'2026-10-22T01:00:00Z'});assert.equal(reminder.bindingGeneration,1);
+ assert.throws(()=>s.addReminder({personId:'elder',text:'伪造',dueAt:'2026-10-22T01:00:00Z',bindingGeneration:1}),/字段/);
+ s.bindPerson('elder',{accountId:'replacement',peerId:'replacement-peer'});
+ assert.throws(()=>s.updateReminder('elder',reminder.id,{text:'修改旧安排'},{requestId:'forbidden'}),/绑定|当前/);
+ assert.throws(()=>s.cancelReminder('elder',reminder.id),/绑定|当前/);
+ assert.equal(s.reminders('elder')[0].status,'active');assert.equal(s.addReminder({personId:'elder',text:'新账号安排',dueAt:'2026-10-23T01:00:00Z'}).bindingGeneration,2);
+});

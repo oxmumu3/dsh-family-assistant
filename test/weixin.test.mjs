@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createWeixinApi } from '../src/weixin.mjs';
 const reply = (body, status=200) => ({ok:status>=200&&status<300,status,text:async()=>typeof body==='string'?body:JSON.stringify(body)});
 const auth={token:'secret',baseUrl:'https://ilinkai.weixin.qq.com',peerId:'peer',contextToken:'ctx',text:'你好',clientId:'c1'};
+test('business rejection preserves the specific numeric error code instead of hiding it behind a generic return code',async()=>{
+ const api=createWeixinApi({fetchImpl:async()=>reply({ret:-1,errcode:-14,errmsg:'Bearer private-context'})});
+ await assert.rejects(()=>api.send(auth),error=>{assert.equal(error.code,-14);assert.equal(error.sendOutcome,'failed');assert.equal(JSON.stringify(error).includes('private-context'),false);return true;});
+});
 test('QR uses official POST protocol with empty local tokens and normalized confirmation', async()=>{
  const calls=[];const api=createWeixinApi({fetchImpl:async(u,o)=>{calls.push([u,o]);return reply(calls.length===1?{qrcode:'q',qrcode_img_content:'https://weixin.qq.com/q'}:{status:'confirmed',bot_token:'t',ilink_bot_id:'a',ilink_user_id:'p',baseurl:auth.baseUrl});}});
  assert.deepEqual(await api.getQr(),{qrcode:'q',qrUrl:'https://weixin.qq.com/q'});

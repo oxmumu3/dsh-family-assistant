@@ -69,7 +69,7 @@ test('controls have unique IDs and accessible labels',()=>{
 });
 test('native authenticated carrier, same-origin mutations, consent and local QR remain intact',()=>{
   assert.match(app,/credentials: 'same-origin'/);assert.match(app,/'X-Family-Action': '1'/);assert.match(app,/'Content-Type': 'application\/json'/);assert.match(app,/document\.hidden/);assert.match(app,/}, 5000\)/);
-  assert.match(app,/shareWithOwner === 'full'/);assert.match(app,/share-consent'\)\.checked/);
+  assert.match(html,/简报中分享什么/);assert.match(app,/share-consent'\)\.checked/);
   assert.match(client,/globalThis\.fetch\('\/api\/family\/workbench'/);assert.match(client,/srcDoc: html/);assert.match(client,/window\.__FamilyHostFetch = hostFetch/);assert.match(client,/id: 'family-assistant'.*label: '家庭助手'/);
   assert.match(app,/fetch\('\/family\/qr\.svg\?personId='/);assert.match(app,/URL\.revokeObjectURL/);
 });
@@ -79,12 +79,13 @@ test('first use is an honest empty state with explicit Owner setup',async()=>{
   assert.equal(view.elements.get('send-owner').disabled,true);assert.equal(view.elements.get('settings-open').disabled,false);
   assert.doesNotMatch(view.elements.get('workspace').textContent,/测试家人|已连接|已发送/);
 });
-test('Owner own history loads initially and after mutations without expanding elder sharing',async()=>{
+test('Owner history loads for every member without changing their brief sharing',async()=>{
   const view=await workbenchHarness();assert.match(view.elements.get('history-list').textContent,/聊天-owner/);
   view.click('preview-brief');await view.settle();assert.match(view.elements.get('history-list').textContent,/聊天-owner/);
-  for(const index of [1,2]){view.select(index);await view.settle();assert.doesNotMatch(view.elements.get('history-list').textContent,/聊天-/);}
+  for(const index of [1,2]){view.select(index);await view.settle();assert.match(view.elements.get('history-list').textContent,new RegExp('聊天-'+view.snapshot.people[index].id));}
   view.select(3);await view.settle();assert.match(view.elements.get('history-list').textContent,/聊天-full/);
-  view.snapshot.people[3].shareWithOwner='none';view.click('refresh');await view.settle();assert.doesNotMatch(view.elements.get('history-list').textContent,/聊天-full/);
+  view.snapshot.people[3].shareWithOwner='none';view.click('refresh');await view.settle();assert.match(view.elements.get('history-list').textContent,/聊天-full/);
+  assert.deepEqual(view.snapshot.people.map(person=>person.shareWithOwner),['none','none','summary','none']);
 });
 test('revoked brief is erased and discovered model is not called selected',async()=>{
   const snapshot=initial();snapshot.model.available=true;snapshot.lastBrief={text:'private family preview'};const view=await workbenchHarness({snapshot});
@@ -102,6 +103,7 @@ test('ambiguous owner chat failure retains input and reuses its request key acro
 });
 test('drafts follow explicit card context across navigation and refresh',async()=>{
   const snapshot=initial();snapshot.workbench.cards=[{id:'p1',kind:'profile',status:'draft',title:'合成资料',revision:7,profile:{label:'合成家人',timeZone:'Asia/Shanghai',interests:['园艺'],notes:''}}];
+  snapshot.workbench.messages=[{id:'profile-result',role:'assistant',text:'请核对这份资料。',cardIds:['p1']}];
   const view=await workbenchHarness({snapshot});view.input('owner-input','全局尚未发送');
   button(view.elements.get('workspace'),'继续修改').fire('click');view.input('owner-input','这份资料的修改');
   view.click('nav-family');assert.equal(view.elements.get('owner-input').value,'这份资料的修改');view.click('context-clear');assert.equal(view.elements.get('owner-input').value,'全局尚未发送');
@@ -114,7 +116,7 @@ test('card confirmation sends revision and partial recovery never retries an unk
     {id:'a',type:'send_message',personId:'mom',targetLabel:'合成甲',text:'<img src=x onerror=alert(1)>',status:'draft'},
     {id:'b',type:'send_message',personId:'summary',targetLabel:'合成乙',status:'failed'},
     {id:'c',type:'send_message',personId:'full',targetLabel:'合成丙',status:'uncertain'},
-  ]}];const view=await workbenchHarness({snapshot});
+  ]}];snapshot.workbench.messages=[{id:'plan-result',role:'assistant',text:'请核对这份安排。',cardIds:['plan']}];const view=await workbenchHarness({snapshot});
   const space=view.elements.get('workspace');assert.match(space.textContent,/<img src=x onerror=alert\(1\)>/);
   const actions=descendants(space).filter(element=>element.dataset.actionId);
   assert.ok(actions.some(element=>element.dataset.actionId==='b'&&element.textContent==='仅重试这一项'));
@@ -122,6 +124,49 @@ test('card confirmation sends revision and partial recovery never retries an unk
   actions.find(element=>element.dataset.actionId==='a'&&element.textContent==='取消这一项').fire('click');await view.settle();
   assert.deepEqual(view.requests.find(request=>request.body?.action==='cancel_card').body,{action:'cancel_card',cardId:'plan',actionId:'a'});
   button(view.elements.get('workspace'),'确认待执行安排').fire('click');await view.settle();assert.equal(view.requests.find(request=>request.body?.action==='confirm_card').body.revision,4);
+});
+test('older saved cards stay beside their conversation turn beyond sixteen messages',async()=>{
+  const snapshot=initial(),card={id:'k-profile',kind:'profile',status:'saved',title:'K 的资料',personId:'mom',profile:{label:'K',timeZone:'Asia/Shanghai'}};
+  snapshot.workbench.cards=[card];
+  snapshot.workbench.messages=[{id:'k-result',role:'assistant',text:'K 的资料已经保存。',cardIds:[card.id]},...Array.from({length:17},(_,index)=>({id:'later-'+index,role:index%2?'assistant':'user',text:'后续对话 '+index}))];
+  const view=await workbenchHarness({snapshot}),space=view.elements.get('workspace');
+  const rendered=descendants(space).find(element=>element.dataset.cardId===card.id);
+  assert.ok(rendered,'The referenced saved card remains available with its original turn');
+  assert.equal(rendered.parent.className,'chat-message assistant');
+  assert.match(rendered.parent.textContent,/K 的资料已经保存/);
+  assert.match(space.lastChild.textContent,/后续对话 16/);
+  snapshot.workbench.messages.push({id:'latest',role:'assistant',text:'最新回复在这里。'});view.click('refresh');await view.settle();
+  assert.match(space.lastChild.textContent,/最新回复在这里/);
+  assert.equal(descendants(space).filter(element=>element.dataset.cardId===card.id).length,1);
+});
+test('unreferenced saved cards and plans do not become the latest conversation result',async()=>{
+  const snapshot=initial();snapshot.workbench.cards=[
+    {id:'old-profile',kind:'profile',status:'saved',title:'历史资料',profile:{label:'K'}},
+    {id:'old-plan',kind:'plan',status:'active',title:'历史安排',actions:[]},
+  ];snapshot.workbench.messages=[{id:'latest',role:'assistant',text:'当前这一轮的回复。'}];
+  const view=await workbenchHarness({snapshot}),space=view.elements.get('workspace');
+  assert.match(space.lastChild.textContent,/当前这一轮的回复/);
+  assert.equal(descendants(space).some(element=>element.dataset.cardId),false);
+  view.click('nav-activity');assert.ok(descendants(space).some(element=>element.dataset.cardId==='old-plan'));
+  view.click('nav-family');assert.match(space.textContent,/测试家人甲/);
+});
+test('retained unreferenced cards do not hide the conversation empty state',async()=>{
+  const snapshot=initial();snapshot.workbench.cards=[{id:'retained-profile',kind:'profile',status:'saved',title:'历史资料',profile:{label:'K'}}];
+  const view=await workbenchHarness({snapshot}),space=view.elements.get('workspace');
+  assert.match(space.textContent,/我在，说说这次想办什么/);
+  assert.equal(descendants(space).some(element=>element.dataset.cardId),false);
+});
+test('a revised card appears once beside its latest actual reference',async()=>{
+  const snapshot=initial();snapshot.workbench.cards=[{id:'updated-plan',kind:'plan',status:'draft',title:'修订后的安排',revision:2,actions:[]}];
+  snapshot.workbench.messages=[{id:'before',role:'assistant',text:'第一版。',cardIds:['updated-plan']},{id:'edit',role:'user',text:'请改时间。'},{id:'after',role:'assistant',text:'时间已修改。',cardIds:['updated-plan']},{id:'latest',role:'user',text:'再聊一件事。'}];
+  const view=await workbenchHarness({snapshot}),space=view.elements.get('workspace'),cards=descendants(space).filter(element=>element.dataset.cardId==='updated-plan');
+  assert.equal(cards.length,1);assert.match(cards[0].parent.textContent,/时间已修改/);assert.doesNotMatch(space.children[0].textContent,/修订后的安排/);assert.match(space.lastChild.textContent,/再聊一件事/);
+});
+test('refreshing conversation cards preserves a reader position away from the bottom',async()=>{
+  const snapshot=initial();snapshot.workbench.messages=[{id:'first',role:'assistant',text:'已有对话。'}];
+  const view=await workbenchHarness({snapshot}),space=view.elements.get('workspace');space.scrollHeight=1200;space.clientHeight=300;space.scrollTop=160;
+  snapshot.workbench.messages.push({id:'latest',role:'assistant',text:'新回复。'});view.click('refresh');await view.settle();assert.equal(space.scrollTop,160);
+  space.scrollTop=900;snapshot.workbench.messages.push({id:'last',role:'assistant',text:'下一条回复。'});view.click('refresh');await view.settle();assert.equal(space.scrollTop,space.scrollHeight);
 });
 test('linked request response keeps operation identity and displays only the selected matter',async()=>{
   const snapshot=initial();snapshot.workbench.requests=[{id:'r1',personId:'mom',text:'请转达一个选定事项',status:'open',responses:[{by:'elder',text:'事项补充',at:'2026-10-23T10:00:00Z'}]}];

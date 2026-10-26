@@ -26,11 +26,11 @@ test('changed recipient route after proposal cannot send to replacement',async t
  runtime.store.bindPerson('mom',{accountId:'other',peerId:'replacement'});const card=state.workbench.cards[0];
  const result=await runtime.action({action:'confirm_card',cardId:card.id,revision:card.revision});assert.equal(sent.length,0);assert.equal(result.workbench.cards[0].actions[0].status,'failed');
 });
-test('private elder relay shares just explicit request and Owner reply is attributed',async t=>{
+test('relay sends only the explicit request while Owner can directly inspect saved conversation',async t=>{
  const{runtime,sent}=await setup(t,{respond:async({text})=>text.includes('帮我转告')?{reply:'待转告',action:{type:'relay',text:'周六几点来看我？',evidence:'帮我转告，周六几点来看我？'}}:{reply:'收到'}});
  runtime.store.addMessage('mom',{dir:'in',text:'不准泄露的旧私聊'});
  await runtime.receive('mom',{id:'relay',peerId:'peer-mom',text:'帮我转告，周六几点来看我？'});
- let view=runtime.status({personId:'mom'});assert.equal(view.workbench.requests.length,1);assert.doesNotMatch(JSON.stringify(view),/不准泄露/);assert.equal(view.messages.length,0);
+ let view=runtime.status({personId:'mom'});assert.equal(view.workbench.requests.length,1);assert.match(JSON.stringify(view.messages),/不准泄露/);assert.doesNotMatch(JSON.stringify(view.workbench.requests),/不准泄露/);assert.doesNotMatch(JSON.stringify(sent),/不准泄露/);
  assert.equal(sent.filter(s=>s.route.personId==='owner').length,1);
  const request=view.workbench.requests[0];await runtime.action({action:'reply_request',requestId:request.id,text:'下午四点',operationId:'reply-one'});
  assert.match(sent.at(-1).text,/代.*转告|回复/);assert.match(sent.at(-1).text,/下午四点/);assert.equal(sent.at(-1).route.personId,'mom');assert.equal(runtime.status().workbench.requests[0].status,'waiting');

@@ -75,3 +75,31 @@ test('relay prompt binds consent to the selected quote and names only the known 
   assert.match(captured.system,/evidence.*(?:同时|包含).*text|evidence.*转告指令.*事项/);
   assert.match(captured.system,/指定.*(?:其他|别的).*(?:询问|澄清|核对)|(?:其他|别的).*指定.*(?:询问|澄清|核对)/);
 });
+
+test('personal organizer model actions have strict bounded finite contracts',()=>{
+ const cases=[
+  {type:'remember',text:'钥匙在蓝色抽屉',evidence:'记住：钥匙在蓝色抽屉'},
+  {type:'search_notes',query:'钥匙'},
+  {type:'forget_note',noteId:'note-synthetic',evidence:'忘掉钥匙那条'},
+  {type:'update_reminder',reminderId:'reminder-synthetic',patch:{text:'公园慢走'},evidence:'把散步改成公园慢走'},
+  {type:'list',query:'这周'},
+ ];
+ for(const action of cases)assert.deepEqual(parseModelReply(JSON.stringify({reply:'待处理',action})).action,action);
+ for(const action of [
+  {type:'remember',text:'虚构'},
+  {type:'search_notes',query:'x',personId:'other'},
+  {type:'forget_note',noteId:'../bad',evidence:'忘掉'},
+  {type:'update_reminder',reminderId:'r',patch:{} ,evidence:'修改'},
+  {type:'update_reminder',reminderId:'r',patch:{status:'cancelled'},evidence:'修改'},
+  {type:'update_reminder',reminderId:'r',patch:{dueAt:'tomorrow'},evidence:'修改'},
+ ])assert.throws(()=>parseModelReply(JSON.stringify({reply:'待处理',action})));
+});
+
+test('model sees bounded current-member durable notes and canonical reminder metadata beyond last thirty messages',async()=>{
+ const {createHostResponder}=await import('../src/model.mjs');let captured;
+ const respond=createHostResponder({get:()=>({async *stream(options){captured=options;yield{type:'text-delta',index:0,text:'{"reply":"待查询","action":{"type":"search_notes","query":"钥匙"}}'};yield{type:'finish',reason:'stop'};}})},()=>({provider:'test',model:'test'}));
+ await respond({person:{id:'me',label:'测试成员',timeZone:'America/Mexico_City',interests:[]},text:'钥匙放哪了',now:'2026-10-25T03:00:00Z',notes:[{id:'note-a',text:'钥匙在抽屉',createdAt:'2026-09-01T00:00:00Z'},{id:'note-foreign',personId:'other',text:'PRIVATE_OTHER_NOTE',evidence:'PRIVATE_EVIDENCE'}],reminders:[{id:'r',personId:'me',text:'散步',status:'active',createdAt:'2026-10-24T00:00:00Z',dueAt:'2026-10-25T15:00:00Z',updateRequestIds:['PRIVATE_REQUEST_ID']}],history:Array.from({length:35},()=>({dir:'in',text:'ordinary',at:'2026-10-24T00:00:00Z'}))});
+ const payload=JSON.parse(captured.messages[0].content[0].text);
+ assert.equal(payload.notes[0].id,'note-a');assert.equal(payload.history.length,30);assert.doesNotMatch(JSON.stringify(captured),/PRIVATE_OTHER|PRIVATE_EVIDENCE|PRIVATE_REQUEST_ID/);
+ assert.match(captured.system,/update_reminder/);assert.match(captured.system,/原.*时间|保留.*时间/);assert.match(captured.system,/remember/);assert.match(captured.system,/search_notes/);assert.match(captured.system,/周一.*周日/);assert.match(captured.system,/记一下/);assert.match(captured.system,/每周.*(?:不支持|尚不支持)/);
+});
