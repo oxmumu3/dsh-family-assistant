@@ -22,12 +22,12 @@ test('demo runs real runtime/channel/API modules locally and cleans its isolated
   }
   assert.deepEqual(evidence.counts, {
     people: 3, logins: 3, pollAccounts: 3, inbound: 3, replyApiAccepted: 3,
-    briefApiAccepted: 1, reminderApiAccepted: 1, failed: 1, retries: 0,
+    briefApiAccepted: 1, welcomeApiAccepted: 2, reminderApiAccepted: 1, failed: 1, retries: 0,
   });
-  assert.equal(evidence.apiAttempts.length, 6);
+  assert.equal(evidence.apiAttempts.length, 8);
   assert.deepEqual(evidence.apiAttempts.map(row => [row.person, row.kind, row.outcome]).sort(), [
     ['dad', 'reply', 'api_accepted'], ['mom', 'reply', 'api_accepted'], ['owner', 'reply', 'api_accepted'],
-    ['owner', 'owner_brief', 'api_accepted'], ['dad', 'reminder', 'api_accepted'], ['mom', 'manual', 'failed'],
+    ['owner', 'owner_brief', 'api_accepted'], ['mom','member_welcome','api_accepted'], ['dad','member_welcome','api_accepted'], ['dad', 'reminder', 'api_accepted'], ['mom', 'manual', 'failed'],
   ].sort());
   assert.doesNotMatch(stdout, /Bearer|fixture-token|fixture-context|auth\.json|family\.json/);
 });

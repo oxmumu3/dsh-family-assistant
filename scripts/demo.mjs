@@ -164,6 +164,7 @@ try {
       inbound: state.messages.filter(message => message.dir === 'in').length,
       replyApiAccepted: state.outbox.filter(row => row.kind === 'reply' && row.status === 'api_accepted').length,
       briefApiAccepted: state.outbox.filter(row => row.kind === 'owner_brief' && row.status === 'api_accepted').length,
+      welcomeApiAccepted: state.outbox.filter(row => row.kind === 'member_welcome' && row.status === 'api_accepted').length,
       reminderApiAccepted: state.outbox.filter(row => row.kind === 'reminder' && row.status === 'api_accepted').length,
       failed: state.outbox.filter(row => row.status === 'failed').length, retries: failedAttempts - 1,
     },

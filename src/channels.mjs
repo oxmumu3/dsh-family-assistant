@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createWeixinApi, validateWeixinBaseUrl } from './weixin.mjs';
+import { MAX_FILE_BYTES } from './weixin-media.mjs';
 
 const safeId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value);
 const present = value => typeof value === 'string' && value.trim().length > 0;
@@ -90,7 +91,8 @@ export function createChannelManager({ directory, api = createWeixinApi(), onMes
           // The response may need this latest context immediately, inside onMessage.
           if (present(message.contextToken)) { s.auth.contextToken = message.contextToken; save(s); }
           await onMessage(s.personId, { id: message.id, peerId: message.peerId, text: message.text ?? '',
-            unsupported: !!message.unsupported, at: message.at ?? now() });
+            unsupported: !!message.unsupported, at: message.at ?? now(),
+            ...(Array.isArray(message.attachments) && message.attachments.length ? { attachments: structuredClone(message.attachments) } : {}) });
           if (!active(s, epoch, signal)) break;
           s.lastInboundAt = now();
         }
@@ -180,6 +182,31 @@ export function createChannelManager({ directory, api = createWeixinApi(), onMes
     async disconnect(personId) { const s = state(personId), epoch = await stop(s); if (s.epoch === epoch) status(s, 'disconnected'); return publicStatus(s); },
     status(personId) { return publicStatus(state(personId)); },
     statuses() { return [...states.values()].map(publicStatus); },
+    async downloadFile(route, attachment, { signal, authorize = () => true } = {}) {
+      const s = route && states.get(route.personId);
+      const valid = () => !closed && s && s.connected && s.route && s.controller && !s.controller.signal.aborted &&
+        ['personId', 'accountId', 'peerId', 'generation'].every(key => route[key] === s.route[key]);
+      const check = () => { if (!valid() || signal?.aborted || authorize() !== true) throw Object.assign(new Error('文件下载已取消、绑定或授权已变化'), { sendOutcome: 'failed' }); };
+      check(); const combined = signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal;
+      const result = await api.downloadFile({ attachment, signal: combined }); check(); return result;
+    },
+    async sendFile(route, file, { clientId = randomUUID(), signal, authorize = () => true } = {}) {
+      const s = route && states.get(route.personId);
+      const valid = () => !closed && s && s.connected && s.route && s.controller && !s.controller.signal.aborted &&
+        ['personId', 'accountId', 'peerId', 'generation'].every(key => route[key] === s.route[key]);
+      const allowed = () => valid() && !signal?.aborted && authorize() === true;
+      if (!allowed() || !file || !present(file.name) || !Buffer.isBuffer(file.bytes) || !file.bytes.length || file.bytes.length > MAX_FILE_BYTES) throw Object.assign(new Error('微信文件接收人未连接、文件无效或授权已变化'), { sendOutcome: 'failed' });
+      const bytes = Buffer.from(file.bytes), name = file.name;
+      const task = s.outbound.catch(() => {}).then(async () => {
+        if (!allowed()) throw Object.assign(new Error('发送已取消、绑定或指令授权已变化'), { sendOutcome: 'failed' });
+        const result = await api.sendFile({ token: s.auth.token, baseUrl: s.auth.baseUrl, peerId: s.auth.peerId,
+          contextToken: s.auth.contextToken, name, bytes, clientId, authorize: allowed,
+          signal: signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal });
+        if (result?.status !== 'api_accepted') throw Object.assign(new Error('发送结果尚未确认'), { sendOutcome: 'uncertain' });
+        s.lastOutboundAt = now(); if (valid()) status(s, 'connected'); return result;
+      });
+      s.outbound = task; return task;
+    },
     async send(route, text, { clientId = randomUUID(), signal, authorize = () => true } = {}) {
       const s = route && states.get(route.personId);
       const valid = () => s && s.connected && s.route && s.controller && !s.controller.signal.aborted &&

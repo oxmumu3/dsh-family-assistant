@@ -20,6 +20,12 @@ function patchProfile(patch){
  if('interests'in patch&&(!Array.isArray(patch.interests)||patch.interests.length>20))fail('兴趣列表无效。');
  patch.interests?.forEach(x=>text(x,100));if('notes'in patch&&(typeof patch.notes!=='string'||patch.notes.length>2000))fail('资料说明过长。');return clone(patch);
 }
+function validatePrivateState(value){
+ const plain=row=>row&&typeof row==='object'&&!Array.isArray(row);
+ if(!plain(value)||Object.keys(value).some(key=>!['version','messages','cards','requests','inputs','preferences','preferenceScopes'].includes(key))||!plain(value.preferences))fail('工作台记录格式不受支持，请保留数据后检查版本。');
+ for(const [personId,patch]of Object.entries(value.preferences)){id(personId);if(!plain(patch)||Object.keys(patch).some(key=>!['interests','notes'].includes(key)))fail('私密偏好记录格式无效。');if(Object.keys(patch).length)patchProfile(patch);}
+ if(value.preferenceScopes!==undefined){if(!plain(value.preferenceScopes)||Object.keys(value.preferenceScopes).length>10000)fail('私密偏好范围记录格式无效。');for(const [personId,scope]of Object.entries(value.preferenceScopes)){id(personId);if(typeof scope!=='string'||!/^[a-f0-9]{64}$/.test(scope))fail('私密偏好范围记录格式无效。');}}
+}
 const resultStatuses=['scheduled','api_accepted','failed','uncertain','cancelled','completed'];
 const publicCard=card=>{const {routes,...copy}=clone(card);if(copy.actions)copy.actions=copy.actions.map(({expectedRoute,...action})=>action);return copy;};
 
@@ -28,8 +34,10 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
  const file=join(directory,'workbench.json');
  let state=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{version:1,messages:[],cards:[],requests:[],inputs:[],preferences:{}};
  if(state.version!==1||['messages','cards','requests','inputs'].some(k=>!Array.isArray(state[k]))||!state.preferences||typeof state.preferences!=='object')fail('工作台记录格式不受支持，请保留数据后检查版本。');
+ validatePrivateState(state);
  let queue=Promise.resolve();
  function persist(){
+  validatePrivateState(state);
   const data=JSON.stringify(state,null,2)+'\n';if(Buffer.byteLength(data)>16*1024*1024)fail('工作台记录已达到容量上限，请先导出归档。');
   const temporary=join(directory,`.workbench-${randomUUID()}.tmp`);let fd;
   try{fd=openSync(temporary,'wx',0o600);writeFileSync(fd,data);fsyncSync(fd);closeSync(fd);fd=undefined;renameSync(temporary,file);chmodSync(file,0o600);const d=openSync(directory,'r');try{fsyncSync(d);}finally{closeSync(d);}}
@@ -40,8 +48,12 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
  const getRequest=key=>state.requests.find(r=>r.id===id(key))??fail('没有找到这件请求。');
  const getItem=(card,key)=>card.actions?.find(a=>a.id===id(key))??fail('没有找到这项安排。');
  const touch=card=>{card.revision++;card.updatedAt=now();};
- const addMessage=(role,value,contextId,cardIds)=>state.messages.push({id:randomUUID(),role,text:value,at:now(),...(contextId?{contextId}:{}),...(cardIds?.length?{cardIds}:{} )});
+ const addMessage=(role,value,contextId,cardIds,requestId)=>state.messages.push({id:randomUUID(),role,text:value,at:now(),...(contextId?{contextId}:{}),...(cardIds?.length?{cardIds}:{}),...(requestId?{requestId}:{})});
  const route=personId=>{try{return store.route(personId);}catch{return null;}};
+ const preferenceScope=personId=>createHash('sha256').update(JSON.stringify(route(personId)??{unbound:personId})).digest('hex');
+ const currentPreference=personId=>{const scope=Object.hasOwn(state.preferenceScopes??{},personId)?state.preferenceScopes[personId]:undefined;const binding=store.binding(personId);const matches=scope===undefined?(!binding||binding.generation===1):scope===preferenceScope(personId);return matches&&Object.hasOwn(state.preferences,personId)?state.preferences[personId]:{};};
+ const sameRequestRoute=request=>same(request.route??null,route(request.personId));
+ const assertOwner=authorityRoute=>{if(authorityRoute&&store.person(authorityRoute.personId).role!=='owner')fail('只有 Owner 可以管理家人服务。');};
  const requestView=r=>{const{sourceId,route:captured,ownerRoute,...publicValue}=clone(r);return publicValue;};
  function snapshot(){return{messages:clone(state.messages.slice(-150)),cards:state.cards.map(publicCard),requests:state.requests.map(requestView)};}
  function context(value){
@@ -78,6 +90,7 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
    }result.dueAt=dueAt;result.timeZone=person.timeZone;
   }else if(a.type==='send_message')text(a.text,3000);
   else if(a.type==='daily_schedule'){if(typeof a.enabled!=='boolean')fail('请确认要开启还是停用日报。');if(a.enabled)validTime(a.time);}
+  else if(a.type==='presentation_service'){if(typeof a.enabled!=='boolean')fail('请确认要开启还是停用 PPT 制作。');}
   else if(a.type==='cancel_reminder'){const reminder=store.reminders(person.id).find(r=>r.id===a.reminderId);if(!reminder)fail('没有找到这位家人的提醒。');}
   else if(a.type!=='send_daily')fail('不支持这项安排。');
   return result;
@@ -131,19 +144,32 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
   fail('暂不支持这个操作，请再说明你的意图。');
  }
  function chat(input){return serial(async()=>{
-  const value=text(input.text),key=id(input.requestId),ctx=context(input.contextId),fingerprint=hash([value,ctx]);
+  assertOwner(input.authorityRoute);
+  if(Object.hasOwn(input,'profileIntake')&&input.profileIntake!==true)fail('建档模式参数无效。');
+  if(Object.hasOwn(input,'profileEdit')&&input.profileEdit!==true)fail('资料编辑模式参数无效。');if(input.profileEdit&&(input.profileIntake||input.draftOnly))fail('资料编辑不能同时作为新建或项目草稿。');
+  if(Object.hasOwn(input,'draftOnly')&&input.draftOnly!==true)fail('草稿模式参数无效。');
+  const value=text(input.text),key=id(input.requestId),ctx=context(input.contextId),fingerprint=hash(input.profileEdit?[value,ctx,'profile-edit']:input.draftOnly?[value,ctx,'draft-only']:input.profileIntake?[value,ctx,'profile-intake']:[value,ctx]);
+  if(input.profileIntake&&ctx){const intakeCard=ctx.startsWith('card:')?getCard(ctx.slice(5)):null;if(!intakeCard||intakeCard.kind!=='profile'||intakeCard.personId||intakeCard.status!=='draft')fail('请在添加家人的资料草稿里继续补充。');}
+  const editPersonId=input.profileEdit?(ctx?.startsWith('person:')?ctx.slice(7):ctx?.startsWith('card:')&&getCard(ctx.slice(5)).kind==='profile'?getCard(ctx.slice(5)).personId:null):null;
+  if(input.profileEdit&&(!editPersonId||store.person(editPersonId).role!=='elder'))fail('请先选择要补充资料的已登记家人。');
   const prior=state.inputs.find(x=>x.id===key);if(prior){if(prior.fingerprint!==fingerprint)fail('重复的请求标识对应不同内容。');return snapshot();}
   if(!store.snapshot().people.some(p=>p.role==='owner'))fail('先登记你自己作为 Owner，再开始交代事情。');
   if(!plan)fail('尚未连接管理对话模型，请先选择 Harness 模型。');
-  const entry={id:key,fingerprint,status:'planning',at:now()};state.inputs.push(entry);addMessage('user',value,ctx);persist();
+  const entry={id:key,fingerprint,status:'planning',at:now()};state.inputs.push(entry);addMessage('user',value,ctx,undefined,key);persist();
   try{
-   const view=snapshot(),routesBefore=new Map(store.snapshot().people.map(p=>[p.id,route(p.id)]));const output=await plan({text:value,contextId:ctx,people:store.snapshot().people.map(p=>({...profileOf(p),id:p.id,role:p.role})),cards:view.cards,requests:view.requests,history:view.messages.slice(-30),now:now()});
+   const view=snapshot(),routesBefore=new Map(store.snapshot().people.map(p=>[p.id,route(p.id)]));const output=await plan({text:input.profileEdit?'这是独立的已登记家人资料编辑。仅更新当前contextId指向的这一位家人的profile；允许合并补充偏好与资料，不能创建新人、修改其他人、安排任务、确认卡片或发消息。未知信息不猜。\n用户补充：'+value:input.profileIntake?'这是独立的添加家人对话。只整理这位新家人的 profile 资料草稿；不要更新已登记成员、确认创建、开通服务或发送消息。称呼、喜欢做的事和希望助手帮的事都来自以下描述，未知信息不猜；所需帮助写入 notes。'+(ctx?'继续修正当前这张草稿。':'不要引用其他卡片。')+'\n用户描述：'+value:value,contextId:ctx,people:store.snapshot().people.filter(p=>!input.profileEdit||p.id===editPersonId).map(p=>({...profileOf(p),id:p.id,role:p.role})),cards:input.profileEdit?view.cards.filter(card=>card.kind==='profile'&&card.personId===editPersonId):view.cards,requests:input.profileEdit?[]:view.requests,history:(input.profileEdit?view.messages.filter(message=>message.contextId===ctx):view.messages).slice(-30),now:now()});
    const result=parseWorkbenchReply(JSON.stringify(output));if(input.authorize&&!input.authorize())fail('指令期间服务或你的绑定已改变，未执行。');
+   if(input.draftOnly&&result.operation){
+    const op=result.operation,existing=op.cardId?getCard(op.cardId):ctx?.startsWith('card:')?getCard(ctx.slice(5)):null;
+    if(!['profile','plan','reply_request'].includes(op.type)||(op.type==='profile'&&(op.personId||existing?.personId||ctx?.startsWith('person:'))))fail('项目助手只能整理待确认草稿，请在家庭助手卡片上确认后执行。');
+   }
+   if(input.profileEdit&&result.operation){const op=result.operation;if(op.type!=='profile'||op.personId&&op.personId!==editPersonId||op.cardId&&getCard(op.cardId).personId!==editPersonId)fail('资料编辑只能修改当前家人的资料，不能安排其他操作。');}
+   if(input.profileIntake&&result.operation){const op=result.operation;if(op.type!=='profile'||op.personId||(op.cardId&&op.cardId!==ctx?.slice(5)))fail('添加家人只整理新资料草稿，请核对后点击确认创建。');}
    for(const a of result.operation?.actions??[]){if(!same(routesBefore.get(a.personId),route(a.personId)))fail('家人的绑定在理解指令时发生变化，请核对后重说。');}
    const cardIds=await applyOperation(result.operation,ctx,value,input.authorityRoute);
    const reply=result.operation?.type==='profile'?(getCard(cardIds[0]).status==='saved'?'资料已更新，可以撤销上次修正。':'已整理成资料卡。核对后保存，再由家人本人连接微信。'):result.operation?.type==='plan'||result.operation?.type==='reply_request'?'已整理好，请核对卡片中的对象、内容与时间后确认。':result.operation?.type==='cancel'?'已取消可取消的安排，其他事项保留。':result.operation?.type==='confirm'?'已按卡片处理，请查看各项实际状态。':result.reply;
-   addMessage('assistant',reply,ctx,cardIds);entry.status='complete';persist();return snapshot();
-  }catch(error){entry.status='failed';addMessage('assistant',safeError(error)+' 你可以补充说明后再试。',ctx);persist();return snapshot();}
+   addMessage('assistant',reply,ctx,cardIds,key);entry.status='complete';persist();return snapshot();
+  }catch(error){entry.status='failed';addMessage('assistant',safeError(error)+' 你可以补充说明后再试。',ctx,undefined,key);persist();return snapshot();}
  });}
  async function runItem(card,action,authorityRoute){
   action.status='running';action.attempt=(action.attempt??0)+1;action.detail='正在处理';touch(card);persist();
@@ -156,6 +182,7 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
   summarize(card);touch(card);persist();
  }
  async function confirmInternal({cardId,revision,authorityRoute}){
+  assertOwner(authorityRoute);
   const card=getCard(cardId);
   if(card.kind==='profile'&&card.status==='saved')return snapshot();
   if(card.kind==='plan'&&!card.actions.some(a=>a.status==='draft'))return snapshot();
@@ -181,7 +208,7 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
  }
  function createRequest({personId,text:value,sourceId}){
   const person=store.person(personId);if(person.role!=='elder')fail('只有家人可以发起此请求。');text(value,2000);text(sourceId,512);
-  const key='request-'+hash([personId,sourceId]);let request=state.requests.find(r=>r.id===key);if(request)return clone(request);
+  const key='request-'+hash([personId,sourceId,route(personId)]);let request=state.requests.find(r=>r.id===key);if(request)return clone(request);
   const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)fail('尚未设置家庭联系人。');
   request={id:key,personId,text:value,status:'open',sourceId,route:route(personId),ownerRoute:route(owner.id),createdAt:now(),updatedAt:now(),responses:[]};state.requests.push(request);persist();return clone(request);
  }
@@ -204,16 +231,19 @@ export function createWorkbench({directory,store,plan,execute,check=async()=>nul
  persist();
  return{
   refresh(){let dirty=false;for(const card of state.cards)for(const action of card.actions??[]){if(!['scheduled','uncertain'].includes(action.status))continue;const result=check({...clone(action),cardId:card.id,sourceKey:`workbench:${card.id}:${action.id}:${action.attempt}`});if(result&&typeof result.then!=='function'&&resultStatuses.includes(result.status)&&result.status!==action.status){Object.assign(action,result);touch(card);summarize(card);dirty=true;}}if(dirty)persist();},
-  snapshot,chat,confirm:args=>serial(()=>confirmInternal(args)),cancel:args=>serial(()=>cancelInternal(args)),
+  snapshot,chat,
+  external(input,handler){return serial(async()=>{assertOwner(input.authorityRoute);const value=text(input.text),key=id(input.requestId),fingerprint=hash(['external',value,input.contextId??null]);const prior=state.inputs.find(row=>row.id===key);if(prior){if(prior.fingerprint!==fingerprint)fail('重复的请求标识对应不同内容。');return snapshot();}const entry={id:key,fingerprint,status:'planning',at:now()};state.inputs.push(entry);addMessage('user',value,null,undefined,key);persist();try{const result=await handler();addMessage('assistant',text(result.reply,24000),null,undefined,key);if(result.taskId)state.messages.at(-1).taskId=result.taskId;entry.status='complete';}catch(error){entry.status='failed';addMessage('assistant',safeError(error),null,undefined,key);}persist();return snapshot();});},
+  appendExternal({reply,requestId,taskId}){return serial(()=>{const key=id(requestId);if(!state.messages.some(row=>row.requestId===key)){addMessage('assistant',text(reply,24000),null,undefined,key);if(taskId)state.messages.at(-1).taskId=taskId;persist();}return snapshot();});},
+  confirm:args=>serial(()=>confirmInternal(args)),cancel:args=>serial(()=>cancelInternal(args)),
   async retry({cardId,actionId}){return serial(async()=>{const card=getCard(cardId),action=getItem(card,actionId);if(action.status!=='failed')fail('只有明确失败的操作可以重试；未知结果请先核对。');await runItem(card,action);return snapshot();});},
   async check({cardId,actionId}){return serial(async()=>{const card=getCard(cardId),action=getItem(card,actionId);const result=await check({...clone(action),cardId:card.id,sourceKey:`workbench:${card.id}:${action.id}:${action.attempt}`});if(result&&resultStatuses.includes(result.status)){Object.assign(action,result);touch(card);summarize(card);persist();}return snapshot();});},
   async undo({cardId}){return serial(()=>{const card=getCard(cardId);if(!card.previousProfile||!card.personId)fail('没有可以撤销的资料修正。');if(!same(profileOf(store.person(card.personId)),card.profile))fail('资料后来已有更新，不能覆盖；请直接说明新的修改。');store.updatePerson(card.personId,card.previousProfile);card.profile=card.previousProfile;delete card.previousProfile;card.detail='已撤销上次资料修正。';touch(card);persist();return snapshot();});},
   createRequest,reply:args=>serial(()=>replyInternal(args)),
   resolve({requestId}){return serial(()=>{const request=getRequest(requestId);request.status='resolved';request.resolvedBy='owner';request.updatedAt=now();persist();return snapshot();});},
-  memberResponse({personId,requestId,text:value}){const request=getRequest(requestId);if(request.personId!==personId)fail('不能更新其他家人的请求。');if(request.status!=='waiting')fail('这件请求还没有等待本人回复。');request.responses.push({by:'elder',text:text(value,2000),at:now()});request.status='resolved';request.resolvedBy='elder';request.updatedAt=now();persist();return clone(request);},
-  memberRequests:personId=>clone(state.requests.filter(r=>r.personId===personId&&r.status!=='resolved').map(requestView)),
-  savePreference(personId,patch){store.person(personId);if(Object.keys(patch).some(k=>!['interests','notes'].includes(k)))fail('只能修改自己的陪伴偏好。');state.preferences[personId]={...(state.preferences[personId]??{}),...patchProfile(patch)};persist();},
-  memberProfile(personId){return{...store.person(personId),...clone(state.preferences[personId]??{})};},
+  memberResponse({personId,requestId,text:value}){const request=getRequest(requestId);if(request.personId!==personId)fail('不能更新其他家人的请求。');if(!sameRequestRoute(request))fail('请求属于旧微信绑定，当前成员不能回应。');if(request.status!=='waiting')fail('这件请求还没有等待本人回复。');request.responses.push({by:'elder',text:text(value,2000),at:now()});request.status='resolved';request.resolvedBy='elder';request.updatedAt=now();persist();return clone(request);},
+  memberRequests:personId=>clone(state.requests.filter(r=>r.personId===personId&&r.status!=='resolved'&&sameRequestRoute(r)).map(requestView)),
+  savePreference(personId,patch){store.person(personId);if(Object.keys(patch).some(k=>!['interests','notes'].includes(k)))fail('只能修改自己的陪伴偏好。');const updated={...currentPreference(personId),...patchProfile(patch)};state.preferences={...state.preferences,[personId]:updated};state.preferenceScopes={...(state.preferenceScopes??{}),[personId]:preferenceScope(personId)};persist();},
+  memberProfile(personId){return{...store.person(personId),...clone(currentPreference(personId))};},
   settled:()=>queue.catch(()=>{}),
  };
 }

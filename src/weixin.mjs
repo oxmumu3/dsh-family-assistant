@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { normalizeFileItem, downloadWeixinFile, uploadWeixinFile, mediaFailure } from './weixin-media.mjs';
 
 const DEFAULT_BASE = 'https://ilinkai.weixin.qq.com';
 const CHANNEL_VERSION = '2.4.10';
@@ -36,8 +37,9 @@ export function validateWeixinBaseUrl(input) {
 function businessError(value) {
   for (const key of ['ret', 'errcode']) {
     if (value[key] !== undefined && value[key] !== 0) {
+      const code=[value.errcode,value.ret].find(item=>Number.isSafeInteger(item)&&item!==0);
       return Object.assign(new Error('微信接口拒绝了请求'), {
-        ...(Number.isSafeInteger(value[key]) ? { code: value[key] } : {}), sendOutcome: 'failed',
+        ...(code!==undefined ? { code } : {}), sendOutcome: 'failed',
       });
     }
   }
@@ -48,16 +50,17 @@ function parse(text) {
     ? (context?.source ?? String(value)) : value);
 }
 function normalizeMessage(msg) {
-  const parts = []; let unsupported = false;
+  const parts = [], attachments = []; let unsupported = false;
   for (const item of Array.isArray(msg.item_list) ? msg.item_list : []) {
     if (item.type === 1 && typeof item.text_item?.text === 'string') parts.push(item.text_item.text);
     else if (item.type === 3 && nonempty(item.voice_item?.text)) parts.push(item.voice_item.text);
+    else if (item.type === 4) { const file = normalizeFileItem(item); if (file) attachments.push(file); else unsupported = true; }
     else unsupported = true;
   }
   return {
     id: String(msg.message_id ?? msg.client_id ?? ''), peerId: msg.from_user_id ?? '',
     accountId: msg.to_user_id, groupId: msg.group_id, messageType: msg.message_type,
-    text: parts.join('\n'), unsupported, contextToken: msg.context_token,
+    text: parts.join('\n'), unsupported, contextToken: msg.context_token, ...(attachments.length ? { attachments } : {}),
     ...(Number.isFinite(msg.create_time_ms) ? { at: new Date(msg.create_time_ms).toISOString() } : {}),
   };
 }
@@ -100,6 +103,20 @@ export function createWeixinApi({ fetchImpl = globalThis.fetch, baseUrl = DEFAUL
     }
   }
   return {
+    downloadFile(options) { return downloadWeixinFile(fetchImpl, options); },
+    async sendFile({ token, baseUrl: host, peerId, contextToken, bytes, name, clientId = randomUUID(), signal, authorize = () => true }) {
+      if (![token, peerId, clientId].every(nonempty)) throw mediaFailure();
+      const item = await uploadWeixinFile(fetchImpl, (body, uploadSignal) => request(host, 'ilink/bot/getuploadurl', {
+        token, signal: uploadSignal, body: { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' } },
+      }), { bytes, name, peerId, clientId, signal, authorize });
+      try { signal?.throwIfAborted(); if (authorize() !== true) throw mediaFailure(); } catch { throw mediaFailure(); }
+      const value = await request(host, 'ilink/bot/sendmessage', { token, signal, send: true, body: {
+        msg: { from_user_id: '', to_user_id: peerId, client_id: clientId, message_type: 2, message_state: 2,
+          item_list: [item], ...(contextToken ? { context_token: contextToken } : {}) },
+        base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' },
+      } });
+      return { status: 'api_accepted', ...(nonempty(value.message_id) ? { messageId: value.message_id } : {}) };
+    },
     async getQr({ signal } = {}) {
       const value = await request(initialBase, 'ilink/bot/get_bot_qrcode?bot_type=3', { signal, body: { local_token_list: [] } });
       if (!nonempty(value.qrcode) || !nonempty(value.qrcode_img_content)) throw new Error('微信未返回有效二维码');
