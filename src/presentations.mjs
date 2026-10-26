@@ -1,6 +1,7 @@
 import PptxGenJS from 'pptxgenjs';
 import {unzipSync} from 'fflate';
 import {inflateRawSync} from 'node:zlib';
+import {familyModelControls} from './model.mjs';
 
 const RAW_LIMIT=10*1024*1024, EXPANDED_LIMIT=5*1024*1024, TEXT_LIMIT=40000;
 const unsupported='暂时支持 TXT、Markdown、DOCX 和 PPTX 文件，请换一种格式。';
@@ -189,37 +190,46 @@ export async function renderPresentation(value){
   return{bytes,name:`${name}.pptx`};
 }
 
-class PresentationModelError extends Error{}
-const modelError=message=>{throw new PresentationModelError(message);};
+class PresentationModelError extends Error{
+  constructor(message,{code='presentation_model_schema',recoverable=false}={}){super(message);this.code=code;this.recoverable=recoverable;}
+}
+const modelError=(message,options)=>{throw new PresentationModelError(message,options);};
 async function readModel(llm,options,signal){
-  const blocks=new Map(),sealed=new Set();let terminal=false,total=0,events=0;
+  const blocks=new Map(),sealed=new Set();let terminal=null,total=0,events=0;
+  const streamError=(message,extra)=>modelError(message,{code:'presentation_model_protocol',...extra});
   try{
     for await(const chunk of llm.stream(options)){
       signal?.throwIfAborted();
-      if(!chunk||typeof chunk.type!=='string'||++events>10000)modelError('模型返回异常，未生成 PPT。');
-      if(terminal&&chunk.type!=='usage')modelError('模型在结束后继续返回内容，未生成 PPT。');
-      if(chunk.type==='error'||chunk.type.startsWith('tool-')||(chunk.type==='block-start'&&!['text','reasoning'].includes(chunk.blockType))||(chunk.type==='block-end'&&!['text','reasoning'].includes(chunk.block?.type)))modelError('模型返回异常或工具输出，未生成 PPT。');
+      if(!chunk||typeof chunk.type!=='string'||++events>10000)streamError('模型返回异常，未生成 PPT。');
+      if(terminal&&chunk.type!=='usage')streamError('模型在结束后继续返回内容，未生成 PPT。');
+      if(!['block-start','text-delta','reasoning-delta','block-end','usage','finish'].includes(chunk.type)||(chunk.type==='block-start'&&!['text','reasoning'].includes(chunk.blockType))||(chunk.type==='block-end'&&!['text','reasoning'].includes(chunk.block?.type)))streamError('模型返回异常或工具输出，未生成 PPT。');
+      if(['block-start','reasoning-delta'].includes(chunk.type)&&(!Number.isSafeInteger(chunk.index)||chunk.index<0||chunk.index>127||chunk.type==='reasoning-delta'&&typeof chunk.text!=='string'))streamError('模型流格式不正确，未生成 PPT。');
       if(chunk.type==='text-delta'||(chunk.type==='block-end'&&chunk.block?.type==='text')){
-        if(!Number.isSafeInteger(chunk.index)||chunk.index<0||chunk.index>127)modelError('模型流格式不正确，未生成 PPT。');
+        if(!Number.isSafeInteger(chunk.index)||chunk.index<0||chunk.index>127)streamError('模型流格式不正确，未生成 PPT。');
         const text=chunk.type==='text-delta'?chunk.text:chunk.block.text;
-        if(typeof text!=='string'||text.length>15000)modelError('模型回复过长或格式不正确，未生成 PPT。');
+        if(typeof text!=='string')streamError('模型流格式不正确，未生成 PPT。');
+        if(text.length>15000)streamError('模型回复过长，未生成 PPT。',{code:'presentation_model_output_limit'});
         if(!sealed.has(chunk.index)){
           if(chunk.type==='block-end'){total-=blocks.get(chunk.index)?.length??0;blocks.set(chunk.index,text);sealed.add(chunk.index);}
           else blocks.set(chunk.index,(blocks.get(chunk.index)??'')+text);
-          total+=text.length;if(total>15000)modelError('模型回复超过 15000 字，未生成 PPT。');
+          total+=text.length;if(total>15000)streamError('模型回复超过 15000 字，未生成 PPT。',{code:'presentation_model_output_limit'});
         }
       }
       if(chunk.type==='finish'){
-        if((typeof chunk.reason==='string'?chunk.reason:chunk.reason?.kind)!=='stop'||terminal)modelError('模型回复未完整结束，未生成 PPT。');terminal=true;
+        const reason=typeof chunk.reason==='string'?chunk.reason:chunk.reason?.kind;
+        if(!['stop','max-tokens'].includes(reason)||terminal)streamError('模型回复未完整结束，未生成 PPT。',{code:['error','aborted','tool-calls'].includes(reason)?'presentation_model_'+reason.replaceAll('-','_'):'presentation_model_protocol'});
+        terminal=reason;
       }
     }
-  }catch(error){signal?.throwIfAborted();if(error instanceof PresentationModelError)throw error;modelError('模型暂时无法完成 PPT，请稍后重试。');}
-  signal?.throwIfAborted();if(!terminal)modelError('模型回复未完整结束，未生成 PPT。');
+  }catch(error){signal?.throwIfAborted();if(error instanceof PresentationModelError)throw error;streamError('模型暂时无法完成 PPT，请稍后重试。',{code:'presentation_model_provider'});}
+  signal?.throwIfAborted();
+  if(terminal==='max-tokens')streamError('模型回复达到输出上限，未生成 PPT。',{code:'presentation_model_max_tokens',recoverable:true});
+  if(!terminal)streamError('模型回复未完整结束，未生成 PPT。',{code:'presentation_model_missing_finish',recoverable:true});
   return[...blocks].sort((a,b)=>a[0]-b[0]).map(([,text])=>text).join('');
 }
 
 function parseOutput(text,previous){
-  let output;try{output=JSON.parse(text);}catch{modelError('模型返回的 JSON 不完整，未生成 PPT。');}
+  let output;try{output=JSON.parse(text);}catch{modelError('模型返回的 JSON 不完整，未生成 PPT。',{code:'presentation_model_json',recoverable:true});}
   if(!output||!plain(output.reply,800))modelError('模型回复格式不正确，未生成 PPT。');
   if(output.needsInput===true){
     if(!object(output,['reply','needsInput'])||/(?:已经?|成功)(?:发送|送达|收到|完成|做好)/.test(output.reply))modelError('模型补充信息请求格式不正确。');
@@ -254,8 +264,16 @@ export function createPresentationGenerator(ctx,readConfig){
       'reply 不得声称已发送、已送达、对方已收到或手机已打开。文件生成与发送由系统分别处理。',
     ].join('\n');
     const payload={request,materials:materials.map(({name,text})=>({name,text})),preferences,...(existing?{previous:existing}:{})};
-    const raw=await readModel(llm,{provider:config.provider,model:config.model,system,messages:[{role:'user',content:[{type:'text',text:JSON.stringify(payload)}]}],tools:[],maxTokens:7000,signal},signal);
-    signal?.throwIfAborted();const result=parseOutput(raw,existing);if(result.needsInput)return result;
+    let result;
+    for(let attempt=0;attempt<2;attempt++){
+      try{
+        const raw=await readModel(llm,{provider:config.provider,model:config.model,...familyModelControls(config),system:system+(attempt?'\n上一轮未通过格式或完成校验，请根据同一需求和材料重新生成完整JSON；不要修补或引用上轮片段，不要解释错误或使用代码围栏。':''),messages:[{role:'user',content:[{type:'text',text:JSON.stringify(payload)}]}],tools:[],maxTokens:7000,signal},signal);
+        signal?.throwIfAborted();
+        try{result=parseOutput(raw,existing);}catch(error){if(error instanceof PresentationModelError)throw error;modelError('PPT内容结构未通过校验，未生成文件。');}
+        break;
+      }catch(error){signal?.throwIfAborted();if(attempt===0&&error instanceof PresentationModelError&&error.recoverable)continue;throw error;}
+    }
+    if(result.needsInput)return result;
     const artifact=await renderPresentation(result.deck);signal?.throwIfAborted();
     return{reply:`已生成 ${result.deck.slides.length} 页可编辑 PPT。`,deck:result.deck,...artifact};
   };

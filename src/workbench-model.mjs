@@ -1,6 +1,7 @@
 import {timestamp,validTime,validTimeZone} from './store.mjs';
 import {validDate} from './brief.mjs';
 import {hasExplicitOwnerTime} from './owner-commands.mjs';
+import {familyModelControls} from './model.mjs';
 
 const MAX_OUTPUT=24000;
 const has=(value,key)=>Object.hasOwn(value,key);
@@ -193,7 +194,7 @@ export function createHostWorkbenchPlanner(ctx,readConfig){
     const llm=ctx.get('llm'),config=readConfig();
     if(typeof llm?.stream!=='function'||!config?.provider||!config?.model)fail('请先在家庭助手工作台选择 Harness 模型。');
     const blocks=new Map(),sealed=new Set();let terminal,total=0;
-    try{for await(const chunk of llm.stream({provider:config.provider,model:config.model,system:SYSTEM,messages:[{role:'user',content:[{type:'text',text:JSON.stringify(payload)}]}],tools:[],maxTokens:3500,signal})){
+    try{for await(const chunk of llm.stream({provider:config.provider,model:config.model,...familyModelControls(config),system:SYSTEM,messages:[{role:'user',content:[{type:'text',text:JSON.stringify(payload)}]}],tools:[],maxTokens:3500,signal})){
       signal?.throwIfAborted();
       if(terminal&&chunk.type!=='usage')fail('工作台模型在结束后继续返回内容，未采用任何方案。');
       if(chunk.type==='error'||chunk.type?.startsWith('tool-')||(chunk.type==='block-start'&&!['text','reasoning'].includes(chunk.blockType))||(chunk.type==='block-end'&&!['text','reasoning'].includes(chunk.block?.type)))fail('工作台模型返回异常或工具输出，未采用任何方案。');

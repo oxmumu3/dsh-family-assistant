@@ -105,7 +105,7 @@ export function createPersonalOrganizer({directory,store,now=()=>new Date().toIS
     if(op){if(op.type!==action.type)fail('这条请求标识已经用于其他操作。');return{reply:op.type==='forget_note'?'这条个人记录已删除。':notes.some(row=>row.id===op.noteId)?'这条个人记录已经记下。':'这条个人记录已删除，没有重新保存。'};}
     if(state.operations.length>=2000)fail('个人记录请求达到容量上限，请先核对存储。');
     if(action.type==='remember'){
-     quoted(text,action.evidence,action.text);explicit(action.evidence,/记住|记下|存一下|保存|备忘/,'记住');if(state.notes.length>=200)fail('个人记录达到容量上限，请先删除不再需要的记录。');
+     quoted(text,action.evidence,action.text);explicit(action.evidence,/记住|记下|记一下|存一下|保存|备忘/,'记住');if(state.notes.length>=200)fail('个人记录达到容量上限，请先删除不再需要的记录。');
      const note={id:'note-'+hash([personId,bindingScope,requestId]).slice(0,48),personId,scope:bindingScope,text:action.text,evidence:action.evidence,createdAt:instant};state.notes.push(note);state.operations.push({personId,scope:bindingScope,requestId,type:'remember',noteId:note.id});persist(state);return{reply:`已记下：${note.text}。以后可以直接问我，也可以让我忘掉这条。`};
     }
     evidence(text,action.evidence);explicit(action.evidence,/忘掉|忘记|删除|删掉|不再记|清除/,'忘掉');const note=matchTarget(notes,action.noteId,text,{noun:'个人记录'});state.notes=state.notes.filter(row=>row.id!==note.id);state.operations.push({personId,scope:bindingScope,requestId,type:'forget_note',noteId:note.id});persist(state);return{reply:'已删除这条个人记录。原来的聊天消息不会因此撤回。'};

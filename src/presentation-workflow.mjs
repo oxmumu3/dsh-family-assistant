@@ -29,13 +29,14 @@ function atomic(file,data){
  try{fd=openSync(tmp,'wx',0o600);writeFileSync(fd,bytes);fsyncSync(fd);closeSync(fd);fd=undefined;renameSync(tmp,file);syncDirectory(dirname(file));}finally{if(fd!==undefined)closeSync(fd);try{unlinkSync(tmp);}catch{}}
 }
 function userError(error){
+ if(/^presentation_model_[a-z_]+$/.test(error?.code??''))return'材料已保留。你可以说“继续”，我再试一次。';
  const message=String(error?.message??'请稍后重试。');
  if(error?.code||error?.path||error?.syscall||/\/(?:Users|var|private|tmp|home|etc)\//.test(message))return'文件读写暂时失败，已保存的材料和成果会保留。请稍后说“继续”。';
  return /token|bearer|credential|secret|https?:\/\//i.test(message)?'请稍后重试。':message.slice(0,180);
 }
 
 /** Fixed PPT capability. Admission is durable before the channel checkpoints an inbound page. */
-export function createPresentationWorkflow({directory,store,generate,extract,download,send,now=()=>new Date().toISOString()}={}){
+export function createPresentationWorkflow({directory,store,generate,extract,download,send,defaultEnabled=false,now=()=>new Date().toISOString()}={}){
  const file=join(directory,'presentations.json'),artifacts=join(directory,'presentation-files');
  if(existsSync(file)&&lstatSync(file).isSymbolicLink())fail('PPT记录路径无效。');
  const state=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{version:1,services:{},tasks:[],inputs:[]};checkState(state);
@@ -48,9 +49,9 @@ export function createPresentationWorkflow({directory,store,generate,extract,dow
  }
  for(const input of state.inputs)if(['planned','queued','running'].includes(input.status)){input.status='interrupted';recovered=true;}
  if(recovered)persist();
- function service(personId){store.person(personId);return state.services[personId]??{enabled:false,epoch:0};}
+ function service(personId){store.person(personId);return state.services[personId]??{enabled:defaultEnabled===true,epoch:0};}
  function latest(personId,route){return state.tasks.filter(t=>t.personId===personId&&sameRoute(t.route,route)).at(-1);}
- function update(task,status,detail=statusNames[status]){task.status=status;task.detail=detail;task.updatedAt=now();persist();}
+ function update(task,status,detail=statusNames[status]){task.status=status;if(status!=='failed')delete task.errorCode;task.detail=detail;task.updatedAt=now();persist();}
  function invalidate(personId,route){
   for(const {personId:id,control} of controllers.values())if(id===personId)control.abort();
   const last=route?latest(personId,route):null;
@@ -66,10 +67,13 @@ export function createPresentationWorkflow({directory,store,generate,extract,dow
  function configure(personId,enabled){
   if(store.person(personId).role!=='elder'||typeof enabled!=='boolean')fail('请选择家人并明确开启或停用PPT。');
   if(enabled&&(!generate||!extract||!download||!send))fail('PPT制作依赖尚未就绪，未开通。');
-  const old=service(personId);if(old.enabled===enabled)return;
+  const old=service(personId);if(old.enabled===enabled){
+   if(!Object.hasOwn(state.services,personId)){state.services[personId]={enabled,epoch:old.epoch};persist();}
+   return;
+  }
   state.services[personId]={enabled,epoch:old.epoch+1};if(!enabled)invalidate(personId);persist();
  }
- function snapshot(){return{available:Boolean(generate&&extract&&download&&send),people:store.snapshot().people.filter(p=>p.role==='elder').map(p=>({personId:p.id,enabled:service(p.id).enabled})),tasks:state.tasks.map(t=>{const p=store.person(t.personId);return{id:t.id,personId:t.personId,status:t.status,version:t.version,detail:statusNames[t.status],updatedAt:t.updatedAt,...(p.shareWithOwner!=='none'&&t.deck?{title:t.deck.title}:{})};})};}
+ function snapshot(){return{available:Boolean(generate&&extract&&download&&send),people:store.snapshot().people.filter(p=>p.role==='elder').map(p=>({personId:p.id,enabled:service(p.id).enabled})),tasks:state.tasks.map(t=>{const p=store.person(t.personId);return{id:t.id,personId:t.personId,bindingGeneration:t.route.generation,status:t.status,version:t.version,detail:statusNames[t.status],updatedAt:t.updatedAt,...(p.shareWithOwner!=='none'&&t.deck?{title:t.deck.title}:{})};})};}
  function cancelIfRequested(personId,route,text){
   if(!isPresentationCancel(text)||!sameRoute(store.binding(personId),route)||!latest(personId,route))return false;
   invalidate(personId,route);persist();return true;
@@ -206,6 +210,7 @@ export function createPresentationWorkflow({directory,store,generate,extract,dow
     }catch(error){update(task,error.sendOutcome==='failed'?'failed':'uncertain');return result(input,task.status==='uncertain'?'PPT已生成，但文件发送结果尚未确认。请先看微信是否有文件，我不会自动重发。':'PPT已生成，文件尚未成功提交。恢复连接后告诉我“重新发送”即可。');}
    }catch(error){
     if(!live())return interrupted();
+    if(/^presentation_model_[a-z_]+$/.test(error?.code??''))task.errorCode=error.code;else delete task.errorCode;
     update(task,'failed');return result(input,'这次PPT没有完成。'+userError(error));
    }finally{if(controllers.get(key)?.control===control)controllers.delete(key);}
   }

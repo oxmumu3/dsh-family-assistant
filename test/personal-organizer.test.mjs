@@ -202,3 +202,13 @@ test('replacement peer cannot query, select, edit or cancel previous binding cal
  assert.throws(()=>command(o,'把旧账号私密日程改成散步',{type:'update_reminder',reminderId:reminder.id,patch:{text:'散步'},evidence:'把旧账号私密日程改成散步'},'new-edit'),/本人|当前|绑定/);
  assert.equal(store.reminders('me')[0].status,'active');
 });
+
+
+test('natural 记一下 creates a private note but negative and hypothetical mentions do not authorize it',async()=>{
+ const {organizer:o}=await setup();const text='帮我记一下：备用钥匙在蓝色盒子';
+ const action={type:'remember',text:'备用钥匙在蓝色盒子',evidence:text};
+ assert.match(command(o,text,action,'natural-remember').reply,/记下/);assert.equal(o.context('me').notes.length,1);assert.equal(o.context('other').notes.length,0);
+ command(o,text,action,'natural-remember');assert.equal(o.context('me').notes.length,1);
+ for(const prefix of ['不要','假如我说']){const denied=prefix+'记一下：另一把钥匙在红色盒子';assert.throws(()=>command(o,denied,{type:'remember',text:'另一把钥匙在红色盒子',evidence:denied},prefix),/明确|尚未执行/);}
+ assert.equal(o.context('me').notes.length,1);
+});

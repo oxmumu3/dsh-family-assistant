@@ -113,11 +113,11 @@
     function renderTools(root){toolRoot=root;drawTools();if(!cachedTools)void loadTools();}
     function toolStatus(row){if(!row.executorAvailable)return'执行服务尚未就绪';if(!row.ready&&row.reason==='not_assigned')return'选择家人后配置';return'资料源将在调用时核对';}
     function drawTools(){
-      if(!toolRoot||activeView!=='tools')return;toolRoot.replaceChildren();if(!people().some(p=>p.role==='owner')){rowsState(toolRoot,'先设置家庭安排人','设置你自己后，再为家人配置工具。');return;}note(toolRoot,'已有工具按人开通；需要新工具时，家人可以在微信直接提出。','lele-source-note');
+      if(!toolRoot||activeView!=='tools')return;toolRoot.replaceChildren();if(!people().some(p=>p.role==='owner')){rowsState(toolRoot,'先设置家庭安排人','设置你自己后，再为家人配置工具。');return;}note(toolRoot,'家人可以直接在微信提出需求，乐乐会在本人的独立工作区处理。这里预设常用快捷服务；本地项目和私人资料另行授权。','lele-source-note');
       if(loadingTools&&!cachedTools)note(toolRoot,'正在读取工具…');
       if(!cachedTools&&!loadingTools){toolRoot.append(button('重新读取工具',()=>loadTools(true)));return;}
       for(const row of cachedTools||[]){const info=tools[row.toolId]||{title:row.title,description:row.description},article=el('article',null,'lele-tool-row'),copy=el('div');copy.append(el('h2',info.title),el('p',info.description),el('small',toolStatus(row)));article.append(copy,button('给家人开通',()=>openTool(row.toolId,toolPerson)));toolRoot.append(article);}
-      const assigned=(cachedAssignments||[]).filter(row=>!toolPerson||row.personId===toolPerson);toolRoot.append(el('h2','已安排给家人的工具','lele-section-heading'));
+      const assigned=(cachedAssignments||[]).filter(row=>!toolPerson||row.personId===toolPerson);toolRoot.append(el('h2','已预设的快捷服务','lele-section-heading'));
       if(!assigned.length)note(toolRoot,'选择一个工具，再决定给谁用、怎么调用或投送。');
       for(const grant of assigned){const p=person(grant.personId);if(!p)continue;const row=el('article',null,'lele-tool-row'),copy=el('div');copy.append(el('h3',p.label+'的'+(tools[grant.toolId]?.title||grant.toolId)));note(copy,[grant.allowInvoke?'本人可主动调用':'本人主动调用已关闭',grant.schedule?.enabled?`定时 ${grant.schedule.time}（${grant.schedule.timeZone}）`:'未设定时投送'].join('；'));const service=(cachedTools||[]).find(t=>t.toolId===grant.toolId);note(copy,!p.binding?.connected?'等待本人连接，尚未运行':!service?.executorAvailable?'执行服务尚未就绪':'安排已保存，资料源将在调用时核对');row.append(copy,button('查看或修改',()=>openTool(grant.toolId,p.id)));toolRoot.append(row);}
       toolRoot.append(el('h2','家人想要的新工具','lele-section-heading'));
@@ -189,13 +189,13 @@
     async function loadHarness(force=false){if(loadingHarness)return;if(cachedProjects&&cachedPolicies&&!force){drawHarness();return;}loadingHarness=true;drawHarness();const generation=ownerGeneration;try{const value=await Promise.all([post({action:'harness_projects'}),post({action:'family_access_list'})]);if(generation!==ownerGeneration)return;cachedProjects=items(value[0]);cachedPolicies=items(value[1]);}catch(e){onError(e.message);}finally{loadingHarness=false;drawHarness();}}
     function renderHarness(root){harnessRoot=root;drawHarness();if(!cachedProjects||!cachedPolicies)void loadHarness();}
     function drawHarness(){
-      if(!harnessRoot||activeView!=='arrangements')return;harnessRoot.replaceChildren();if(!people().some(p=>p.role==='owner')){rowsState(harnessRoot,'先设置家庭安排人','你自己的身份确认后，再读取项目或分配权限。');return;}note(harnessRoot,'Owner 可以调用 Harness 项目。家人只使用各自已开放的能力。','lele-source-note');
+      if(!harnessRoot||activeView!=='arrangements')return;harnessRoot.replaceChildren();if(!people().some(p=>p.role==='owner')){rowsState(harnessRoot,'先设置家庭安排人','你自己的身份确认后，再读取项目或分配权限。');return;}note(harnessRoot,'家人默认在自己的工作区办事；下面可额外共享选定的本地项目。Owner 保留原有项目能力。','lele-source-note');
       if(loadingHarness)note(harnessRoot,'正在读取项目与权限…');
       if(!cachedProjects&&!loadingHarness)harnessRoot.append(button('重新读取项目',()=>loadHarness(true)));
       for(const project of cachedProjects||[]){const row=el('article',null,'lele-tool-row'),copy=el('div');copy.append(el('h2',project.title||project.workspaceId),el('p',project.path||'已登记的本地项目','hint'));row.append(copy,button('交代一件事',()=>openDispatch(project)));harnessRoot.append(row);}
       const members=people().filter(p=>p.role!=='owner');harnessRoot.append(el('h2','家人的项目权限','lele-section-heading'));
-      for(const p of members){const policy=(cachedPolicies||[]).find(row=>row.personId===p.id),row=el('div',null,'lele-tool-row'),copy=el('div');copy.append(el('h3',p.label));note(copy,policy?.workspaceIds?.length?policy.workspaceIds.map(id=>(cachedProjects||[]).find(project=>project.workspaceId===id)?.title||id).join('、'):'尚未分配项目');row.append(copy,button('编辑权限',()=>openPermissions(p.id)));harnessRoot.append(row);}
-      note(harnessRoot,state().harness?.familyExecution==='protected_executor_required'?'家人自由调用原生项目尚未开通；目前可以使用已分配的受控工具。':'家人的项目任务使用受控工具，只读已授权资料；生成专属文稿需另开权限。');
+      for(const p of members){const policy=(cachedPolicies||[]).find(row=>row.personId===p.id),row=el('div',null,'lele-tool-row'),copy=el('div');copy.append(el('h3',p.label));note(copy,policy?.workspaceIds?.length?policy.workspaceIds.map(id=>(cachedProjects||[]).find(project=>project.workspaceId===id)?.title||id).join('、'):'个人工作区可用，尚未额外共享本地项目');row.append(copy,button('编辑权限',()=>openPermissions(p.id)));harnessRoot.append(row);}
+      note(harnessRoot,state().harness?.familyExecution==='protected_executor_required'?'家人的个人工作区可以直接办事；本地项目仍需按范围授权。':'家人可以直接生成与修改本人文稿；本地项目按额外授予的资料和操作范围处理。');
       harnessRoot.append(el('h2','项目任务与结果','lele-section-heading'));
       const tasks=state().harness?.tasks||[];if(!tasks.length)note(harnessRoot,'还没有通过乐乐派发的项目任务。');
       for(const task of tasks.slice().reverse()){
