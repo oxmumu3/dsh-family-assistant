@@ -43,3 +43,16 @@ test('bundled native fetch bridge is executable and maps control and QR requests
   assert.equal(target.window.fetch('/family/api?personId=dad').url,'/api/family/control?personId=dad');
   assert.equal(target.window.fetch('/family/qr.svg?personId=dad').url,'/api/family/qr?personId=dad');
 });
+
+test('native workbench closes over all local styles, scripts and images without external asset requests',async()=>{
+ const{bundledWorkbench}=await import('../src/http.mjs');const page=await bundledWorkbench();
+ assert.doesNotMatch(page,/<(?:script|link)\b[^>]*(?:src|href)=["']\/family\//i);
+ assert.doesNotMatch(page,/<img\b[^>]*\ssrc=["']\/family\//i);
+});
+
+test('tool configuration errors explain a next step without exposing internal error codes',async()=>{
+ const{createHttpHandler}=await import('../src/http.mjs');
+ const handler=createHttpHandler({runtime:{action:async()=>{throw Object.assign(new Error('member_inactive'),{code:'member_inactive'});}}});
+ const response=await handler(new Request('http://127.0.0.1/family/api',{method:'POST',headers:{'Content-Type':'application/json','X-Family-Action':'1'},body:JSON.stringify({action:'tool_invoke'})}));
+ const value=await response.json();assert.equal(response.status,400);assert.match(value.error,/微信还未连接/);assert.doesNotMatch(value.error,/member_inactive/);
+});

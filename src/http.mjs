@@ -1,6 +1,7 @@
 import {readFile} from 'node:fs/promises';
 import QRCode from 'qrcode';
 import {VOICE_BODY_LIMIT} from './voice-host.mjs';
+import {serviceSetupErrorText} from './service-setup.mjs';
 
 const web=new URL('../web/',import.meta.url);
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'};
@@ -13,6 +14,9 @@ function trusted(request){
 }
 function errorText(error){
   const text=String(error?.message??'未完成操作，请刷新后重试。');
+  if(String(error?.code??text).startsWith('service_'))return serviceSetupErrorText(error);
+  const messages={member_inactive:'这位家人的微信还未连接。可以先保存安排，连接后再调用。',not_granted:'这位家人尚未开通这项工具，请先在工具库保存安排。',not_configured:'这项工具的执行服务尚未就绪，请检查工具配置。',authorization_changed:'权限或微信绑定刚刚改变，请刷新后核对再试。',request_conflict:'这个请求已有不同内容的记录，请先核对原任务。',weather_city_ambiguous:'有多个同名城市，请在工具设置中选择具体城市。',weather_city_not_found:'没有找到这个城市，请换一个明确的城市名称。',weather_unavailable:'天气来源暂时不可用，请稍后重试。',weather_not_current:'暂未取得当天的天气预报，没有发送旧预报。',owner_agent_unavailable:'Harness 原生项目服务尚未连接，请检查宿主服务。',owner_agent_controller_unavailable:'Harness 原生项目服务尚未就绪，请检查宿主服务。',owner_agent_busy:'这个项目任务仍在处理，请等待结果或打开对应的原生会话。',digest_source_unavailable:'日报项目暂时无法读取，请重新选择资料来源。',digest_read_failed:'未能读取这份日报文件，请核对所选资料是否仍然存在。',digest_unsafe_path:'这份资料不在允许的文件范围内，请重新选择普通文本文件。'};
+  if(Object.hasOwn(messages,text))return messages[text];
   return /token|bearer|credential|secret|https?:\/\//i.test(text)?'连接暂时不可用，请核对工作台状态。':text.slice(0,200);
 }
 async function boundedText(request,limit){
@@ -29,11 +33,23 @@ async function boundedText(request,limit){
   }finally{reader.releaseLock();}
 }
 export async function bundledWorkbench(){
-  const[index,style,script]=await Promise.all(['index.html','style.css','app.js'].map(name=>readFile(new URL(name,web),'utf8')));
+  const localName=value=>{const name=value.replace(/^\/family\//,'');if(!/^(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_.-]+\.(?:html|css|js|png|jpe?g|svg|webp)$/.test(name)||name.split('/').some(part=>part.startsWith('.')))throw new Error('工作台资源名称无效。');return name;};
+  const readLocal=(name,encoding)=>readFile(new URL(localName(name),web),encoding);
+  const replaceAsync=async(source,pattern,callback)=>{const matches=[...source.matchAll(pattern)],replacements=await Promise.all(matches.map(callback));let result='',offset=0;for(let i=0;i<matches.length;i++){const match=matches[i];result+=source.slice(offset,match.index)+replacements[i];offset=match.index+match[0].length;}return result+source.slice(offset);};
+  async function css(name,chain=[]){
+    name=localName(name);if(chain.includes(name))throw new Error('工作台样式存在循环引用。');
+    const source=await readLocal(name,'utf8');
+    return replaceAsync(source,/@import\s+(?:url\(\s*)?["']([^"']+)["']\s*\)?\s*;/g,match=>css(new URL(match[1],new URL(name,'http://family.local/')).pathname.slice(1),[...chain,name]));
+  }
+  let index=await readLocal('index.html','utf8');const scripts=[];
+  // Read scripts independently but retain their document order in srcdoc.
+  const scriptRefs=[...index.matchAll(/<script\b[^>]+src=["'](\/family\/[^"']+\.js)["'][^>]*><\/script>/g)];
+  scripts.push(...await Promise.all(scriptRefs.map(match=>readLocal(match[1],'utf8'))));
+  index=index.replace(/<script\b[^>]+src=["'](\/family\/[^"']+\.js)["'][^>]*><\/script>/g,'');
+  index=await replaceAsync(index,/<link\b[^>]+href=["'](\/family\/[^"']+\.css)["'][^>]*>/g,async match=>`<style>${(await css(match[1])).replace(/<\/style/gi,'<\\/style')}</style>`);
+  index=await replaceAsync(index,/<img\b[^>]*\ssrc=["'](\/family\/[^"']+\.(png|jpe?g|svg|webp))["'][^>]*>/g,async match=>{const type={png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',svg:'image/svg+xml',webp:'image/webp'}[match[2]],bytes=await readLocal(match[1]);return match[0].replace(match[1],`data:${type};base64,${bytes.toString('base64')}`);});
   const shim=`window.fetch=(input,init)=>{const u=new URL(String(input),'http://family.local');const path=u.pathname==='/family/api'?'/api/family/control':u.pathname==='/family/qr.svg'?'/api/family/qr':u.pathname;return parent.__FamilyHostFetch(path+u.search,init);};`;
-  return index.replace(/<link[^>]+href="\/family\/style.css"[^>]*>/,`<style>${style.replace(/<\/style/gi,'<\\/style')}</style>`)
-    .replace(/<script[^>]+src="\/family\/app.js"[^>]*><\/script>/,'')
-    .replace('</body>',`<script>${shim}</script><script>${script.replace(/<\/script/gi,'<\\/script')}</script></body>`);
+  return index.replace('</body>',`<script>${shim}</script>${scripts.map(script=>`<script>${script.replace(/<\/script/gi,'<\\/script')}</script>`).join('')}</body>`);
 }
 
 export function createHttpHandler({runtime,catalog=async()=>({available:false,providers:[]}),voice,mode='production'}={}){
@@ -77,7 +93,7 @@ export function createHttpHandler({runtime,catalog=async()=>({available:false,pr
           let input;try{input=JSON.parse(body);}catch{return json({error:'请求格式不正确。'},400);}
           snapshot=await runtime.action(input);
         }else return new Response(null,{status:405,headers});
-        return json({...snapshot,mode,model:await catalog()});
+        return json({...Array.isArray(snapshot)?{items:snapshot}:snapshot,mode,model:await catalog()});
       }
       if(request.method!=='GET'&&request.method!=='HEAD')return json({error:'不支持此方法。'},405);
       if(path==='/family/qr.svg'){
@@ -89,7 +105,8 @@ export function createHttpHandler({runtime,catalog=async()=>({available:false,pr
         return new Response(request.method==='HEAD'?null:svg,{headers:{...headers,'Content-Type':'image/svg+xml; charset=utf-8'}});
       }
       const assets={'/family/':['index.html','text/html'],'/family':['index.html','text/html'],'/family/app.js':['app.js','text/javascript'],'/family/style.css':['style.css','text/css']};
-      const asset=assets[path];if(!asset)return json({error:'没有找到此页面。'},404);
+      const local=path.match(/^\/family\/((?:assets\/)?[A-Za-z0-9_-]+\.(css|js|png|svg|webp))$/),types={css:'text/css',js:'text/javascript',png:'image/png',svg:'image/svg+xml',webp:'image/webp'};
+      const asset=assets[path]??(local?[local[1],types[local[2]]]:null);if(!asset)return json({error:'没有找到此页面。'},404);
       const native=url.pathname==='/api/family/workbench';
       const body=native?await bundledWorkbench():await readFile(new URL(asset[0],web));
       return new Response(request.method==='HEAD'?null:body,{headers:{...headers,'Content-Type':`${asset[1]}; charset=utf-8`,'Content-Security-Policy':"default-src 'self'; img-src 'self' blob: data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"}});

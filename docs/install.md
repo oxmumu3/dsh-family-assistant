@@ -1,6 +1,8 @@
 # 安装与首次接入
 
-此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.6.tgz`。通过 GitHub Release 分发预览版，未上架官方插件市场。
+此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.19.tgz`。通过 GitHub Release 分发预览版，未上架官方插件市场。
+
+本版为固定预览发行；以 Release 页实际资产和 SHA256SUMS 为准，勿将本地开发包路径作为公开下载入口。
 
 ## 桌面端
 
@@ -9,7 +11,7 @@
 也可以切到 Harness“创造模式”，让它通过原生 `plugin_manager` 的 `install_bundle` 安装本地绝对路径并启用。其他预设默认不提供这个工具；需要权限时按宿主提示批准安装。固定版本下载地址：
 
 ```text
-https://github.com/oxmumu3/dsh-family-assistant/releases/download/v0.2.0-preview.6/dsh-family-assistant-0.2.0-preview.6.tgz
+https://github.com/oxmumu3/dsh-family-assistant/releases/download/v0.2.0-preview.19/dsh-family-assistant-0.2.0-preview.19.tgz
 ```
 
 Release 页面提供 `SHA256SUMS`。如先下载到本地，核验 SHA256 后再导入；固定链接不是自动跟随更新的 latest。
@@ -17,7 +19,7 @@ Release 页面提供 `SHA256SUMS`。如先下载到本地，核验 SHA256 后再
 ## Web 端
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.6.tgz
+dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.19.tgz
 dsh web
 ```
 
@@ -39,7 +41,7 @@ CLI 须与目标宿主版本一致。当前机器全局 `dsh` 可能是更旧版
 
 1. 三人分别发送不同内容，核对各自只收到自己的回复和记录。
 2. 为一位长辈设置短时间的一次性提醒，核对后台接口回执，再由本人确认手机实际收信。
-3. 明确允许的分享范围后，Owner 预览并发送一次简报，核对只发 Owner。
+3. Owner 默认可直接查看乐乐与各家人保存的完整记录。另行选择自动简报包含哪些内容，预览并发送一次简报，核对只发 Owner。
 4. 为需要日报的成员分别开启日报，设置时区和时间；Owner 单独开启服务简报。
 5. 某一路断开时核对另外两路仍可使用；需要重新绑定时只操作那一位成员。
 6. 从 Owner 微信或网页向已绑定的指定长辈发送“给妈妈发今天的日报”或“明早八点提醒爸爸给花浇水”；先核对生成的安排，再确认执行，检查目标、当地时间、后台执行记录和实际手机接收。没有对应成员、重名、时间不明确或绑定改变时，必须不产生跨成员操作。长辈微信不能给别人安排任务。
@@ -50,6 +52,10 @@ CLI 须与目标宿主版本一致。当前机器全局 `dsh` 可能是更旧版
 ## 从旧版升级
 
 升级保留原 `family.json`、每人的微信凭据和绑定。新版在同一私有目录增加 `workbench.json`，保存管理对话、卡片、经本人允许转达的请求和每位家人的私有服务偏好。管理接口不展示家人的私有偏好。所有状态文件保持 0600。
+
+preview.7 另外增加 `presentations.json` 与 `presentation-files/`，保存已开通成员的 PPT 任务和成果；不改变微信凭据路径。Owner 本地项目会话保存在 Harness，刷新只核对原请求。preview.15 为通用 Owner 对话登记独立的 `storageDir + "-owner-workspace"` 目录，沿用 `harness-tasks.json` 保存稳定会话和每轮请求；旧记录兼容，不迁移微信凭据。微信平台主动过期登录、手动重绑或删除数据仍可能需要重新扫码。
+
+家人正在扫描或确认二维码时，等本轮扫码结束后再升级；不要通过重启、重新建档或删除私有目录更新插件。
 
 升级前确认没有正在发送的事项，私下备份存储目录，仅暂停家庭助手，然后用宿主插件管理安装新版本 tgz。安装生效后恢复原运行状态；无需重新扫码正常绑定，不自动开启日报或简报。切勿在运行中手改 profile 或删除运行锁。
 

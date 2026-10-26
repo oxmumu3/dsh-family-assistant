@@ -1,3 +1,4 @@
+import {recordMatchesBinding} from './store.mjs';
 import { addLocalDays, asInstant, buildElderDaily, buildOwnerBrief, localDate, localDateTimeToInstant } from './brief.mjs';
 
 export const CATCH_UP_MS = 120 * 60 * 1000;
@@ -23,14 +24,15 @@ export function scheduleTick(store,{now}={}) {
   const nowMs=Date.parse(instant);
   const newly=[];
   const known=new Set(state.outbox.map(o=>o.sourceKey));
-  const bound=new Set(state.bindings.map(b=>b.personId));
+  const bindingByPerson=new Map(state.bindings.map(b=>[b.personId,b]));
+  const bound=new Set(bindingByPerson.keys());
   function enqueue(input) {
     if(!bound.has(input.personId)) return null;
     const record=store.enqueue(input);
     if(!known.has(record.sourceKey)) {known.add(record.sourceKey);newly.push(record);}
     return record;
   }
-  for(const reminder of state.reminders.filter(r=>r.status==='active')) {
+  for(const reminder of state.reminders.filter(r=>r.status==='active'&&recordMatchesBinding(r,bindingByPerson.get(r.personId)))) {
     if(Date.parse(reminder.dueAt)>nowMs) continue;
     let occurrence=reminder.dueAt;
     if(reminder.repeat==='daily') {

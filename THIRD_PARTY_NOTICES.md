@@ -4,6 +4,8 @@ This package is an independent community plugin for DeepSeek Harness. It is not 
 
 - DeepSeek Harness / Cordis: host peer APIs, MIT, DeepSeek-AI. Runtime model calls use the host's configured provider; this package contains no account keys.
 - qrcode 1.5.4: MIT, Copyright (c) 2012 Ryan Day. Used to generate QR SVG locally. Its dependency distribution includes the upstream license; see `node_modules/qrcode/license` after installation.
+- PptxGenJS 4.0.1: MIT, https://github.com/gitbrent/PptxGenJS . Produces editable presentations. The package bundles this dependency and its distribution licenses; the transitive image-size dependency is pinned to 2.0.4 in the bundled tree. This workflow creates text slides and does not accept arbitrary image inputs.
+- fflate 0.8.3: MIT, https://github.com/101arrowz/fflate . Used for bounded archive checks of presentation and document materials. Its license is included in the dependency distribution.
 - Weixin protocol references: Tencent `@tencent-weixin/openclaw-weixin` 2.4.10, MIT, https://github.com/Tencent/openclaw-weixin . The QR, token, polling and sending wire shapes were checked against the published package source. This project implements its own small transport, without embedding OpenClaw or its plugin source.
 - Additional protocol cross-check: pan17/dsh-wechat and wechat-opencode (MIT). No single-user bridge runtime or private state is included.
 

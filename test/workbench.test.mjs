@@ -76,3 +76,33 @@ test('member preferences remain private from Owner planner, journal view and pro
  assert.match(wb.memberProfile('mom').notes,/不想向/);assert.doesNotMatch(JSON.stringify(wb.snapshot()),/私有|不想向/);
  await wb.chat({text:'今天怎么样',requestId:'a'});assert.doesNotMatch(JSON.stringify(input),/私有|不想向/);assert.equal(store.person('mom').notes,'');
 });
+
+test('dedicated profile editing updates only the selected existing person and remains undoable',async t=>{
+ let received;const{wb,store}=await setup(t,{plan:async input=>{received=input;return{reply:'更新资料',operation:{type:'profile',personId:'mom',patch:{notes:'新的交流偏好'}}};}});store.bindPerson('mom',{accountId:'a',peerId:'b'});const binding=store.binding('mom');await wb.chat({text:'说话简短一点',contextId:'person:mom',requestId:'edit-profile',profileEdit:true});assert.equal(store.person('mom').notes,'新的交流偏好');assert.deepEqual(received.people.map(person=>person.id),['mom']);assert.equal(wb.snapshot().cards[0].status,'saved');assert.deepEqual(store.binding('mom'),binding);await wb.undo({cardId:wb.snapshot().cards[0].id});assert.equal(store.person('mom').notes,'');
+});
+test('dedicated profile editing cannot dispatch work or change another person',async t=>{
+ for(const operation of [{type:'profile',personId:'dad',patch:{notes:'must not change'}},{type:'plan',actions:[{type:'send_daily',personId:'mom'}]}]){
+  let calls=0;const{wb,store}=await setup(t,{plan:async()=>({reply:'proposal',operation}),execute:async()=>{calls++;return{status:'completed'};}});await wb.chat({text:'补充资料',contextId:'person:mom',requestId:'bad-edit',profileEdit:true});assert.equal(calls,0);assert.equal(store.person('mom').notes,'');assert.equal(store.person('dad').notes,'');assert.equal(store.snapshot().people.length,3);assert.equal(wb.snapshot().cards.length,0);
+ }
+});
+
+test('private preferences and member requests do not cross a replacement binding, while Owner history is retained',async t=>{
+ const {wb,store,options,createWorkbench,directory}=await setup(t);store.bindPerson('mom',{accountId:'old-account',peerId:'old-peer'});
+ wb.savePreference('mom',{notes:'仅旧账号知道的私密偏好',interests:['旧账号主题']});const request=wb.createRequest({personId:'mom',text:'旧账号转达事项',sourceId:'source-1'});await wb.reply({requestId:request.id,text:'旧账号回应',operationId:'reply-private'});
+ assert.match(wb.memberProfile('mom').notes,/仅旧账号/);assert.equal(wb.memberRequests('mom').length,1);
+ store.bindPerson('mom',{accountId:'replacement-account',peerId:'replacement-peer'});
+ assert.equal(wb.memberProfile('mom').notes,'');assert.deepEqual(wb.memberProfile('mom').interests,[]);assert.deepEqual(wb.memberRequests('mom'),[]);
+ assert.throws(()=>wb.memberResponse({personId:'mom',requestId:request.id,text:'不应能接管'}),/绑定|当前/);
+ wb.savePreference('mom',{notes:'新账号偏好'});assert.equal(wb.memberProfile('mom').notes,'新账号偏好');assert.deepEqual(wb.memberProfile('mom').interests,[]);
+ const restarted=createWorkbench(options);assert.equal(restarted.memberProfile('mom').notes,'新账号偏好');assert.deepEqual(restarted.memberRequests('mom'),[]);
+ assert.equal(restarted.snapshot().requests[0].text,'旧账号转达事项');assert.doesNotMatch(JSON.stringify(restarted.snapshot()),/preferenceScopes|仅旧账号|旧账号主题|新账号偏好/);
+ assert.ok(JSON.parse(readFileSync(join(directory,'workbench.json'),'utf8')).preferenceScopes.mom);
+ const fresh=wb.createRequest({personId:'mom',text:'新账号转达事项',sourceId:'source-1'});assert.notEqual(fresh.id,request.id);assert.equal(wb.memberRequests('mom')[0].text,'新账号转达事项');
+});
+
+test('legacy unscoped private preferences remain compatible only before or during first binding',async t=>{
+ const {store,options,createWorkbench,directory}=await setup(t);const file=join(directory,'workbench.json'),state=JSON.parse(readFileSync(file,'utf8'));state.preferences.mom={notes:'旧版本私密偏好',interests:['旧主题']};delete state.preferenceScopes;const {writeFileSync}=await import('node:fs');writeFileSync(file,JSON.stringify(state));
+ let wb=createWorkbench(options);assert.equal(wb.memberProfile('mom').notes,'旧版本私密偏好');store.bindPerson('mom',{accountId:'first',peerId:'first-peer'});assert.equal(wb.memberProfile('mom').notes,'旧版本私密偏好');
+ store.bindPerson('mom',{accountId:'second',peerId:'second-peer'});wb=createWorkbench(options);assert.equal(wb.memberProfile('mom').notes,'');wb.savePreference('mom',{notes:'新的'});assert.deepEqual(wb.memberProfile('mom').interests,[]);
+ const invalid=JSON.parse(readFileSync(file,'utf8'));invalid.preferenceScopes.mom={peerId:'not-a-scope'};writeFileSync(file,JSON.stringify(invalid));assert.throws(()=>createWorkbench(options),/格式|偏好|记录/);
+});

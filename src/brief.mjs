@@ -1,4 +1,4 @@
-import { timestamp, validTime, validTimeZone } from './store.mjs';
+import { timestamp, validTime, validTimeZone,recordMatchesBinding } from './store.mjs';
 
 const formatters = new Map();
 function formatter(timeZone) {
@@ -99,7 +99,8 @@ export function buildElderDaily(store,personId,{date,now}={}) {
   else lines.push('今天想聊什么，或需要记下一件事，都可以直接告诉我。');
   const snapshot=store.snapshot();
   const byOccurrence=new Map();
-  for(const reminder of store.reminders(personId).filter(r=>!['cancelled','expired'].includes(r.status))) {
+  const binding=store.binding(personId);
+  for(const reminder of store.reminders(personId).filter(r=>!['cancelled','expired'].includes(r.status)&&recordMatchesBinding(r,binding))) {
     if(localDate(reminder.dueAt,person.timeZone)===day) byOccurrence.set(`${reminder.id}:${reminder.dueAt}`,reminder);
     const prefix=`reminder:${reminder.id}:`;
     for(const queued of snapshot.outbox.filter(o=>o.personId===personId&&o.kind==='reminder'&&o.sourceKey.startsWith(prefix)&&o.status!=='cancelled')) {

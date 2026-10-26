@@ -95,13 +95,13 @@ test('unknown send outcomes are not automatically retried',async t=>{
   assert.equal(runtime.store.snapshot().outbox.at(-1).status,'uncertain');
 });
 
-test('workbench summary never exposes unshared message or outbox text',async t=>{
+test('trusted Owner sees saved messages while outbox bodies stay outside the status projection',async t=>{
   const {runtime}=await fixture(t);
   runtime.store.updatePerson('dad',{shareWithOwner:'none'});
   await runtime.receive('dad',{id:'secret',peerId:'wx-dad',text:'未分享的私人内容'});
   const snapshot=runtime.status({personId:'dad'});
-  assert(!JSON.stringify(snapshot).includes('未分享的私人内容'));
-  assert.equal(snapshot.messages.length,0);
+  assert(snapshot.messages.some(row=>row.text==='未分享的私人内容'));
+  assert(snapshot.outbox.every(row=>!Object.hasOwn(row,'text')));
 });
 
 test('revoking sharing invalidates cached owner brief preview',async t=>{
@@ -140,4 +140,46 @@ test('manual owner brief never follows a replacement binding while model awaits'
   runtime.store.bindPerson('owner',{accountId:'new-owner-bot',peerId:'replacement'});
   release();await assert.rejects(pending,/绑定|暂停|改变/);assert.equal(sent.length,0);
   assert.equal(runtime.store.pending().length,0);
+});
+
+test('Owner history composer sends an attributed message once to the captured family binding',async t=>{
+ const {runtime,sent}=await fixture(t),request={action:'owner_send_message',personId:'mom',text:'周末一起吃饭吧',requestId:'history-message-one',bindingGeneration:1};
+ const values=await Promise.all([runtime.action(request),runtime.action(request)]);
+ assert.equal(sent.length,1);assert.equal(sent[0].route.personId,'mom');assert.equal(sent[0].text,'家庭联系人通过乐乐转达：\n周末一起吃饭吧');assert(values.every(value=>value.status==='api_accepted'));
+ assert.equal(runtime.store.messages('mom').filter(row=>row.kind==='owner_message').length,1);
+ assert.equal(runtime.status().people.find(row=>row.id==='mom').binding.generation,1);
+ await assert.rejects(()=>runtime.action({...request,text:'换一段内容'}),/已用于|冲突/);
+ assert.equal(sent.length,1);
+});
+test('Owner history composer refuses stale binding, paused service and missing message identity',async t=>{
+ const {runtime,sent}=await fixture(t),request={action:'owner_send_message',personId:'mom',text:'别忘了带伞',requestId:'history-message-two',bindingGeneration:1};
+ runtime.store.bindPerson('mom',{accountId:'replacement',peerId:'replacement-peer'});
+ await assert.rejects(()=>runtime.action(request),/绑定|连接/);
+ await assert.rejects(()=>runtime.action({...request,personId:'dad',requestId:undefined}),/标识|参数/);
+ await runtime.action({action:'pause'});await assert.rejects(()=>runtime.action({...request,personId:'dad'}),/暂停/);assert.equal(sent.length,0);
+});
+test('Owner history composer keeps an uncertain attempt durable and never sends it again',async t=>{
+ const {runtime}=await fixture(t);let calls=0;runtime.channels.send=async()=>{calls++;throw Object.assign(new Error('connection lost'),{sendOutcome:'uncertain'});};
+ const request={action:'owner_send_message',personId:'mom',text:'看到以后回我',requestId:'history-message-unknown',bindingGeneration:1};
+ assert.equal((await runtime.action(request)).status,'uncertain');assert.equal((await runtime.action(request)).status,'uncertain');assert.equal(calls,1);assert.equal(runtime.store.messages('mom').filter(row=>row.kind==='owner_message').length,0);
+});
+
+test('Owner composer sends without waiting for a family model response',async t=>{
+ let release;const wait=new Promise(resolve=>release=resolve);const {runtime,sent}=await fixture(t,async()=>{await wait;return{reply:'模型稍后回答'};});
+ const incoming=runtime.receive('mom',{id:'family-model-wait',peerId:'wx-mom',text:'你好'});await new Promise(resolve=>setImmediate(resolve));
+ const outgoing=runtime.action({action:'owner_send_message',personId:'mom',text:'我先说一句',requestId:'direct-owner-message',bindingGeneration:1});
+ const first=await Promise.race([outgoing,new Promise(resolve=>setTimeout(()=>resolve('blocked-by-model'),180))]);release();await Promise.all([incoming,outgoing]);
+ assert.notEqual(first,'blocked-by-model');assert.equal(first.status,'api_accepted');assert.equal(sent[0].text,'家庭联系人通过乐乐转达：\n我先说一句');
+});
+test('queued Owner messages cannot follow a replacement binding',async t=>{
+ const {runtime}=await fixture(t);let release;const wait=new Promise(resolve=>release=resolve),routes=[];
+ runtime.channels.send=async(route,_text,options)=>{routes.push(route);await wait;if(!options.authorize())throw Object.assign(new Error('binding changed'),{sendOutcome:'failed'});return{status:'api_accepted'};};
+ const request={action:'owner_send_message',personId:'mom',text:'第一条',requestId:'queued-owner-first',bindingGeneration:1};const first=runtime.action(request);await new Promise(resolve=>setImmediate(resolve));
+ const second=runtime.action({...request,text:'第二条',requestId:'queued-owner-second'}),refused=assert.rejects(second,/绑定/);runtime.store.bindPerson('mom',{accountId:'new-account',peerId:'new-peer'});release();await Promise.all([first,refused]);assert.equal(routes.length,1);assert.equal(routes[0].peerId,'wx-mom');
+});
+test('Owner uncertain message remains idempotent after runtime restart',async t=>{
+ const {runtime,directory}=await fixture(t);let calls=0;runtime.channels.send=async()=>{calls++;throw Object.assign(new Error('lost acknowledgement'),{sendOutcome:'uncertain'});};
+ const request={action:'owner_send_message',personId:'mom',text:'请核对这件事',requestId:'durable-owner-message',bindingGeneration:1};assert.equal((await runtime.action(request)).status,'uncertain');await runtime.close();
+ const {createRuntime}=await load(),restored=createRuntime({directory,intervalMs:60000,channelFactory:()=>({connect:async()=>{},disconnect:async()=>{},close:async()=>{},status:()=>({status:'connected'}),send:async()=>{calls++;return{status:'api_accepted'};}})});t.after(()=>restored.close());await restored.start();
+ assert.equal((await restored.action(request)).status,'uncertain');assert.equal(calls,1);assert.equal(restored.store.snapshot().outbox.filter(row=>row.kind==='owner_message').length,1);
 });
