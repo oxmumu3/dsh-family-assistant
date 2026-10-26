@@ -14,6 +14,9 @@ import {createFamilyToolExecutors,createDigestSources} from './src/family-tool-e
 import {createWeatherService} from './src/weather-service.mjs';
 import {createFamilyProjectExecutor} from './src/family-project-executor.mjs';
 import {createOwnerTaskArtifacts} from './src/owner-task-artifacts.mjs';
+import {createMemberAgent} from './src/member-agent.mjs';
+import {createMemberReportFeedback} from './src/member-report-feedback.mjs';
+import {createMemberPublicTools} from './src/member-public-tools.mjs';
 
 export const name='family-assistant';
 export const inject=['tools','llm','connection'];
@@ -39,7 +42,9 @@ export function apply(ctx,config={}){
   const familyProjectExecutor=createFamilyProjectExecutor({ownerAgent,ctx,readConfig:()=>runtime.store.snapshot().config});
   const ownerTaskArtifacts=createOwnerTaskArtifacts({ownerAgent});
   const digestSources=createDigestSources({ownerAgent,maxBytes:24000});
-  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,digestSources});
+  const memberAgent=createMemberAgent({directory:storageDir,ctx,readConfig:()=>runtime.store.snapshot().config});
+  const memberReportFeedback=createMemberReportFeedback({directory:storageDir,ctx,readConfig:()=>runtime.store.snapshot().config});
+  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,digestSources,memberAgent,memberReportFeedback,memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
   let unregister,disposal;
   const dispose=()=>disposal??=(async()=>{
     voice.dispose();

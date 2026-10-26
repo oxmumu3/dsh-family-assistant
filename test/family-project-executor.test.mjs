@@ -21,6 +21,10 @@ test('the text agent exposes only its finite project tools and no Owner/default 
  assert.doesNotMatch(JSON.stringify(f.requests[0]),/sessionId|AGENTS\.md|CLAUDE\.md/);
  assert.ok(f.checks.filter(cap=>cap==='task').length>=2);assert.ok(f.checks.filter(cap=>cap==='read').length>=2);
 });
+test('official DeepSeek project execution disables thinking without changing permissions or budget',async t=>{
+ const f=fixture(t,undefined,{readConfig:()=>({provider:'deepseek-account',model:'deepseek-flash'})});const result=await f.execute(f.input);
+ assert.equal(result.state,'succeeded');assert.equal(f.requests[0].reasoningEffort,'off');assert.equal(f.requests[0].maxTokens,3500);assert.deepEqual(f.requests[0].tools.map(row=>row.name),['list_project_files','read_project_file']);
+});
 test('an actual confined file result is returned as one official tool-role message',async t=>{
  const f=fixture(t,[tool('read_project_file',{relativePath:'notes.md'}),complete('从材料整理的回答')]);writeFileSync(join(f.workspace,'notes.md'),'SYNTHETIC_PROJECT_MATERIAL');
  const result=await f.execute(f.input);assert.equal(result.state,'succeeded');const message=f.requests[1].messages.find(row=>row.role==='tool');assert.equal(message.toolCallId,'call-1');assert.match(JSON.stringify(message.content),/SYNTHETIC_PROJECT_MATERIAL/);assert.doesNotMatch(JSON.stringify(message),new RegExp(f.workspace));
@@ -30,7 +34,7 @@ test('listing omits hidden/context/credential/link files and another family outp
  for(const name of ['readme.md','.hidden.md','AGENTS.md','credentials.md','source.js'])writeFileSync(join(f.workspace,name),'text');
  mkdirSync(join(f.workspace,'family-output','mom'),{recursive:true});mkdirSync(join(f.workspace,'family-output','dad'));symlinkSync(join(f.workspace,'readme.md'),join(f.workspace,'link.md'));
  await f.execute(f.input);const first=JSON.stringify(f.requests[1].messages.find(row=>row.role==='tool'));assert.match(first,/readme.md/);assert.doesNotMatch(first,/hidden|AGENTS|credentials|source.js|link.md/);
- const second=JSON.stringify(f.requests[2].messages.filter(row=>row.role==='tool').at(-1));assert.match(second,/mom/);assert.doesNotMatch(second,/dad/);
+ const second=JSON.stringify(f.requests[2].messages.filter(row=>row.role==='tool').at(-1).content);assert.match(second,/mom/);assert.doesNotMatch(second,/dad/);
 });
 test('missing task or read authorization prevents model and filesystem access',async t=>{
  for(const capability of ['task','read']){const f=fixture(t);f.allowed.delete(capability);const result=await f.execute(f.input);assert.equal(result.state,'failed');assert.equal(f.requests.length,0);}

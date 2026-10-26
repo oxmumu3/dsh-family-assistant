@@ -6,7 +6,7 @@ import {createWorkbench} from './workbench.mjs';
 import {buildOwnerBrief,buildElderDaily,localDate,localDateTimeToInstant} from './brief.mjs';
 import {scheduleTick} from './scheduler.mjs';
 import {createChannelManager} from './channels.mjs';
-import {parseModelReply} from './model.mjs';
+import {parseModelReply,modelFailureReply} from './model.mjs';
 import {isOwnerCommandCandidate,resolveOwnerTarget,hasExplicitOwnerTime} from './owner-commands.mjs';
 import {createPresentationWorkflow} from './presentation-workflow.mjs';
 import {createConversationHistory} from './conversation-history.mjs';
@@ -20,6 +20,7 @@ import {createMemberOnboarding} from './member-onboarding.mjs';
 import {buildServiceProgress} from './service-progress.mjs';
 import {createDigestDelivery} from './digest-delivery.mjs';
 import {createWorkflowNotifications} from './workflow-notifications.mjs';
+import {canRequestMemberOwnerHelp} from './member-agent.mjs';
 
 const displayAttachments=items=>Array.isArray(items)?items.slice(0,4).flatMap(item=>{if(typeof item?.name!=='string'||!item.name.trim())return[];const name=item.name.replace(/[\\/\x00-\x1f\x7f]/g,'_').slice(0,180),size=Number(item.size??item.len);return[{name,...(Number.isSafeInteger(size)&&size>=0&&size<=10*1024*1024?{size}:{}),...(typeof item.mimeType==='string'&&/^[-a-z0-9.+]+\/[-a-z0-9.+]+$/i.test(item.mimeType)?{mimeType:item.mimeType}:{})}];}):[];
 const sameRoute=(a,b)=>a&&b&&['personId','accountId','peerId','generation'].every(key=>a[key]===b[key]);
@@ -64,14 +65,14 @@ function exclusiveLock(directory){
   return()=>{try{if(JSON.parse(readFileSync(file,'utf8')).id===id)unlinkSync(file);}catch{}};
 }
 
-export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
+export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,memberAgent,memberReportFeedback,memberPublicTools,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
   if(typeof directory!=='string'||!directory)throw new Error('家庭助手需要独立数据目录。');
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
   try{store=createStore({directory,now});store.recoverDispatching();}catch(error){unlock();throw error;}
-  let closed=false,timer=null,ticking=null,lastBrief=null,lastBriefAccess=null,lastError=null;
+  let closed=false,timer=null,ticking=null,lastBrief=null,lastBriefAccess=null,lastError=null,runtimeReady=false;
   const managementLifecycle=new AbortController();
-  let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map();
+  let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map(),memberWork=new Map(),memberQueued=new Map();
   const safeError=error=>{
     const text=String(error?.message??'服务暂时不可用');
     if(String(error?.code??text).startsWith('service_'))return serviceSetupErrorText(error);
@@ -81,7 +82,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   let onboarding;
   const channels=channelFactory({directory:join(directory,'channels'),api,now,
     onBound:(id,identity)=>{const newBinding=!store.binding(id),binding=store.bindPerson(id,identity);onboarding?.markBound(id,identity,{newBinding});return binding;},
-    onStatus:(id,patch)=>{if(!closed&&store.person(id))store.setConnection(id,patch);},
+    onStatus:(id,patch)=>{if(!closed&&store.person(id)){store.setConnection(id,patch);if(runtimeReady&&patch.status==='connected')void resumeMemberAdmissions(id).catch(error=>{lastError=safeError(error);});}},
     onMessage:(id,message)=>receive(id,message),
   });
   let workbench,presentations,history,access,gateway,toolbox,organizer,serviceSetup,digestDelivery,workflowNotifications;
@@ -95,7 +96,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     }:undefined;
     toolbox=createFamilyToolbox({directory,store,now,executors:{...toolExecutors,...(presentationExecutor?{presentation:presentationExecutor}:{})}});
     gateway=createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,now,recoverOnCreate:false,onResult:deliverHarnessResult});
-    presentations=createPresentationWorkflow({directory,store,now,generate:generatePresentation,extract:extractMaterial,
+    presentations=createPresentationWorkflow({directory,store,now,generate:generatePresentation,extract:extractMaterial,defaultEnabled:Boolean(memberAgent&&generatePresentation&&extractMaterial&&typeof channels.sendFile==='function'&&typeof channels.downloadFile==='function'),
     download:typeof channels.downloadFile==='function'?(...args)=>channels.downloadFile(...args):undefined,
     send:typeof channels.sendFile==='function'?(...args)=>channels.sendFile(...args):undefined,
   });workbench=createWorkbench({directory,store,now,
@@ -111,20 +112,113 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     digestDelivery=createDigestDelivery({directory,store,now,flush,readDigest:async({personId,resource,source,signal})=>{
       if(typeof digestSources!=='function'||typeof toolExecutors?.ai_digest!=='function')throw new Error('日报读取服务尚未接通。');
       const verify=async()=>{const rows=await digestSources({workspaceId:resource.workspaceId,query:resource.relativePath.slice(-120),signal}),row=rows.find(item=>item.relativePath===resource.relativePath);if(!row||row.bytes!==source.bytes||row.updatedAt!==source.updatedAt)throw new Error('这份日报已变化，请重新查找后再发。');};
-      await verify();const result=await toolExecutors.ai_digest({personId,resource,signal});await verify();return{text:result.text};
+      await verify();const result=await toolExecutors.ai_digest({personId,resource,signal});await verify();
+      const route=store.route(personId),authorize=()=>current(route);
+      const adapted=memberReportFeedback?await memberReportFeedback.adaptReport({personId,route,text:result.text,sourceKey:'digest-source:'+createHash('sha256').update(JSON.stringify([resource,source])).digest('hex'),signal,authorize}):result;
+      return{text:adapted.text};
     }});
     workflowNotifications=createWorkflowNotifications({directory,store,toolbox,flush,now});
     for(const row of store.snapshot().outbox.filter(row=>['harness_result','harness_notice'].includes(row.kind)&&row.status==='pending'))store.transition(row.id,'cancelled','上次项目投递未结束，没有自动续发。');
-    onboarding=createMemberOnboarding({directory,store,toolbox,access,presentations,now,projectExecutorAvailable:Boolean(familyProjectExecutor)});
+    onboarding=createMemberOnboarding({directory,store,toolbox,access,presentations,now,projectExecutorAvailable:Boolean(familyProjectExecutor),generalAgentAvailable:Boolean(memberAgent)});
   }catch(error){void gateway?.close();void channels.close();unlock();throw error;}
+  runtimeReady=true;
   const serial=(map,key,work)=>{
     const previous=map.get(key)??Promise.resolve();const task=previous.catch(()=>{}).then(work);
     map.set(key,task);task.finally(()=>{if(map.get(key)===task)map.delete(key);}).catch(()=>{});return task;
   };
   const alive=()=>{if(closed)throw new Error('家庭助手已关闭。');};
   const current=route=>{try{return !closed&&!store.snapshot().config.paused&&sameRoute(store.route(route.personId),route);}catch{return false;}};
+  const currentMember=(person,route)=>current(route)&&channels.status(route.personId)?.status==='connected'&&store.person(person.id)?.role==='elder'&&store.person(person.id)?.createdAt===person.createdAt;
   const memberHistory=(personId,limit)=>store.messages(personId).filter(message=>recordMatchesBinding(message,store.binding(personId))).slice(-limit);
+  function memberReports(personId,route){
+    const groups=new Map();
+    for(const row of store.snapshot().outbox.filter(row=>row.personId===personId&&row.status==='api_accepted'&&sameRoute(row.route,route))){
+      let key=row.sourceKey;if(row.kind==='digest_once')key=key.replace(/:\d+$/,'');
+      else if(row.kind==='member_agent')key=key.replace(/:\d+$/,'');
+      else if(row.kind==='tool_result'&&key.startsWith('family-tool:')){try{const parts=JSON.parse(Buffer.from(key.slice(12),'base64url').toString());key=JSON.stringify(parts.slice(0,-1));}catch{continue;}}
+      else if(!['daily','elder_daily','elder-daily','manual_daily','workbench_daily','owner_message','manual','harness_result','member_agent'].includes(row.kind))continue;
+      const group=groups.get(key)??{id:'report-'+createHash('sha256').update(key).digest('hex').slice(0,48),title:'本人已收日报',text:'',at:row.createdAt,sourceKeys:[],personId,bindingGeneration:route.generation};
+      group.text+=(group.text?'\n':'')+row.text;group.sourceKeys.push(row.sourceKey);groups.set(key,group);
+    }
+    let budget=40000;return[...groups.values()].reverse().filter(row=>/日报|简报|digest|精选/i.test(row.text)).filter(row=>{const bytes=Buffer.byteLength(row.text);if(bytes>32000||bytes>budget)return false;budget-=bytes;row.title=row.text.split('\n').find(line=>/日报|简报|digest|精选/i.test(line))?.slice(0,120)??row.title;return true;}).slice(0,4).reverse();
+  }
+  async function runMemberAgent(person,route,message,text,admissionKey){
+    const signal=AbortSignal.any([lifecycle.signal,AbortSignal.timeout(120000)]),authorize=()=>currentMember(person,route),personal=organizer.context(person.id),materials=[];
+    for(const attachment of (message.attachments??[]).slice(0,3)){
+      if(!authorize())throw new Error('当前连接已经改变，未读取材料。');
+      if(typeof extractMaterial!=='function'||typeof channels.downloadFile!=='function')throw new Error('当前不能读取文件，请把需要处理的文字发来。');
+      const downloaded=await channels.downloadFile(route,attachment,{signal,authorize}),material=await extractMaterial({name:attachment.name,bytes:downloaded.bytes});
+      if(Buffer.byteLength(material.text)>32000)throw new Error('这份材料超过本次处理范围，请精简或分段后发来。');materials.push({...material,personId:person.id,bindingGeneration:route.generation});
+    }
+    let history=memberHistory(person.id,8).map(row=>({...row,text:row.text.slice(0,800)}));while(Buffer.byteLength(JSON.stringify(history))>10000)history.shift();
+    return memberAgent.run({person:workbench.memberProfile(person.id),route,text,history,reports:memberReports(person.id,route),materials,
+      notes:personal.notes.slice(-10).map(row=>({...row,text:row.text.slice(0,100)})),reminders:personal.reminders.slice(0,10).map(row=>({...row,text:row.text.slice(0,100)})),
+      signal,authorize,requestId:sourceRequest(route,message),...(admissionKey?{admissionKey}:{}),reportPreference:memberReportFeedback?.getPreference({personId:person.id,route})?.instruction??null,
+      ...(memberPublicTools?{publicTools:memberPublicTools({personId:person.id})}:{}),
+      memberTools:memberPresetTools(person,route,message,text),
+      ...(memberReportFeedback?{setReportPreference:async args=>{if(!authorize()||await args.authorize()!==true)throw new Error('当前连接已改变。');return memberReportFeedback.setPreference({personId:person.id,route,text,instruction:args.instruction,evidence:args.evidence,authorize});}}:{}),
+      requestOwnerHelp:async args=>{
+        if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted||!canRequestMemberOwnerHelp({text,evidence:args.evidence,requestText:args.text}))throw new Error('没有获得这次转告的明确同意。');
+        const request=toolbox.requestWorkflow({personId:person.id,requestId:args.requestId,text:args.text}),notification=await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal});
+        return{status:notification?.status??'recorded',requestId:request.requestId,reply:'已记录这次求助，家庭联系人可在同一需求中继续处理。'};
+      },
+      ...(typeof channels.sendFile==='function'?{deliverFile:async args=>{
+        if(!authorize()||await args.authorize()!==true)throw Object.assign(new Error('文件接收人的连接已改变。'),{sendOutcome:'failed'});
+        const receipt=await channels.sendFile(route,{name:args.name,bytes:args.bytes},{clientId:args.clientId,signal:args.signal,authorize});
+        if(receipt?.status==='api_accepted'&&authorize())store.addMessage(person.id,{id:'file-'+args.clientId,dir:'out',text:'[个人成果文件] '+args.name,kind:'member_file',attachments:[{name:args.name,size:args.bytes.length,mimeType:args.mimeType}]});
+        return receipt;
+      }}:{}),
+    });
+  }
+  function memberPresetTools(person,route,message,text){
+    const tools=[],authorize=()=>currentMember(person,route),schema=properties=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)});
+    if(respond)tools.push({name:'member_personal_organizer',description:'按用户本条真实原话查询或管理本人的便条、日程与提醒。日期时间缺项会询问；不能操作其他家人的记录。',parameters:schema({}),execute:async(args,options)=>{
+      if(await options.authorize()!==true||!authorize()||options.signal.aborted)throw new Error('当前连接或授权已改变。');
+      const personal=organizer.context(person.id),parsed=parseModelReply(JSON.stringify(await respond({person:workbench.memberProfile(person.id),ownerContact:{label:store.snapshot().people.find(p=>p.role==='owner')?.label},history:memberHistory(person.id,30),text,reminders:personal.reminders,notes:personal.notes,now:now(),signal:options.signal})));
+      options.signal.throwIfAborted();if(!authorize())throw new Error('当前连接或授权已改变。');
+      const result=parsed.action?organizer.execute({personId:person.id,text,action:parsed.action,requestId:options.requestId}):null;return{status:result?'completed':'needs_input',reply:result?.reply??parsed.reply};
+    }});
+    for(const row of toolbox.catalog({personId:person.id}).filter(row=>row.ready&&['ai_digest','weather'].includes(row.toolId))){
+      const toolId=row.toolId;tools.push({name:'member_'+toolId,description:toolId==='ai_digest'?'读取家庭联系人为本人共享的最新AI日报，可继续解释或改写；不读取来源项目里的其他文件。':'读取已为本人配置城市的今日天气预报。',parameters:schema({}),execute:async(args,options)=>{
+        if(await options.authorize()!==true||!authorize()||options.signal.aborted)throw new Error('当前连接或授权已改变。');
+        const result=await toolbox.invoke({personId:person.id,toolId,requestId:options.requestId,expectedRevision:row.revision},{signal:options.signal,authorize});
+        if(!authorize()||result.status!=='succeeded'||!toolbox.isCurrent({personId:person.id,toolId,requestId:options.requestId,revision:result.revision}))return{status:result.status??'failed',reply:'本次资料尚未取得，没有自动重试。'};
+        const value=result.result;let resultText=typeof value==='string'?value:typeof value?.text==='string'?value.text:JSON.stringify(value);
+        if(toolId==='ai_digest'&&memberReportFeedback)resultText=(await memberReportFeedback.adaptReport({personId:person.id,route,text:resultText,sourceKey:'member-preset:'+options.requestId,signal:options.signal,authorize})).text;
+        if(!authorize())throw new Error('当前连接或授权已改变。');return{status:'succeeded',text:resultText};
+      }});
+    }
+    if(presentations.snapshot().available&&presentations.snapshot().people.some(row=>row.personId===person.id&&row.enabled))tools.push({name:'member_make_presentation',description:'根据本人的要求和本次材料制作可编辑PPT并通过本人的微信回传。只在用户确实要求制作演示稿时调用，缺主题先询问。',parameters:schema({request:{type:'string',maxLength:12000}}),execute:async(args,options)=>{
+      if(await options.authorize()!==true||!authorize()||options.signal.aborted)throw new Error('当前连接或授权已改变。');
+      const result=await presentations.handle({person:workbench.memberProfile(person.id),route,message:{id:options.requestId,peerId:route.peerId,text:'制作PPT：'+args.request,...(message.attachments?.length?{attachments:message.attachments}:{})},signal:options.signal,authorize});
+      return{status:result.handled?'handled':'unavailable',reply:result.reply??'制作结果尚待核对，请查看同一会话的文件或任务状态。'};
+    }});
+    return tools;
+  }
   const briefAccess=()=>JSON.stringify(store.snapshot().people.map(p=>[p.id,p.shareWithOwner,store.binding(p.id)?.generation??0]));
+  function enqueueMember(person,route,message,text,admissionKey){
+    const requestId=sourceRequest(route,message);if(memberQueued.has(requestId))return;
+    const work=serial(memberWork,person.id,async()=>{
+      try{
+        if(!currentMember(person,route))return;
+        const previous=memberAgent.status?.({person,route,requestId,authorize:()=>currentMember(person,route)});if(['cancelled','cancelling'].includes(previous?.state))return;
+        const result=await runMemberAgent(person,route,message,text,admissionKey);if(!currentMember(person,route)||['cancelled','cancelling'].includes(result?.state))return;
+        if(typeof result?.text!=='string'||!result.text.trim()||result.text.length>24000)throw new Error('这次回复没有完成，请稍后再试。');
+        for(const[index,part]of messageParts(result.text).entries())store.enqueue({personId:person.id,text:part,kind:'member_agent',sourceKey:`member-reply:${requestId}:${index}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+        await flush(person.id);
+      }catch(error){lastError=safeError(error);if(currentMember(person,route)){memberAgent.rejectPrepared?.({person,route,requestId,authorize:()=>currentMember(person,route)});store.enqueue({personId:person.id,text:'这次处理没有完成，已有材料和处理记录已保留。请告诉我下一步想怎样继续。',kind:'error',sourceKey:'member-error:'+requestId,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});await flush(person.id);}}
+    });memberQueued.set(requestId,work);work.finally(()=>{if(memberQueued.get(requestId)===work)memberQueued.delete(requestId);}).catch(()=>{});
+  }
+  async function resumeMemberAdmissions(onlyPersonId){
+    if(closed||store.snapshot().config.paused||typeof memberAgent?.pendingInputs!=='function')return;
+    for(const person of store.snapshot().people.filter(p=>p.role==='elder'&&store.binding(p.id)&&(!onlyPersonId||p.id===onlyPersonId))){
+      const route=store.route(person.id);if(!currentMember(person,route))continue;
+      for(const input of memberAgent.pendingInputs({person,route,authorize:()=>currentMember(person,route)})){
+        const message={id:input.source.messageId,peerId:route.peerId,text:input.text,...(input.source.attachments?{attachments:input.source.attachments}:{}),...(input.source.at?{at:input.source.at}:{})};
+        store.recordInbound(person.id,{id:message.id,peerId:route.peerId,text:input.text,...(message.attachments?{attachments:displayAttachments(message.attachments)}:{}),...(message.at?{at:message.at}:{})});enqueueMember(person,route,message,input.text,input.admissionKey);
+      }
+    }
+  }
   async function preview({date:requestedDate}={}){
     const access=briefAccess(),instant=now(),value=buildOwnerBrief(store,{now:instant,...(requestedDate?{date:requestedDate}:{})});
     const owner=store.person(value.personId),date=requestedDate??localDate(instant,owner.timeZone),state=store.snapshot();
@@ -155,7 +249,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const deliveries=command.action==='send_daily'?state.outbox.filter(row=>row.id===command.resultId):state.outbox.filter(row=>row.sourceKey.startsWith(`reminder:${command.resultId}:`));
       const reminder=command.action==='remind'?state.reminders.find(row=>row.id===command.resultId):null;
       return{...command,...(reminder?.status==='cancelled'?{status:'cancelled',detail:'操作已取消'}:reminder?.status==='expired'?{status:'failed',detail:'执行未完成'}:{}),...(deliveries.length?{deliveryStatus:deliveries.at(-1).status}:{} )};
-    }),lastBrief,lastError,workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
+    }),lastBrief,lastError,runtimeWork:{responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
     if(personId){const person=store.person(personId);if(!person)throw new Error('没有找到这位家人。');result.selectedPersonId=personId;result.messages=store.messages(personId,{limit:100});}
     return result;
   }
@@ -259,6 +353,10 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           try{const person=workbench.memberProfile(personId);const generated=await respond({person,history:memberHistory(personId,12),text:`请生成今天的个人日报，约150字，包含一个与兴趣相关的具体小知识或建议。已核实的今日安排：${row.text}`,reminders:organizer.context(personId).reminders,now:now(),signal:AbortSignal.any([lifecycle.signal,AbortSignal.timeout(45000)])});
             const parsed=parseModelReply(JSON.stringify(generated));if(!parsed.action&&current(row.route))store.updatePendingText(row.id,parsed.reply);
           }catch(error){lastError=safeError(error);if(row.kind==='workbench_daily'&&store.snapshot().outbox.find(x=>x.id===row.id)?.status==='pending'){store.transition(row.id,'blocked','日报生成失败，请检查模型后重试。');continue;}}
+        }
+        if(memberReportFeedback&&['daily','elder_daily','elder-daily','manual_daily','workbench_daily'].includes(row.kind)){
+          try{const fresh=store.snapshot().outbox.find(item=>item.id===row.id);if(fresh?.status==='pending'){const adapted=await memberReportFeedback.adaptReport({personId,route:row.route,text:fresh.text,sourceKey:row.sourceKey,signal:lifecycle.signal,authorize:()=>current(row.route)});if(current(row.route))store.updatePendingText(row.id,adapted.text);}}
+          catch(error){lastError=safeError(error);const fresh=store.snapshot().outbox.find(item=>item.id===row.id);if(fresh?.status==='pending')store.transition(row.id,'blocked','本人的日报改写尚未完成，未自动重试。');continue;}
         }
         if(cancelUnauthorized(row))continue;
         if(store.snapshot().outbox.find(x=>x.id===row.id)?.status!=='pending')continue;
@@ -405,7 +503,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       });
       return result;
     }
-    const value=result.result,content=typeof value==='string'?value:typeof value?.text==='string'?value.text:JSON.stringify(value);
+    const value=result.result;let content=typeof value==='string'?value:typeof value?.text==='string'?value.text:JSON.stringify(value);
+    if(args.toolId==='ai_digest'&&memberReportFeedback){const adapted=await memberReportFeedback.adaptReport({personId:args.personId,route,text:content,sourceKey:'tool-report:'+createHash('sha256').update(JSON.stringify([args.personId,args.toolId,args.requestId,result.revision])).digest('hex'),signal:lifecycle.signal,authorize});content=adapted.text;}
     return serial(peopleWork,args.personId,async()=>{
       if(!authorize()||!toolbox.isCurrent({personId:args.personId,toolId:args.toolId,requestId:args.requestId,revision:result.revision}))return{...result,result:undefined,deliveryStatus:'suppressed'};
       let deliveryStatus;const parts=messageParts(content);
@@ -508,18 +607,22 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       return{taskId:result.id,reply:`任务已登记：${result.id}。${person.role==='owner'?`将交给 Harness 原生会话处理${recipientPersonId?'，结果发给'+store.person(recipientPersonId).label:''}；需要审批时请到 Host 核对`:'乐乐会在获准项目内处理；只能创建你的专属成果，不能改动其他源文件'}，尚未完成。`};
     }
     if(/^(?:我的工具|可用工具|查看工具|工具库)[。！!？?\s]*$/.test(value)){
-      const rows=toolbox.catalog({personId:person.id});return{reply:rows.length?rows.map(row=>`${row.title}：${row.ready?'可调用，数据源运行时检查':row.reason==='not_assigned'?'尚未分配给你':'执行服务尚未接通'}`).join('\n'):'还没有为你开通工具。告诉我想做什么，我可以把需求交给 Owner。'};
+      const rows=toolbox.catalog({personId:person.id});if(memberAgent&&person.role!=='owner')return{reply:'直接说你想办什么就好。我可以帮你解释、写稿、改稿、整理自己收到的材料、查公开信息、记事和安排提醒。'+(rows.some(row=>row.ready)?'\n已为你预设的快捷服务：'+rows.filter(row=>row.ready).map(row=>row.title).join('、'):'')};return{reply:rows.length?rows.map(row=>`${row.title}：${row.ready?'可调用，数据源运行时检查':row.reason==='not_assigned'?'尚未分配给你':'执行服务尚未接通'}`).join('\n'):'还没有为你开通工具。告诉我想做什么，我可以把需求交给 Owner。'};
     }
     const workflow=value.match(/^(?:申请(?:新)?工具|申请工作流|我想要一个工具)[：:]\s*([\s\S]+)$/);
     if(workflow){const request=toolbox.requestWorkflow({personId:person.id,requestId,text:workflow[1]});const notification=origin==='wechat'&&person.role==='elder'?await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal:lifecycle.signal}):null;return{reply:'已记下工具需求。'+(notification?.status==='api_accepted'?'已向 Owner 的微信接口提交这项请求；实际收信待本人确认。':'Owner 可在需求列表接续；微信通知尚未确认。')+'现在尚未创建或开通新工具。'};}
     const toolId=/^(?:AI\s*(?:精选)?(?:日报|digest)|看(?:一下)?AI日报|今天的AI精选)[。！!？?\s]*$/i.test(value)?'ai_digest':/^(?:天气|查天气|天气日报)[。！!？?\s]*$/.test(value)?'weather':null;
     if(toolId){
+      if(memberAgent&&person.role!=='owner'&&!toolbox.catalog({personId:person.id}).some(row=>row.toolId===toolId&&row.ready))return null;
       if(origin==='console')return{reply:'请从工具库选择接收这项工具结果的家人，或直接说“给妈妈发今天的 AI 精选”。'};
       void serial(toolWork,person.id,()=>runTool({personId:person.id,toolId,requestId},route,{notify:true})).catch(error=>{lastError=safeError(error);return serial(peopleWork,person.id,async()=>{if(current(route)){store.enqueue({personId:person.id,text:'这项工具未能执行，可能尚未开通或数据源未接通。请让 Owner 在工具库检查。',kind:'error',sourceKey:`tool-error:${requestId}`});await flush(person.id);}});});
       return{reply:'正在检查这项工具的授权和数据源，结果会在这里返回。'};
     }
     const nativeOwner=await nativeOwnerCommand(person,route,message,value,{origin});if(nativeOwner)return nativeOwner;
     const taskContext=gateway.snapshot({personId:person.id}).filter(task=>(task.origin??'wechat')===origin).sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt)).slice(-5);
+    if(memberAgent&&person.role!=='owner'&&!/^在[【「]/.test(value)&&!(taskContext.length&&isProjectFollowupText(value))){
+      const projects=/项目|Harness|本地/i.test(value)?await gateway.listProjects({personId:person.id}):[];if(!projects.length)return null;
+    }
     if(planHarness&&(/项目|Harness|本地|工具|工作流|AI.{0,10}(?:日报|精选)|天气/i.test(value)||taskContext.length&&isProjectFollowupText(value))){
       const projects=/项目|Harness|本地/i.test(value)?await gateway.listProjects({personId:person.id}):[];
       const members=person.role==='owner'?store.snapshot().people:[person];
@@ -605,19 +708,38 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const person=store.person(personId);if(!person)return{accepted:false};
       let route;try{route=store.route(personId);}catch{return{accepted:false};}
       if(message.peerId!==route.peerId)return{accepted:false};
-      const text=message.unsupported?'[不支持的媒体消息]':message.text?.trim()?message.text:message.attachments?.length?'[收到PPT文件材料]':message.text;
+      const text=message.unsupported?'[不支持的媒体消息]':message.text?.trim()?message.text:message.attachments?.length?'[收到本人上传的文件材料]':message.text;
       if(typeof text!=='string'||!text.trim())return{accepted:false};
       // Write a preparation marker before inbound dedup. Until preparation has
       // durably saved the material, the channel has not advanced its cursor and
       // only this unfinished admission may safely replay after a crash.
-      const projectTasks=planHarness&&isProjectFollowupText(text)?gateway.snapshot({personId}).filter(task=>(task.origin??'wechat')==='wechat').sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt)):[],lastProject=projectTasks.at(-1),lastPpt=presentations.snapshot().tasks.filter(task=>task.personId===personId).sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt)).at(-1),projectFollowup=Boolean(lastProject&&(!lastPpt||lastProject.updatedAt>lastPpt.updatedAt)),ambiguousFollowup=Boolean(lastProject&&lastPpt&&lastProject.updatedAt===lastPpt.updatedAt);
-      const admission=!projectFollowup&&!ambiguousFollowup&&!message.unsupported&&!store.snapshot().config.paused?presentations.admit({person,route,message}):null;
+      const projectTasks=planHarness&&isProjectFollowupText(text)?gateway.snapshot({personId}).filter(task=>(task.origin??'wechat')==='wechat').sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt)):[],lastProject=projectTasks.at(-1),lastPpt=presentations.snapshot().tasks.filter(task=>task.personId===personId&&(task.bindingGeneration===undefined?route.generation===1:task.bindingGeneration===route.generation)).sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt)).at(-1);
+      const lastMember=memberAgent?.status&&person.role==='elder'&&currentMember(person,route)?memberAgent.status({person,route,authorize:()=>currentMember(person,route)}):null,memberMetadata=lastMember?memberAgent.snapshot({personId,route}).requests?.find(row=>row.requestId===lastMember.requestId):null;
+      const memberMostRecent=Boolean(memberMetadata&&(!lastPpt||memberMetadata.updatedAt>=lastPpt.updatedAt)&&(!lastProject||memberMetadata.updatedAt>=lastProject.updatedAt));
+      const projectFollowup=Boolean(lastProject&&(!lastPpt||lastProject.updatedAt>lastPpt.updatedAt)&&!memberMostRecent),ambiguousFollowup=Boolean(lastProject&&lastPpt&&lastProject.updatedAt===lastPpt.updatedAt&&!memberMostRecent);
+      const cancelMember=/^(?:请|帮我|麻烦)?(?:停止|取消|停下|别做了).{0,24}[。！!\s]*$/.test(text.trim())&&!/提醒|日程|便条|笔记|订阅|定时/.test(text),queryMember=/^(?:查看|看看)?(?:任务)?(?:进度|进展|状态)[。？?\s]*$|^(?:处理得怎么样了?|做到哪了|刚才的任务怎么样了)[。？?\s]*$/.test(text.trim());
+      let memberControl=null;
+      if(memberAgent?.status&&person.role==='elder'&&(cancelMember||queryMember)){
+        if(lastMember&&(memberWork.has(personId)||memberMostRecent||!lastPpt&&!lastProject))memberControl={task:lastMember,cancel:cancelMember};
+      }
+      const pptExplicit=/PPT|幻灯片|演示文稿|powerpoint/i.test(text),pptPageRevision=/(?:第[一二三四五六七八九十\d]+页|这一页|那一页|封面).{0,25}(?:改|换|删|加|短|长)|^(?:把|将)?第[一二三四五六七八九十\d]+页/.test(text),pptAwaiting=lastPpt&&['collecting','needs_input'].includes(lastPpt.status)&&message.attachments?.length&&(!message.text?.trim()||/^(?:补充材料|材料来了|这是.*材料|按这些材料)/.test(text));
+      const presentationMessage=!memberAgent||!memberControl&&Boolean(pptExplicit||lastPpt&&(pptPageRevision||pptAwaiting||!memberMostRecent&&/^(?:继续|进度|取消|停止)[。？?\s]*$/.test(text.trim())));
+      const admission=presentationMessage&&!projectFollowup&&!ambiguousFollowup&&!message.unsupported&&!store.snapshot().config.paused?presentations.admit({person,route,message}):null;
+      const personalMember=/提醒|日程|便条|便笺|笔记|记事|记住|记下|忘掉|删除.*记录|(?:今天|明天|这周|本周|下周)(?:我)?(?:有|要).{0,12}(?:事|安排)/.test(text)&&!/日报|简报|digest|起草|润色|翻译|改写|写(?:稿|一|封|段|个)/i.test(text);
+      const shortcut=/^(?:AI\s*(?:精选)?(?:日报|digest)|看(?:一下)?AI日报|今天的AI精选)[。！!？?\s]*$/i.test(text)?'ai_digest':/^(?:天气|查天气|天气日报|今天天气|今天的天气)[。！!？?\s]*$/.test(text)?'weather':null;
+      const fixedMemberCommand=helpIntent(text)||isOwnerCommandCandidate(text,store.snapshot().people)||/^(?:回复需求|答复需求|补充需求|申请(?:新)?工具|申请工作流|我想要一个工具|在[【「]|(?:\/projects|查看项目|列出项目|查询项目)|我的工具|可用工具|查看工具|工具库)/.test(text)||Boolean(shortcut&&toolbox.catalog({personId}).some(row=>row.toolId===shortcut&&row.ready))||Boolean(planHarness&&/项目|Harness|本地/i.test(text)&&access.get(personId).workspaceIds.length)||Boolean(projectFollowup);
+      const memberCandidate=Boolean(memberAgent&&person.role==='elder'&&!message.unsupported&&!store.snapshot().config.paused&&!presentationMessage&&!memberControl&&!personalMember&&!fixedMemberCommand),memberKey=createHash('sha256').update(JSON.stringify([route,message.id,text,message.attachments??[]])).digest('hex');
+      let memberAdmission=null,memberPreparationError=null;
+      const memberSource={messageId:message.id,...(message.attachments?.length?{attachments:JSON.parse(JSON.stringify(message.attachments))}:{}),...(message.at?{at:message.at}:{})};
+      if(memberCandidate){try{memberAdmission=typeof memberAgent.prepare==='function'?memberAgent.prepare({person:workbench.memberProfile(personId),route,text,requestId:sourceRequest(route,message),admissionKey:memberKey,source:memberSource,authorize:()=>currentMember(person,route)}):{canRun:true};}catch(error){memberPreparationError=error;}}
       const accepted=store.recordInbound(personId,{id:message.id,peerId:message.peerId,text:text.slice(0,6000),...(message.attachments?.length?{attachments:displayAttachments(message.attachments)}:{}),...(message.at?{at:message.at}:{})});
-      if(!accepted.accepted&&!admission?.retryable){presentations.discardAdmission(admission);return accepted;}
+      if(!accepted.accepted&&!admission?.retryable&&!(memberAdmission?.prepared&&memberAdmission.canRun)){presentations.discardAdmission(admission);return accepted;}
       if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
       try{
+        if(memberPreparationError){lastError=safeError(memberPreparationError);throw new Error('这次任务没有完成准备，尚未执行。请稍后再试。');}
+        if(memberControl){const result=memberControl.cancel?memberAgent.cancel({person,route,requestId:memberControl.task.requestId,authorize:()=>current(route)}):memberControl.task;const reply=memberControl.cancel?(result.accepted?'已请求停止后续处理；已经写入或发出的文件会保留。':'这件事已经结束，没有新增操作。'):({prepared:'这件事已接收，尚未开始处理。',queued:'这件事正在排队。',running:'这件事还在处理中。你可以继续补充，也可以说“停止”。',cancelling:'正在停止后续处理。',cancelled:'已停止后续处理，已有成果和投递状态保留。',unknown:'上次处理的结果尚未确认，没有自动重新执行。',succeeded:'这件事已经处理完成。',failed:'这件事没有完成；已有材料保留，可以说明下一步。',needs_input:'这件事需要你补充信息。'}[result.state]??'当前任务状态正在核对。');if(current(route))store.enqueue({personId,text:reply,kind:'member_notice',sourceKey:'member-control:'+sourceRequest(route,message)});await flush(personId);return{accepted:true,control:true};}
         let answer;let replyKind='reply';
-        const presentation=ambiguousFollowup?{handled:true,reply:'你想继续刚才的项目资料任务，还是 PPT？请说一下项目名或 PPT，我再接着处理。'}:message.unsupported||projectFollowup?{handled:false}:await presentations.handle({person:workbench.memberProfile(personId),route,message,admission,defer:true,authorize:()=>current(route),signal:lifecycle.signal});
+        const presentation=ambiguousFollowup?{handled:true,reply:'你想继续刚才的项目资料任务，还是 PPT？请说一下项目名或 PPT，我再接着处理。'}:message.unsupported||projectFollowup||!presentationMessage?{handled:false}:await presentations.handle({person:workbench.memberProfile(personId),route,message,admission,defer:true,authorize:()=>current(route),signal:lifecycle.signal});
         if(presentation.run){
           // The private input and descriptors are durable before ingestion
           // returns. Download/extract/model/send run in the member queue, so
@@ -634,7 +756,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         if(presentation.handled){if(!presentation.reply)return{accepted:true};answer={reply:presentation.reply};replyKind='presentation';}
         else if(routed){answer=routed;replyKind='harness_command';}
         else if(message.unsupported)answer={reply:'这条图片或文件格式我暂时看不了。请发文字说明；已开通PPT制作的家人也可发TXT、Markdown、DOCX或PPTX文字材料。'};
-        else if(message.attachments?.length)answer={reply:'已收到文件，但你还没有开通PPT制作。请让家庭联系人在工作台为你开通，再把材料发来。'};
+        else if(message.attachments?.length&&!(person.role==='elder'&&memberAgent))answer={reply:'已收到文件，但你还没有开通PPT制作。请让家庭联系人在工作台为你开通，再把材料发来。'};
         else if(person.role==='owner'&&/^(?:\/brief|今日简报|今天的简报|服务简报|查看简报|日报|简报)[。！!？?\s]*$/.test(text.trim())){answer={reply:(await preview()).text};replyKind='owner_brief';}
         else if(person.role==='owner'&&planWorkbench&&!personalIntent(text)&&!/(?:提醒我(?!爸|妈|父亲|母亲)|我的.*提醒|我(?:有|设置|安排).{0,12}提醒|(?:查看|列出|取消).{0,12}我的)/.test(text)){
           const view=await workbench.chat({text,authorize:()=>current(route),authorityRoute:route,requestId:'wechat-'+createHash('sha256').update(JSON.stringify([route,message.id])).digest('hex').slice(0,40)});answer={reply:managementReply(view)};replyKind='owner_command';
@@ -642,6 +764,10 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         else if(isOwnerCommandCandidate(text,store.snapshot().people)){
           answer=person.role==='owner'?await ownerCommand(person,route,message,text):{reply:'跨成员安排需要由 Owner 发起。你可以让我为你自己设置提醒。'};
           replyKind='owner_command';
+        }
+        else if(person.role==='elder'&&memberAgent&&!personalMember){
+          if(!memberAdmission&&typeof memberAgent.prepare==='function')memberAdmission=memberAgent.prepare({person:workbench.memberProfile(personId),route,text,requestId:sourceRequest(route,message),admissionKey:memberKey,source:memberSource,authorize:()=>currentMember(person,route)});
+          if(memberAdmission?.canRun===false)return{accepted:true,queued:false,state:memberAdmission.state};enqueueMember(person,route,message,text,memberKey);return{accepted:true,queued:true,taskId:sourceRequest(route,message)};
         }
         else{
           if(!respond)throw new Error('尚未连接 Harness 模型，请在工作台选择模型后开始使用。');
@@ -673,10 +799,10 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           reply=rows.length?`您的提醒：\n${rows.map(x=>`${new Date(x.dueAt).toLocaleString('zh-CN',{timeZone:person.timeZone,hour12:false})} ${x.text}`).join('\n')}`:'您目前没有待执行的提醒。';
         }
         if(!current(route))return{accepted:true,skipped:'route_changed_or_paused'};
-        store.enqueue({personId,text:reply.slice(0,3200),kind:replyKind,sourceKey:`reply:${personId}:${route.generation}:${message.id}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+        const replyParts=replyKind==='member_agent'?messageParts(reply):[reply.slice(0,3200)];for(const[index,part]of replyParts.entries())store.enqueue({personId,text:part,kind:replyKind,sourceKey:`reply:${personId}:${route.generation}:${message.id}${index?':'+index:''}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
       }catch(error){
         lastError=safeError(error);
-        if(current(route))store.enqueue({personId,text:`这次没能处理好，尚未完成操作。${lastError}`,kind:'error',sourceKey:`error:${personId}:${route.generation}:${message.id}`,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});
+        if(current(route))store.enqueue({personId,text:modelFailureReply(error)??`这次没能处理好，尚未完成操作。${lastError}`,kind:'error',sourceKey:`error:${personId}:${route.generation}:${message.id}`,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});
       }
       await flush(personId);return{accepted:true};
     });
@@ -685,6 +811,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     alive();if(lifecycle.signal.aborted)lifecycle=new AbortController();
     store.configure({paused:false});
     await Promise.all(store.snapshot().people.filter(p=>store.binding(p.id)).map(async p=>{try{await channels.connect(p.id);}catch(error){lastError=safeError(error);}}));
+    await resumeMemberAdmissions();
     // Recover existing native intents only after channel initialization. Never
     // let a fast recovered result race the initial WeChat connection attempt.
     void gateway.tick().catch(error=>{lastError=safeError(error);});
@@ -804,13 +931,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   async function close(){
     if(closed)return;closed=true;if(timer)clearInterval(timer);lifecycle.abort();managementLifecycle.abort();
     presentations.close();
+    await memberAgent?.close?.();
     await gateway.close();
     await channels.close();
     await settled();unlock();
   }
   async function settled(){
-    do{await Promise.allSettled([workbench.settled(),gateway.settled(),...peopleWork.values(),...ownerMessageWork.values(),...presentationWork.values(),...toolWork.values(),...flushWork.values(),...(ticking?[ticking]:[])]);}
-    while(peopleWork.size||ownerMessageWork.size||presentationWork.size||toolWork.size||flushWork.size);
+    do{await Promise.allSettled([workbench.settled(),gateway.settled(),...peopleWork.values(),...ownerMessageWork.values(),...presentationWork.values(),...toolWork.values(),...memberWork.values(),...flushWork.values(),...(ticking?[ticking]:[])]);}
+    while(peopleWork.size||ownerMessageWork.size||presentationWork.size||toolWork.size||memberWork.size||flushWork.size);
   }
   return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession};
 }

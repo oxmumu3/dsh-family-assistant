@@ -1,4 +1,5 @@
 import {localDate,localDateTimeToInstant,addLocalDays} from './brief.mjs';
+import {familyModelControls} from './model.mjs';
 
 const MOM=['妈妈','妈','我妈','母亲','老妈'];
 const DAD=['爸爸','爸','我爸','父亲','老爸'];
@@ -175,7 +176,7 @@ export function createHostOwnerPlanner(ctx,readConfig){
     ].join('\n');
     const payload={owner:{id:owner.id,label:owner.label,timeZone:owner.timeZone},now,members,request:text};
     const blocks=new Map(),sealed=new Set();let terminal,total=0;
-    for await(const chunk of llm.stream({provider:config.provider,model:config.model,system,messages:[{role:'user',content:[{type:'text',text:JSON.stringify(payload)}]}],tools:[],maxTokens:1200,signal})){
+    for await(const chunk of llm.stream({provider:config.provider,model:config.model,...familyModelControls(config),system,messages:[{role:'user',content:[{type:'text',text:JSON.stringify(payload)}]}],tools:[],maxTokens:1200,signal})){
       signal?.throwIfAborted();
       if(chunk.type==='text-delta'&&!sealed.has(chunk.index)){const previous=blocks.get(chunk.index)??'';blocks.set(chunk.index,previous+chunk.text);total+=chunk.text.length;}
       else if(chunk.type==='block-end'&&chunk.block?.type==='text'&&!sealed.has(chunk.index)){total-=blocks.get(chunk.index)?.length??0;blocks.set(chunk.index,chunk.block.text);total+=chunk.block.text.length;sealed.add(chunk.index);}

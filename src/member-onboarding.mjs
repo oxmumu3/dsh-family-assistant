@@ -31,8 +31,8 @@ function statOrNull(path) { try { return lstatSync(path); } catch (error) { if (
 /** Describes actual member capabilities and admits a first-binding welcome.
  * The runtime owns its single-process lock, outbox, transport and status changes.
  * No family notes, messages, project contents or executor results are read here. */
-export function createMemberOnboarding({ directory, store, toolbox, access, presentations, projectExecutorAvailable = false, now = () => new Date().toISOString() } = {}) {
-  if (typeof directory !== 'string' || !directory.trim() || directory.length > 4096 || directory.includes('\0') || typeof store?.snapshot !== 'function' || typeof now !== 'function' || typeof projectExecutorAvailable !== 'boolean') fail('INVALID_ARGUMENT', '缺少有效的欢迎服务配置。');
+export function createMemberOnboarding({ directory, store, toolbox, access, presentations, projectExecutorAvailable = false, generalAgentAvailable = false, now = () => new Date().toISOString() } = {}) {
+  if (typeof directory !== 'string' || !directory.trim() || directory.length > 4096 || directory.includes('\0') || typeof store?.snapshot !== 'function' || typeof now !== 'function' || typeof projectExecutorAvailable !== 'boolean' || typeof generalAgentAvailable !== 'boolean') fail('INVALID_ARGUMENT', '缺少有效的欢迎服务配置。');
   const supplied = resolve(directory), before = statOrNull(supplied);
   if (before && (before.isSymbolicLink() || !before.isDirectory())) fail('UNSAFE_PATH', '欢迎记录目录不能是链接或普通文件。');
   mkdirSync(supplied, { recursive: true, mode: 0o700 });
@@ -125,15 +125,21 @@ export function createMemberOnboarding({ directory, store, toolbox, access, pres
     const capabilities = Array.isArray(policy.capabilities) ? ['read', 'task', 'write'].filter(value => policy.capabilities.includes(value)) : [];
     const available = projectExecutorAvailable && workspaceIds.length > 0 && capabilities.includes('read') && capabilities.includes('task');
     const projects = { workspaceIds, capabilities, available, canRead: available, canWrite: available && capabilities.includes('write') };
-    const lines = ['你目前可以直接让我：', '• 记事，并找回你让我保存的内容。', '• 设置日程和提醒；查看你自己的日程、提醒，按你的要求修改或取消。'];
-    const examples = ['帮我记住：周末出门要带雨伞', '明天上午九点提醒我给花浇水', '我有哪些日程和提醒？'];
+    const lines = generalAgentAvailable
+      ? ['直接告诉我想做什么，我可以：', '• 解释问题、写稿，整理、分析和修改你收到的材料和日报；需要时保存本人的稿件。', '• 查询公开信息；有来源才说明事实，查询受阻会告诉你。', '• 记事，并找回你让我保存的内容。', '• 设置日程和提醒；查看你自己的日程、提醒，按你的要求修改或取消。', '我只使用你的材料和获准资料；Owner 的私人项目仍需单独授权。', '下面的快捷工具是预设服务；解释、写稿和整理本人材料不需要先开通它们。']
+      : ['你目前可以直接让我：', '• 记事，并找回你让我保存的内容。', '• 设置日程和提醒；查看你自己的日程、提醒，按你的要求修改或取消。'];
+    const examples = generalAgentAvailable
+      ? ['把我刚收到的日报改得简短一点', '帮我写一段给朋友的祝福', '帮我查一下今天的公开信息', '明天上午九点提醒我给花浇水']
+      : ['帮我记住：周末出门要带雨伞', '明天上午九点提醒我给花浇水', '我有哪些日程和提醒？'];
     for (const item of tools) {
       let line = `• ${item.title}：`;
       if (item.allowInvoke) {
         line += item.toolId === 'ai_digest' ? '读取为你授权的日报资料。' : item.toolId === 'weather' ? '查询为你设置的城市天气。' : '发送主题和材料，制作可编辑 PPT 并继续修改。';
         examples.push(toolExamples[item.toolId]);
       }
-      if (item.scheduled) line += `每天 ${item.time}（${item.timeZone}）按安排推送${item.allowInvoke ? '。' : '，不能临时调用。'}这是由 Owner 安排的投送，想调整可以告诉我转达需求。`;
+      if (item.scheduled) line += generalAgentAvailable
+        ? `每天 ${item.time}（${item.timeZone}）按安排投送。${item.allowInvoke ? '' : '这个预设服务仅按安排投送，一般查询和材料处理仍可直接告诉我。'}这是由 Owner 安排的预设投送，想调整投送时间可以告诉我转达需求。`
+        : `每天 ${item.time}（${item.timeZone}）按安排推送${item.allowInvoke ? '。' : '，不能临时调用。'}这是由 Owner 安排的投送，想调整可以告诉我转达需求。`;
       lines.push(line);
     }
     if (projects.available) {
@@ -146,6 +152,10 @@ export function createMemberOnboarding({ directory, store, toolbox, access, pres
   }
   function shortWelcomeText(id) {
     const help = describe(id), personalized = help.tools.find(item => item.allowInvoke);
+    if (generalAgentAvailable) {
+      const ppt = help.tools.some(item => item.toolId === 'presentation' && item.allowInvoke);
+      return `我是乐乐，欢迎你。直接告诉我想做什么：解释问题、写稿，整理或修改你收到的材料和日报，也能查公开信息、记事和安排自己的提醒。${ppt ? '还可以制作并继续修改 PPT。' : ''}\n\nOwner 的私人项目需单独授权。\n试着说：“把刚收到的日报改短一点。”\n想了解更多，问“你能帮我做什么”。`;
+    }
     const example = personalized ? toolExamples[personalized.toolId] : help.projects.available ? help.examples.at(-1) : null;
     const examples = example ? [example, ...help.examples.slice(0, 2)] : help.examples.slice(0, 3);
     return `我是乐乐，欢迎你。你可以在这里让我记事、安排自己的日程提醒，也能查询、改期或取消。\n\n试着说：\n${examples.map(value => `“${value}”`).join('\n')}\n\n想看当前已开通的能力，直接问“你能帮我做什么”。`;

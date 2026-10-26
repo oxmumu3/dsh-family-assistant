@@ -14,7 +14,7 @@ const { createMemberOnboarding } = await import('../src/member-onboarding.mjs').
 const now = () => '2026-10-25T10:00:00.000Z';
 const firstIdentity = { accountId: 'synthetic-account', peerId: 'synthetic-peer' };
 
-function fixture(t, { bound = false, executors = {}, projectExecutorAvailable = false, ppt = false } = {}) {
+function fixture(t, { bound = false, executors = {}, projectExecutorAvailable = false, generalAgentAvailable = false, ppt = false } = {}) {
   assert.equal(typeof createMemberOnboarding, 'function', 'member onboarding module must be available');
   const directory = mkdtempSync(join(tmpdir(), 'member-onboarding-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -27,7 +27,7 @@ function fixture(t, { bound = false, executors = {}, projectExecutorAvailable = 
   const access = createFamilyAccess({ directory, store, now });
   const services = { available: ppt, people: [{ personId: 'member', enabled: ppt }], tasks: [] };
   const presentations = { snapshot: () => structuredClone(services) };
-  const options = { directory, store, toolbox, access, presentations, now, projectExecutorAvailable };
+  const options = { directory, store, toolbox, access, presentations, now, projectExecutorAvailable, generalAgentAvailable };
   return { directory, store, toolbox, access, services, options, onboarding: createMemberOnboarding(options) };
 }
 
@@ -272,4 +272,27 @@ test('onboarding storage rejects symlinks instead of reading or changing their t
   writeFileSync(target, 'protected synthetic target'); unlinkSync(file); symlinkSync(target, file);
   assert.throws(() => createMemberOnboarding(f.options), { code: 'UNSAFE_PATH' });
   assert.equal(readFileSync(target, 'utf8'), 'protected synthetic target');
+});
+
+test('a real general Agent is described as directly usable without project or preset-tool grants',t=>{
+ const f=fixture(t,{generalAgentAvailable:true});const help=f.onboarding.describe('member');
+ assert.deepEqual(help.tools,[]);assert.equal(help.projects.available,false);assert.match(help.text,/直接/);assert.match(help.text,/解释.*写稿|写稿.*解释/);assert.match(help.text,/整理.*修改.*(?:本人|你).*材料/);assert.match(help.text,/日报/);assert.match(help.text,/公开信息/);assert.match(help.text,/快捷工具.*预设服务/);assert.match(help.text,/Owner.*私人项目.*(?:单独|另行)授权/);assert.doesNotMatch(help.text,/先开通才能|需要先选择工具|OWNER_PRIVATE_CONTEXT|OTHER_PRIVATE_CONTEXT|PREVIOUS_PRIVATE_NOTES|PPT/);
+ assert.ok(help.examples.some(example=>/日报.*改|改.*日报/.test(example)));
+});
+
+test('the first general-Agent welcome explains direct help and preserves the existing binding baseline',t=>{
+ const f=fixture(t,{generalAgentAvailable:true});bind(f);const welcome=f.onboarding.admit('member');
+ assert.match(welcome.text,/解释.*写稿|写稿.*解释/);assert.match(welcome.text,/材料.*日报/);assert.match(welcome.text,/公开信息/);assert.match(welcome.text,/Owner.*私人项目.*授权/);assert.ok(Array.from(welcome.text).length<=220);assert.equal(f.store.snapshot().outbox.length,0);
+ const old=fixture(t,{bound:true,generalAgentAvailable:true});assert.equal(old.onboarding.admit('member'),null);old.onboarding=createMemberOnboarding(old.options);assert.equal(old.onboarding.admit('member'),null);assert.equal(old.store.snapshot().outbox.length,0);
+});
+
+test('general-Agent help describes preset subscriptions without making them a gate to ordinary help',t=>{
+ const f=fixture(t,{generalAgentAvailable:true,executors:{weather:()=>'synthetic weather'}});
+ f.toolbox.assign({actorId:'owner',personId:'member',toolId:'weather',resource:{city:'合成城市'},allowInvoke:false,schedule:{enabled:true,time:'08:15',timeZone:'Asia/Shanghai'}});
+ const help=f.onboarding.describe('member');assert.equal(help.tools[0].allowInvoke,false);assert.match(help.text,/08:15.*Asia\/Shanghai/);assert.match(help.text,/预设.*投送|预设服务.*安排/);assert.doesNotMatch(help.text,/不能临时调用|先让 Owner.*(?:工具|开通)/);assert.match(help.text,/公开信息/);
+});
+
+test('general-Agent help and welcome advertise PPT only from the live presentation state',t=>{
+ const f=fixture(t,{generalAgentAvailable:true,ppt:true});bind(f);const welcome=f.onboarding.admit('member');assert.match(welcome.text,/PPT/);assert.match(f.onboarding.describe('member').text,/PPT/);
+ f.services.people[0].enabled=false;assert.doesNotMatch(f.onboarding.describe('member').text,/PPT/);assert.doesNotMatch(f.onboarding.admit('member').text,/PPT/);assert.equal(f.onboarding.matchesWelcome({personId:'member',text:welcome.text}),false);
 });

@@ -1,6 +1,6 @@
 # 安装与首次接入
 
-此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.19.tgz`。通过 GitHub Release 分发预览版，未上架官方插件市场。
+此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.21.tgz`。通过 GitHub Release 分发预览版，未上架官方插件市场。
 
 本版为固定预览发行；以 Release 页实际资产和 SHA256SUMS 为准，勿将本地开发包路径作为公开下载入口。
 
@@ -11,7 +11,7 @@
 也可以切到 Harness“创造模式”，让它通过原生 `plugin_manager` 的 `install_bundle` 安装本地绝对路径并启用。其他预设默认不提供这个工具；需要权限时按宿主提示批准安装。固定版本下载地址：
 
 ```text
-https://github.com/oxmumu3/dsh-family-assistant/releases/download/v0.2.0-preview.19/dsh-family-assistant-0.2.0-preview.19.tgz
+https://github.com/oxmumu3/dsh-family-assistant/releases/download/v0.2.0-preview.21/dsh-family-assistant-0.2.0-preview.21.tgz
 ```
 
 Release 页面提供 `SHA256SUMS`。如先下载到本地，核验 SHA256 后再导入；固定链接不是自动跟随更新的 latest。
@@ -19,7 +19,7 @@ Release 页面提供 `SHA256SUMS`。如先下载到本地，核验 SHA256 后再
 ## Web 端
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.19.tgz
+dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.21.tgz
 dsh web
 ```
 
@@ -66,3 +66,9 @@ preview.7 另外增加 `presentations.json` 与 `presentation-files/`，保存�
 用户无需另去插件页查找或安装语音包；家庭助手调用官方插件管理能力自动完成接入。语音模型没有塞入家庭助手 tgz，首次仍需联网下载并预留约 1 GB 磁盘/内存。宿主未自带组件时只使用官方插件目录提供的安装目标；宿主不支持则明确提示更新，不使用非官方下载源。此项已验证目标版本为 0.2.1-rc.2。
 
 识别使用官方本地 SenseVoiceSmall INT8 服务，不切换宿主已有语音偏好，不把音频交给家庭对话模型或微信。音频只在内存处理；文字回填后与普通未发送草稿一样可编辑。识别期间继续打字会保留两份内容，需手动选择插入；切换家人或事项不会串入原来的录音。主窗口负责麦克风权限，工作台 iframe 只接收状态与文本。独立 npm start 预览不含宿主语音服务。
+
+## 家人的默认能力与额外授权
+
+连接微信后，家人可直接提出写稿、分析本人材料、改写已收到的日报、制作本人PPT和查询公开信息等需求，默认在该绑定独立的个人工作区处理。工具库用于预设快捷服务和定时投送；Owner本地项目另行选择共享范围，家人的普通请求不会继承Owner终端、全局记忆或其他家人的资料。明确禁止转告的内容不会作为Owner求助发送。
+
+长任务可在原微信会话询问“进度”或要求“停止刚才的任务”。家人明确说“以后日报都这样写”时，偏好只作用于本人的后续服务稿，不改写Owner源项目。

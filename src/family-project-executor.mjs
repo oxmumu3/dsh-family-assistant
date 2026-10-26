@@ -2,6 +2,7 @@ import {lstatSync,readdirSync,realpathSync,mkdirSync,openSync,fstatSync,readSync
 import {join,resolve,isAbsolute,parse,basename} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {TextDecoder} from 'node:util';
+import {familyModelControls} from './model.mjs';
 
 const FILE_LIMIT=32768,TOTAL_LIMIT=98304,OUTPUT='family-output',EXT=/\.(?:md|txt|csv|json)$/iu;
 const fail=code=>{throw Object.assign(new Error('family_project_'+code),{code});};
@@ -126,7 +127,7 @@ export function createFamilyProjectExecutor({ownerAgent,ctx,llm,readConfig,now=(
    };
    for(let round=0;round<8;round++){
     await guard('before_model','read');const canWrite=await permitted('write','tools'),tools=structuredClone(canWrite?schemas:schemas.slice(0,2));
-    const model=await response(service,{provider:config.provider,model:config.model,system,messages:structuredClone(messages),tools,maxTokens:3500,signal});await guard('after_model','read');
+    const model=await response(service,{provider:config.provider,model:config.model,...familyModelControls(config),system,messages:structuredClone(messages),tools,maxTokens:3500,signal});await guard('after_model','read');
     if(!model.calls.length){safeContent(model.text);if(!model.text.trim())fail('empty_result');if(files.length)await guard('complete','read','write');return{state:'succeeded',text:scrub(model.text,root),...(files.length?{files}: {})};}
     messages.push({id:randomUUID(),role:'assistant',source:{kind:'model',provider:config.provider,model:config.model},content:model.content});
     for(const call of model.calls){if(!tools.some(tool=>tool.name===call.name))fail('tool_unavailable');const result=await operation(call);messages.push({id:randomUUID(),role:'tool',source:{kind:'tool',callId:call.id},toolCallId:call.id,isError:false,content:[{type:'text',text:JSON.stringify(result)}]});}
