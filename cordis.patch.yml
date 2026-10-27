@@ -1,3 +1,3 @@
 - insert:
     - id: family-assistant
-      name: dsh-family-assistant
+      name: "@oxmumu3/dsh-family-assistant"
