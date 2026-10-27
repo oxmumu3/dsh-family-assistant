@@ -456,7 +456,7 @@ function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
 
 /* Web and desktop global workbench delegates authenticated requests through the parent host. */
 window.__ModuleLoader__.load({
-  id: 'dsh-family-assistant',
+  id: '@oxmumu3/dsh-family-assistant',
   factory: require => {
     const React = require('react');
     const inject = ['slots', 'layout', 'uiWorkspace', 'remote', 'remote.session', 'remote.workspace'];
