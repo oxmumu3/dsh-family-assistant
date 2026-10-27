@@ -1,6 +1,6 @@
 {
   "name": "dsh-family-assistant",
-  "version": "0.2.0-preview.21",
+  "version": "0.2.0-preview.30",
   "description": "乐乐家庭助手：通过独立微信通路使用 Harness 项目、专属工具与家庭服务",
   "type": "module",
   "license": "MIT",
