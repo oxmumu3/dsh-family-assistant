@@ -1,21 +1,41 @@
 # 安装与首次接入
 
-此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.30.tgz`。从 [正式仓库 Releases](https://github.com/oxmumu3/dsh-family-assistant/releases) 取得本版本的 tgz、INSTALL-AGENT.txt 与 SHA256SUMS；未上架官方插件市场。
+此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+，未上架 Harness 官方插件市场。长期分享同一个 npm 包名即可，新版本发布时更新 `latest`：
 
-安装前核对 tgz 的 SHA256。下载入口以正式 Release 的实际资产为准。
+```text
+@oxmumu3/dsh-family-assistant@latest
+```
 
-## 桌面端
+[npm 固定包页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)提供当前版本；[正式仓库 Releases](https://github.com/oxmumu3/dsh-family-assistant/releases)保留带具体版本号的历史 tgz、安装说明和校验值。指定版本的 tgz 不会随新版发布改变。
 
-打开 Harness 的插件管理，选择“添加插件”，在安装来源输入框填写已取得并校验的 tgz 的本地绝对路径，启用家庭助手。然后点击左侧主列表中的“家庭助手”，进入独立工作台。安装不会重置或复用现有单人微信插件的绑定，也不会访问微信客户端。
+## 当前可用：创造模式里一句安装
 
-也可以切到 Harness“创造模式”，让它通过原生 `plugin_manager` 的 `install_bundle` 安装经过校验的 tgz 本地绝对路径并启用。其他预设默认不提供这个工具；需要权限时按宿主提示批准安装。
+1. 点击左上角“新建会话”，在新会话页面点“标准模式”下拉，选择“创造模式”。无需开启开发者工具，也不需要进插件页找安装包。
+2. 发送下面这句：
 
-可将 Release 随附的 INSTALL-AGENT.txt 直接交给 Harness 创造模式执行，或手动导入下载后的 tgz。每位家人仍需本人扫码。
+> 请从 npm 官方源安装并启用 @oxmumu3/dsh-family-assistant@latest。
+
+Harness 会使用原生插件管理器安装并启用。如请求批准，按提示处理；完成后可从侧栏“家庭助手”进入。新安装默认暂停、成员为空，不自动扫码、发送消息或开启定时服务；每位家人仍需本人扫码。
+
+安装句长期不变。新版发布到 npm 后更新 `latest`；已经装过旧版时，重复发送安装句不等于自动升级，见后面的升级步骤。
+
+## 普通对话自动接续的状态
+
+主交互目标仍是用户只在任意普通对话发一句，由 Harness 自动接续安装。当前官方 rc.3 的标准会话没有独立创建新会话的模型工具；实际调用子任务并指定 `agent_preset: cordis` 会被拒绝：`agent_preset selection is disabled for this tool instance`。这是新会话入口的工具限制，不能只用“当前会话预设锁定”解释，也不能把界面/SDK能创建会话当成模型已经能调用。
+
+Host 层的受限安装样机已在隔离环境通过：真实标准会话保留默认权限和原生审批，合成模型只申请安装；非法动作和拒绝审批没有安装副作用，批准后实际从 npm 安装启用 preview.31，61 个源码文件与发行包一致，工作台路由可用。该补丁尚未由官方 Host 集成，未修改用户正式 App/profile/微信绑定，也未证明自动前端导航或真实模型理解成功率。当前可用安装不等待此增强完成。
+
+<details>
+<summary>另一种手工安装方式（备用）</summary>
+
+在侧栏“插件 → 添加插件”的“包名或地址”中粘贴 `@oxmumu3/dsh-family-assistant@latest`，安装成功后“立即启用”，从“家庭助手”进入。此方式与当前对话预设无关，是手工备用方式，不代替普通对话自动安装目标。
+
+</details>
 
 ## Web 端
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.30.tgz
+dsh plugin --profile web add '@oxmumu3/dsh-family-assistant@latest'
 dsh web
 ```
 
@@ -47,13 +67,22 @@ CLI 须与目标宿主版本一致。当前机器全局 `dsh` 可能是更旧版
 
 ## 从旧版升级
 
-升级保留原 `family.json`、每人的微信凭据和绑定。新版在同一私有目录增加 `workbench.json`，保存管理对话、卡片、经本人允许转达的请求和每位家人的私有服务偏好。管理接口不展示家人的私有偏好。所有状态文件保持 0600。
+固定入口更新不会自动更新电脑上已经安装的插件。官方 rc.3 中，重复安装相同 npm 包名会提示已安装；隔离测试中，移除后再次安装 `@latest` 也曾仍得到旧版。因此升级时先在 [npm 页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)核对当前版本，再使用精确版本，例如本轮已验证的 `@oxmumu3/dsh-family-assistant@0.2.0-preview.31`。
+
+旧 tgz 的包名 `dsh-family-assistant` 与新 npm 包名 `@oxmumu3/dsh-family-assistant` 是两个安装身份，不能直接叠加启用。按下面顺序操作，始终沿用原 `storageDir`：
+
+1. 等待当前扫码和发送结束，在家庭助手暂停服务，备份原数据目录；若使用自定义 `storageDir`，记下并继续使用它。
+2. 在 Harness 插件管理移除旧的家庭助手插件包，保留数据目录。确认旧插件已停止；若宿主提示需要重启，先完全退出并重开 Harness，再继续安装。
+3. 安装 npm 当前版本的精确包名，例如 `@oxmumu3/dsh-family-assistant@0.2.0-preview.31`，并启用。隔离验收使用 npm 官方源 `https://registry.npmjs.org/`；可在创造模式明确要求原生插件管理器使用这个源安装精确版本。
+4. 完全退出并重新打开 Harness，确认只保留一个家庭助手插件，原成员与绑定还在，再恢复服务。
+
+本轮在官方 rc.3 隔离环境验证了 scoped preview.21 升级和旧 tgz preview.30 迁移到 scoped preview.31；合成成员、绑定和聊天记录保持，未使用真实微信凭据或发送消息。真实微信登录是否仍有效还取决于微信平台；过期时需成员本人重新扫码。不要删除 `family.json`、成员通道目录或私有数据来更新插件。
+
+管理对话、资料卡、经本人允许转达的请求与私有服务偏好保存在同一数据目录的 `workbench.json`；状态文件保持 0600。
 
 preview.7 另外增加 `presentations.json` 与 `presentation-files/`，保存已开通成员的 PPT 任务和成果；不改变微信凭据路径。Owner 本地项目会话保存在 Harness，刷新只核对原请求。preview.15 为通用 Owner 对话登记独立的 `storageDir + "-owner-workspace"` 目录，沿用 `harness-tasks.json` 保存稳定会话和每轮请求；旧记录兼容，不迁移微信凭据。微信平台主动过期登录、手动重绑或删除数据仍可能需要重新扫码。
 
-家人正在扫描或确认二维码时，等本轮扫码结束后再升级；不要通过重启、重新建档或删除私有目录更新插件。
-
-升级前确认没有正在发送的事项，私下备份存储目录，仅暂停家庭助手，然后用宿主插件管理安装新版本 tgz。安装生效后恢复原运行状态；无需重新扫码正常绑定，不自动开启日报或简报。切勿在运行中手改 profile 或删除运行锁。
+切勿在运行中手改 profile 或删除运行锁。升级不自动开启日报或简报。
 
 ## 语音输入
 

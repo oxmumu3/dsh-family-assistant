@@ -2,7 +2,7 @@
 
 一个 DeepSeek Harness Host，同时服务多位长辈。长辈各自在微信里聊天、设置提醒、接收个性化日报；Owner 在工作台管理，在自己的微信接收每日服务简报。
 
-当前预览版本为 **0.2.0-preview.30**，目标宿主 **0.2.1-rc.2 / 0.2.1-rc.3**。发行包与安装说明以 [正式仓库 Releases](https://github.com/oxmumu3/dsh-family-assistant/releases) 为准；这是社区插件，未上架官方插件市场。
+目标宿主 **0.2.1-rc.2 / 0.2.1-rc.3**。固定发行入口为 [npm 公开包](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant) `@oxmumu3/dsh-family-assistant@latest`；每次发布新版到 npm 时更新 `latest`，分享的包名无需改变。这是社区插件，未上架 Harness 官方插件市场。
 
 ## 现在能做什么
 
@@ -44,13 +44,19 @@
 
 要求 Node.js 22.13+、DeepSeek Harness **0.2.1-rc.2 或 0.2.1-rc.3** 的 Web 或桌面宿主。其他版本需要另行验证。
 
-在 [正式 Releases](https://github.com/oxmumu3/dsh-family-assistant/releases) 选择本版本的 tgz 和 INSTALL-AGENT.txt。可把安装指令交给 Harness 创造模式执行，也可下载 tgz 后从插件管理添加并启用；升级保留已有家人资料、微信绑定与设置。
+当前可用的一句话安装：点击左上角“新建会话”，在新会话页面点“标准模式”下拉，选“创造模式”，然后发送：
 
-仅安装插件不会绑定微信、发送消息或开启定时推送。Node.js 和目标 Host 版本须匹配。
+> 请从 npm 官方源安装并启用 @oxmumu3/dsh-family-assistant@latest。
 
-[公开 preview.21 发行记录](https://github.com/oxmumu3/dsh-family-assistant/releases/tag/v0.2.0-preview.21) · [本地安装与语音说明](docs/install.md) · [验证范围](docs/public-verification.md)
+Harness 使用原生插件管理器安装并启用；如请求批准，按提示处理。这里的 `latest` 指向 npm 当前发布版，未来发布新版后仍分享同一句，不必下载包或改版本号。新安装默认暂停、成员为空，不会自动扫码或向家人发消息。
 
-不要通过替换旧版 URL 的版本号推导本补丁地址，也不要使用 `/releases/latest` 推导预览包。
+默认普通对话目前不能代你自动新开创造模式并安装：官方 rc.3 的标准工具拒绝选择 `cordis`，且没有独立创建会话的模型工具。我们已验证受审批的普通模式安装 Host 补丁样机，但它尚未随官方 Host 交付，不能承诺任意普通对话直接安装。此项增强不影响现在使用上面的安装方式。
+
+已经安装的旧版不会仅因 `latest` 更新而自动升级。旧未 scoped 包与新 npm 包也不能叠加启用；按[安装与升级说明](docs/install.md)保留原数据目录并受控升级。
+
+[npm 固定发行入口](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant) · [历史 GitHub 发行包](https://github.com/oxmumu3/dsh-family-assistant/releases) · [验证范围](docs/public-verification.md)
+
+GitHub Release 中带版本号的 tgz 固定指向该历史版本；不要替换 URL 中的版本号猜测新包，也不要用 `/releases/latest` 推导预览包。
 
 ## 第一次使用
 
@@ -86,6 +92,10 @@ npm start -- --port 3891 --state /absolute/private/review-directory
 ```
 
 本地工作台只监听 loopback，用一次性启动链接建立 HttpOnly cookie。单独启动不带模型，AI 对话应在 Harness 插件中使用；不会生成假回复。
+
+## 发布固定入口的新版本
+
+通过 `.github/workflows/npm-release.yml` 的手动发布入口运行，显式选择发布；工作流先验证源码与实际打包字节，再由 npm Trusted Publisher 发布并更新 `latest`。发布后回读 npm exact 版本、`dist-tags.latest`、integrity 与 provenance，并使用官方 Harness 的隔离 profile 安装固定 spec。仅创建 GitHub Release 不会触发此工作流，也不会更新 npm `latest`；不要在这一步之前宣布固定入口已跟版。
 
 ## 当前边界
 
