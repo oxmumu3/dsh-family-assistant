@@ -1,6 +1,7 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {mkdirSync,openSync,writeFileSync,closeSync,readFileSync,unlinkSync} from 'node:fs';
 import {join,resolve} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {createStore,recordMatchesBinding} from './store.mjs';
 import {createWorkbench} from './workbench.mjs';
 import {buildOwnerBrief,buildElderDaily,localDate,localDateTimeToInstant} from './brief.mjs';
@@ -21,6 +22,8 @@ import {buildServiceProgress} from './service-progress.mjs';
 import {createDigestDelivery} from './digest-delivery.mjs';
 import {createWorkflowNotifications} from './workflow-notifications.mjs';
 import {canRequestMemberOwnerHelp} from './member-agent.mjs';
+import {isOwnerManagementConfirmation,isOwnerMessageDraftIntent} from './owner-management-tool.mjs';
+import {createRuntimeAttention} from './important-event-runtime.mjs';
 
 const displayAttachments=items=>Array.isArray(items)?items.slice(0,4).flatMap(item=>{if(typeof item?.name!=='string'||!item.name.trim())return[];const name=item.name.replace(/[\\/\x00-\x1f\x7f]/g,'_').slice(0,180),size=Number(item.size??item.len);return[{name,...(Number.isSafeInteger(size)&&size>=0&&size<=10*1024*1024?{size}:{}),...(typeof item.mimeType==='string'&&/^[-a-z0-9.+]+\/[-a-z0-9.+]+$/i.test(item.mimeType)?{mimeType:item.mimeType}:{})}];}):[];
 const sameRoute=(a,b)=>a&&b&&['personId','accountId','peerId','generation'].every(key=>a[key]===b[key]);
@@ -29,6 +32,10 @@ const personalIntent=text=>/记住|记下|便笺|记事|我的笔记|我记(?:�
 const ownerPersonalIntent=text=>personalIntent(text)||/(?:提醒我(?!爸|妈|父亲|母亲)|我的.*提醒|我(?:有|设置|安排).{0,12}提醒|(?:查看|列出|取消).{0,12}我的)/.test(text);
 const ownerBriefIntent=text=>/^(?:\/brief|今日简报|今天的简报|服务简报|查看简报|日报|简报)[。！!？?\s]*$/.test(text.trim());
 const helpIntent=text=>/^(?:你(?:现在)?(?:能|可以)帮我(?:做什么|干什么|做啥)|你(?:都)?(?:会|能做)什么|怎么用|使用帮助|帮助)[。！!？?\s]*$/.test(text.trim());
+// Sending a message is a management action. Only an explicit request to
+// produce project material may designate the native result as the artifact.
+const ownerArtifactIntent=text=>!/发(?:一条|一则|个)?消息|转告|告诉|通知|先问我|先给我看|等我确认|先核对/.test(text)&&/整理|生成|制作|起草|写一|准备|读取|查找|找到|搜索|日报|PPT|幻灯片/i.test(text);
+const ownerWaitingText=text=>/日报|digest/i.test(text)?'我还在查找这份日报，找到后会在这里回复你。':/查|找|读|搜/.test(text)?'我还在查找你要的资料，找到后会在这里回复你。':/PPT|幻灯片/i.test(text)?'这份演示稿还在整理，做好后会在这里回复你。':'这件事还在处理，我会把结果回复在这里。';
 const inputKeys={
   add_person:['role','label','timeZone','interests','shareWithOwner'],
   update_person:['personId','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
@@ -48,6 +55,7 @@ const inputKeys={
   service_send_once:['draftId','revision','requestId'],
   resume_owner_native_message:['messageId'],
   owner_send_message:['personId','text','requestId','bindingGeneration'],
+  attention_configure:['enabled'],attention_update:['incidentId','status'],
 };
 
 function exclusiveLock(directory){
@@ -65,14 +73,14 @@ function exclusiveLock(directory){
   return()=>{try{if(JSON.parse(readFileSync(file,'utf8')).id===id)unlinkSync(file);}catch{}};
 }
 
-export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,memberAgent,memberReportFeedback,memberPublicTools,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
+export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,memberAgent,memberReportFeedback,memberPublicTools,classifyImportantEvent,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
   if(typeof directory!=='string'||!directory)throw new Error('家庭助手需要独立数据目录。');
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
   try{store=createStore({directory,now});store.recoverDispatching();}catch(error){unlock();throw error;}
   let closed=false,timer=null,ticking=null,lastBrief=null,lastBriefAccess=null,lastError=null,runtimeReady=false;
   const managementLifecycle=new AbortController();
-  let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map(),memberWork=new Map(),memberQueued=new Map();
+  let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map(),memberWork=new Map(),memberQueued=new Map(),outboxAuthorities=new Map(),ownerObservers=new Map();
   const safeError=error=>{
     const text=String(error?.message??'服务暂时不可用');
     if(String(error?.code??text).startsWith('service_'))return serviceSetupErrorText(error);
@@ -85,7 +93,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     onStatus:(id,patch)=>{if(!closed&&store.person(id)){store.setConnection(id,patch);if(runtimeReady&&patch.status==='connected')void resumeMemberAdmissions(id).catch(error=>{lastError=safeError(error);});}},
     onMessage:(id,message)=>receive(id,message),
   });
-  let workbench,presentations,history,access,gateway,toolbox,organizer,serviceSetup,digestDelivery,workflowNotifications;
+  let workbench,presentations,history,access,gateway,toolbox,organizer,serviceSetup,digestDelivery,workflowNotifications,attention;
   try{
     history=createConversationHistory({store});access=createFamilyAccess({directory,store,now});
     const presentationExecutor=Boolean(generatePresentation&&extractMaterial&&typeof channels.downloadFile==='function'&&typeof channels.sendFile==='function')?async({personId,input,signal})=>{
@@ -118,8 +126,9 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       return{text:adapted.text};
     }});
     workflowNotifications=createWorkflowNotifications({directory,store,toolbox,flush,now});
-    for(const row of store.snapshot().outbox.filter(row=>['harness_result','harness_notice'].includes(row.kind)&&row.status==='pending'))store.transition(row.id,'cancelled','上次项目投递未结束，没有自动续发。');
+    for(const row of store.snapshot().outbox.filter(row=>row.status==='pending'&&(['harness_result','harness_notice'].includes(row.kind)||row.sourceKey.includes(':native-owner-')||/^(?:workbench:|request-reply:)/.test(row.sourceKey))))store.transition(row.id,'cancelled','上次投递未结束，没有自动续发。');
     onboarding=createMemberOnboarding({directory,store,toolbox,access,presentations,now,projectExecutorAvailable:Boolean(familyProjectExecutor),generalAgentAvailable:Boolean(memberAgent)});
+    attention=createRuntimeAttention({directory,store,classify:classifyImportantEvent,channels,flush,sendOwnerMessage,now,running:()=>!closed&&!store.snapshot().config.paused,signal:()=>lifecycle.signal});
   }catch(error){void gateway?.close();void channels.close();unlock();throw error;}
   runtimeReady=true;
   const serial=(map,key,work)=>{
@@ -153,14 +162,17 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     let history=memberHistory(person.id,8).map(row=>({...row,text:row.text.slice(0,800)}));while(Buffer.byteLength(JSON.stringify(history))>10000)history.shift();
     return memberAgent.run({person:workbench.memberProfile(person.id),route,text,history,reports:memberReports(person.id,route),materials,
       notes:personal.notes.slice(-10).map(row=>({...row,text:row.text.slice(0,100)})),reminders:personal.reminders.slice(0,10).map(row=>({...row,text:row.text.slice(0,100)})),
-      signal,authorize,requestId:sourceRequest(route,message),...(admissionKey?{admissionKey}:{}),reportPreference:memberReportFeedback?.getPreference({personId:person.id,route})?.instruction??null,
+      signal,authorize,requestId:sourceRequest(route,message),...(admissionKey?{admissionKey}:{}),reportPreference:memberReportFeedback?.getPreference({personId:person.id,route})?.instruction??null,importantAlertsEnabled:attention.snapshot().enabled,
       ...(memberPublicTools?{publicTools:memberPublicTools({personId:person.id})}:{}),
       memberTools:memberPresetTools(person,route,message,text),
       ...(memberReportFeedback?{setReportPreference:async args=>{if(!authorize()||await args.authorize()!==true)throw new Error('当前连接已改变。');return memberReportFeedback.setPreference({personId:person.id,route,text,instruction:args.instruction,evidence:args.evidence,authorize});}}:{}),
       requestOwnerHelp:async args=>{
         if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted||!canRequestMemberOwnerHelp({text,evidence:args.evidence,requestText:args.text}))throw new Error('没有获得这次转告的明确同意。');
-        const request=toolbox.requestWorkflow({personId:person.id,requestId:args.requestId,text:args.text}),notification=await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal});
-        return{status:notification?.status??'recorded',requestId:request.requestId,reply:'已记录这次求助，家庭联系人可在同一需求中继续处理。'};
+        const sourceNotice=await attention.ownerNoticeForSource(person.id,message.id);
+        if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted)throw new Error('当前连接已改变。');
+        const request=toolbox.requestWorkflow({personId:person.id,requestId:args.requestId,text:args.text}),notification=sourceNotice??await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal});
+        const reply=sourceNotice?sourceNotice.status==='api_accepted'?'已向微信接口提交这件事的提醒，实际收到仍待确认。':sourceNotice.status==='failed'?'这件事已记录，提醒发送失败，没有重复发送。':sourceNotice.status==='pendingOwner'?'这件事已记录，提醒正在等待投递。':'这件事已记录，提醒投递尚未确认，没有重复发送。':'已记录这次求助，家庭联系人可在同一需求中继续处理。';
+        return{status:notification?.status??'recorded',requestId:request.requestId,reply};
       },
       ...(typeof channels.sendFile==='function'?{deliverFile:async args=>{
         if(!authorize()||await args.authorize()!==true)throw Object.assign(new Error('文件接收人的连接已改变。'),{sendOutcome:'failed'});
@@ -249,7 +261,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const deliveries=command.action==='send_daily'?state.outbox.filter(row=>row.id===command.resultId):state.outbox.filter(row=>row.sourceKey.startsWith(`reminder:${command.resultId}:`));
       const reminder=command.action==='remind'?state.reminders.find(row=>row.id===command.resultId):null;
       return{...command,...(reminder?.status==='cancelled'?{status:'cancelled',detail:'操作已取消'}:reminder?.status==='expired'?{status:'failed',detail:'执行未完成'}:{}),...(deliveries.length?{deliveryStatus:deliveries.at(-1).status}:{} )};
-    }),lastBrief,lastError,runtimeWork:{responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
+    }),lastBrief,lastError,attention:attention.snapshot(),runtimeWork:{attention:attention.snapshot().active,responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size,ownerObservers:ownerObservers.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
     if(personId){const person=store.person(personId);if(!person)throw new Error('没有找到这位家人。');result.selectedPersonId=personId;result.messages=store.messages(personId,{limit:100});}
     return result;
   }
@@ -277,7 +289,9 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     return unique[0];
   }
   async function deliverHarnessResult({task,text}){
-    const target=task.deliveryTarget,recipient=target?.personId??task.personId,route=target?.route??task.route;
+    // A completed native turn may just ask a question. Its existence is not
+    // proof that the requested family artifact has actually been produced.
+    const target=task.conversationId&&task.deliveryTarget&&!task.files?.length?undefined:task.deliveryTarget,recipient=target?.personId??task.personId,route=target?.route??task.route;
     if(task.origin==='console'&&!target){if(store.person(task.personId)?.role!=='owner')throw new Error('Owner身份已改变。');await workbench.appendExternal({reply:text,requestId:'native-'+task.requestId,taskId:task.id});return;}
     return serial(peopleWork,recipient,async()=>{
       const authorize=()=>current(route)&&gateway.canDeliver({taskId:task.id,requestId:task.requestId});
@@ -288,7 +302,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         const parts=messageParts(clean);
         for(const[index,content]of parts.entries()){
           if(!authorize())throw new Error('任务授权或收件人绑定已改变，没有继续投递。');
-          const row=store.enqueue({personId:recipient,text:`Harness 任务结果${parts.length>1?`（${index+1}/${parts.length}）`:''}\n${content}`,kind:'harness_result',...(task.route?{authorizationRoute:task.route}:{}),sourceKey:`harness-task:${task.id}:${task.requestId}:${index}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+          const row=store.enqueue({personId:recipient,text:`${parts.length>1?`（${index+1}/${parts.length}）\n`:''}${content}`,kind:'harness_result',...(task.route?{authorizationRoute:task.route}:{}),sourceKey:`harness-task:${task.id}:${task.requestId}:${index}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
           await flush(recipient,{onlyId:row.id});const sent=store.snapshot().outbox.find(item=>item.id===row.id);
           if(sent?.status!=='api_accepted')throw Object.assign(new Error('任务结果没有完成投递。'),{sendOutcome:sent?.status==='failed'?'failed':'uncertain'});
         }
@@ -314,11 +328,13 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     });
   }
   const authorized=row=>{
+    if(outboxAuthorities.has(row.id)&&outboxAuthorities.get(row.id)()!==true||row.sourceKey.includes(':native-owner-')&&!outboxAuthorities.has(row.id))return false;
     if(!current(row.route)||row.authorizationRoute&&!current(row.authorizationRoute))return false;
     if(row.sourceKey.startsWith('owner-message:')&&!row.sourceKey.startsWith('owner-message:'+store.snapshot().people.find(person=>person.role==='owner')?.id+':'))return false;
     if(row.kind==='member_welcome'&&!onboarding.matchesWelcome({personId:row.personId,text:row.text}))return false;
     if(['workflow_request','workflow_response','workflow_followup'].includes(row.kind)&&!workflowNotifications.canDeliver(row))return false;
     if(row.kind==='digest_once'&&!digestDelivery.canDeliver(row))return false;
+    if(['important_event','important_clarify'].includes(row.kind)&&!attention.canDeliver(row.sourceKey))return false;
     if(row.kind==='harness_result'){const match=row.sourceKey.match(/^harness-task:([a-f0-9-]{36}):([a-f0-9-]{36}):\d+$/);if(!match||!gateway.canDeliver({taskId:match[1],requestId:match[2]}))return false;}
     if(row.kind==='tool_result'){
       try{const [personId,toolId,requestId,revision]=JSON.parse(Buffer.from(row.sourceKey.slice('family-tool:'.length),'base64url').toString());if(!toolbox.isCurrent({personId,toolId,requestId,revision}))return false;}catch{return false;}
@@ -334,23 +350,25 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   function cancelUnauthorized(row){
     if(authorized(row))return false;
     const fresh=store.snapshot().outbox.find(item=>item.id===row.id);
-    if((row.kind==='manual_daily'||row.sourceKey.startsWith('owner-message:')||row.kind==='harness_result'||row.kind==='harness_notice'||row.authorizationRoute)&&fresh?.status==='pending'){const cancelled=store.transition(row.id,'cancelled','指令授权或接收人连接已改变');syncCommand(cancelled);}
+    if((['manual_daily','important_event','important_clarify'].includes(row.kind)||row.sourceKey.startsWith('owner-message:')||row.kind==='harness_result'||row.kind==='harness_notice'||row.authorizationRoute)&&fresh?.status==='pending'){const cancelled=store.transition(row.id,'cancelled','指令授权或接收人连接已改变');syncCommand(cancelled);}
     return true;
   }
-  async function flush(personId,{onlyId}={}){
+  async function flush(personId,{onlyId,authorize:extraAuthorize}={}){
     return serial(flushWork,personId,async()=>{
       if(closed||store.snapshot().config.paused){
         for(const row of store.pending().filter(item=>item.personId===personId&&item.kind==='manual_daily'&&(!onlyId||item.id===onlyId)))cancelUnauthorized(row);
         return;
       }
       for(const row of store.pending().filter(x=>x.personId===personId&&(!onlyId||x.id===onlyId))){
+        if(['important_event','important_clarify'].includes(row.kind)&&channels.status(personId)?.status!=='connected')continue;
+        if(extraAuthorize&&extraAuthorize()!==true){store.transition(row.id,'cancelled','当前指令授权已改变，没有发送。');continue;}
         if(cancelUnauthorized(row))continue;
         if(row.kind==='owner_brief'&&row.sourceKey.startsWith('owner-brief:')&&respond&&typeof store.updatePendingText==='function'){
           try{const brief=await preview({date:row.sourceKey.slice(-10)});const fresh=store.snapshot().outbox.find(x=>x.id===row.id);if(fresh?.status==='pending'&&current(row.route))store.updatePendingText(row.id,brief.text);}catch(error){lastError=safeError(error);}
         }
         // A daily has only this person's profile and history; model actions are ignored.
         if(['daily','elder_daily','elder-daily','manual_daily','workbench_daily'].includes(row.kind)&&respond&&typeof store.updatePendingText==='function'){
-          try{const person=workbench.memberProfile(personId);const generated=await respond({person,history:memberHistory(personId,12),text:`请生成今天的个人日报，约150字，包含一个与兴趣相关的具体小知识或建议。已核实的今日安排：${row.text}`,reminders:organizer.context(personId).reminders,now:now(),signal:AbortSignal.any([lifecycle.signal,AbortSignal.timeout(45000)])});
+          try{const person=workbench.memberProfile(personId);const generated=await respond({person,history:memberHistory(personId,12),text:`请生成今天的个人日报，约150字，包含一个与兴趣相关的具体小知识或建议。已核实的今日安排：${row.text}`,dailyPreference:memberReportFeedback?.getPreference({personId,route:row.route})?.instruction??null,reminders:organizer.context(personId).reminders,now:now(),signal:AbortSignal.any([lifecycle.signal,AbortSignal.timeout(45000)])});
             const parsed=parseModelReply(JSON.stringify(generated));if(!parsed.action&&current(row.route))store.updatePendingText(row.id,parsed.reply);
           }catch(error){lastError=safeError(error);if(row.kind==='workbench_daily'&&store.snapshot().outbox.find(x=>x.id===row.id)?.status==='pending'){store.transition(row.id,'blocked','日报生成失败，请检查模型后重试。');continue;}}
         }
@@ -363,7 +381,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         const started=store.transition(row.id,'dispatching');
         if(started.status!=='dispatching')continue;
         try{
-          const receipt=await channels.send(started.route,started.text,{clientId:started.id,authorize:()=>authorized(started),signal:AbortSignal.any([lifecycle.signal,AbortSignal.timeout(20000)])});
+          const receipt=await channels.send(started.route,started.text,{clientId:started.id,authorize:()=>authorized(started)&&(!extraAuthorize||extraAuthorize()===true),signal:AbortSignal.any([lifecycle.signal,AbortSignal.timeout(20000)])});
           if(receipt?.status!=='api_accepted')throw Object.assign(new Error('发送结果未能确认。'),{sendOutcome:'uncertain'});
           syncCommand(store.transition(started.id,'api_accepted'));
         }catch(error){
@@ -398,7 +416,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     catch(error){const row=store.snapshot().outbox.find(r=>r.sourceKey===action.sourceKey);return row?deliveryResult(row):{status:'failed',detail:safeError(error)};}
   }
   async function executeWorkbenchUnsafe(action){
-    alive();if(action.authorityRoute&&!current(action.authorityRoute))throw new Error('指令期间服务或 Owner 绑定已改变，未执行。');const person=store.person(action.personId);
+    alive();if(action.authorize&&action.authorize()!==true||action.authorityRoute&&!current(action.authorityRoute))throw new Error('指令期间服务或 Owner 绑定已改变，未执行。');const person=store.person(action.personId);
     if(action.expectedRoute&&!sameRoute(action.expectedRoute,store.binding(person.id)))throw new Error('这位家人的绑定已改变，请重新核对对象并创建安排。');
     if(action.type==='presentation_service'){presentations.configure(person.id,action.enabled);return{status:'completed',detail:action.enabled?'PPT制作已开通。本人可在微信发送文字、TXT、Markdown、DOCX或PPTX文字材料，取得可编辑PPT并继续修改。':'PPT制作已停用；已提交的文件无法撤回。'};}
     if(action.type==='remind'){
@@ -418,7 +436,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     else throw new Error('不支持这项执行操作。');
     if(!current(targetRoute))throw new Error('服务或绑定发生变化，尚未发送。');
     const row=store.enqueue({personId:person.id,text:content,kind,sourceKey:action.sourceKey,...(action.authorityRoute?{authorizationRoute:action.authorityRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
-    await flush(person.id,{onlyId:row.id});return deliveryResult(store.snapshot().outbox.find(r=>r.id===row.id));
+    if(action.authorize)outboxAuthorities.set(row.id,action.authorize);
+    await flush(person.id,{onlyId:row.id,authorize:action.authorize});return deliveryResult(store.snapshot().outbox.find(r=>r.id===row.id));
   }
   async function notifyRequest(request){
     const owner=store.snapshot().people.find(p=>p.role==='owner');
@@ -452,7 +471,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           onboarding.markEnqueued({personId:person.id,sourceKey:welcome.sourceKey,outboxId:row.id});
         }
       }
-      scheduleTick(store,{now:now()});await gateway.tick();
+      await attention.tick();scheduleTick(store,{now:now()});await gateway.tick();await notifyOwnerTaskStatus();
       for(const due of toolbox.due()){
         let route;try{route=store.route(due.personId);}catch{continue;}
         void serial(toolWork,due.personId,()=>runTool({personId:due.personId,toolId:due.toolId,requestId:due.requestId,expectedRevision:due.expectedRevision},route,{notify:true,scheduled:true})).catch(error=>{lastError=safeError(error);});
@@ -461,7 +480,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     return ticking;
   }
   const ownerId=()=>{const owner=store.snapshot().people.find(person=>person.role==='owner');if(!owner)throw new Error('请先登记 Owner。');return owner.id;};
-  const capabilityHelp=person=>person.role==='owner'?'你可以直接让我：\n• 查看已登记的 Harness 项目、派发任务，并继续处理同一件事。\n• 给家人配置 AI 日报、天气和 PPT 工具，核对后开通或调整投送。\n• 管理家人资料、查看获准的聊天记录，以及处理家人转达的请求。\n例如可以说：“查看项目”“给妈妈每天早上八点发 AI 日报”。\n在你自己的微信里，也可以让我记事、查询和修改自己的日程提醒。':onboarding.describe(person.id).text;
+  const capabilityHelp=person=>person.role==='owner'?'直接告诉我想办什么就好：给家人发消息、查本机项目和资料、安排提醒，或继续修改任务；也可以给家人开通和调整日报、天气等快捷服务。明确收件人和消息内容就可以发送，不用回电脑确认。你也可以查询所有已保存的家人聊天记录；自动简报另按分享设置整理。家人明确转告或求助会通知你。重要事项主动提醒'+(attention.snapshot().enabled?'已开启，会辅助判断新收到的家人消息，需要你关注时提醒你；不保证识别所有情况。':'尚未开启，可在设置中开启。'):onboarding.describe(person.id).text;
   const sourceRequest=(route,message)=>'wechat-'+createHash('sha256').update(JSON.stringify([route,message.id])).digest('hex');
   function assignTool(args){
     if(args.toolId==='presentation'){
@@ -523,6 +542,42 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     if(origin==='console')return Boolean(workbench.snapshot().messages.filter(row=>row.role==='assistant').at(-1)?.cardIds?.length);
     return store.messages(personId).filter(row=>row.dir==='out'&&['owner_command','harness_command'].includes(row.kind)).at(-1)?.kind==='owner_command';
   }
+  async function ownerMessageDialogue(person,route,message,text,{origin='wechat'}={}){
+    if(person.role!=='owner'||!planWorkbench)return null;
+    const requestId=origin==='console'?message.id:sourceRequest(route,message);
+    const authorize=()=>!closed&&store.person(person.id)?.role==='owner'&&(origin==='console'||current(route));
+    if(origin==='console'){
+      const existing=workbench.snapshot().messages.find(row=>row.role==='user'&&row.requestId===requestId);
+      if(existing){if(existing.text!==text.trim())throw new Error('重复的请求标识对应不同内容。');return{handled:true,management:true,reply:'这条请求已有记录，没有重复执行。'};}
+    }
+    let previousRequestId,previewDelivered=true;
+    if(origin==='wechat'){
+      const rows=memberHistory(person.id,150),index=rows.findLastIndex(row=>row.dir==='in'&&row.id===message.id),previous=rows.slice(0,index<0?rows.length:index).filter(row=>row.dir==='in').at(-1);
+      if(previous){previousRequestId=sourceRequest(route,previous);const preview=workbench.snapshot().messages.filter(row=>row.role==='assistant'&&row.requestId===previousRequestId).at(-1)?.text;previewDelivered=typeof preview==='string'&&messageParts(preview).every((part,index)=>store.snapshot().outbox.some(row=>row.sourceKey===`reply:${person.id}:${route.generation}:${previous.id}${index?':'+index:''}`&&row.text===part&&row.status==='api_accepted'&&row.kind==='owner_command'&&sameRoute(row.route,route)));}
+    }else previousRequestId=workbench.snapshot().messages.filter(row=>row.role==='user'&&!/^(?:wechat-|host-|native-)/.test(row.requestId??'')).at(-1)?.requestId;
+    const previous=previousRequestId?workbench.messageDraft({requestId:previousRequestId,origin,authorityRoute:route??undefined}):null;
+    const confirming=isOwnerManagementConfirmation(text),editing=/^(?:请|帮我|麻烦)?\s*(?:(?:把|将).{0,100}(?:改|换|删|加)|改成|改为|换成|再加|删掉)/.test(text.trim());
+    if(previous&&(confirming||editing)){
+      if(!previewDelivered)return{handled:true,management:true,reply:'上一份草稿还没有完整展示，尚未发送给家人。请先让我重新展示草稿，再确认发送。'};
+      if(previous.stale||previous.cards.length!==1)return{handled:true,management:true,reply:previous.stale?'这份草稿已经处理或有更新，没有重复发送。请先核对最新内容。':'刚才有多份草稿，请说清要确认或修改哪一份，我会先展示给你。'};
+      const card=previous.cards[0];
+      if(confirming){
+        const state=await workbench.external({text,requestId,authorityRoute:route??undefined},async({confirm})=>{
+          const latest=workbench.messageDraft({requestId:previousRequestId,origin,authorityRoute:route??undefined});
+          if(!authorize()||!latest||latest.stale||latest.cards.length!==1||latest.cards[0].id!==card.id||latest.cards[0].revision!==card.revision)throw new Error('草稿或连接已经变化，尚未发送。');
+          const result=await confirm({cardId:card.id,revision:card.revision,authorityRoute:route??undefined,authorize}),updated=result.cards.find(row=>row.id===card.id);
+          const descriptions={api_accepted:'消息已交给微信，实际收信待对方确认。',failed:'这条消息未完成发送，没有自动重发。',uncertain:'发送结果尚未确认，没有自动重发。',cancelled:'这条发送已取消。',completed:'这项操作已处理。',scheduled:'安排已保存，尚未到发送时间。'};
+          return{reply:(updated?.actions??[]).map(action=>`${action.targetLabel}：${descriptions[action.status]??'处理结果仍待核对，没有自动重发。'}`).join('\n')||'这项安排的处理结果仍待核对。'};
+        });
+        return{handled:true,management:true,reply:state.messages.filter(row=>row.role==='assistant'&&row.requestId===requestId).at(-1)?.text??'处理结果仍待核对。'};
+      }
+      const state=await workbench.chat({text,requestId,contextId:'card:'+card.id,draftOnly:true,messageDraftOrigin:origin,authorityRoute:route??undefined,authorize});
+      return{handled:true,management:true,reply:state.messages.filter(row=>row.role==='assistant'&&row.requestId===requestId).at(-1)?.text??'修改尚未完成，没有发送。'};
+    }
+    if(!isOwnerMessageDraftIntent({userText:text,people:store.snapshot().people}))return null;
+    const state=await workbench.chat({text,requestId,draftOnly:true,messageDraftOrigin:origin,authorityRoute:route??undefined,authorize});
+    return{handled:true,management:true,reply:state.messages.filter(row=>row.role==='assistant'&&row.requestId===requestId).at(-1)?.text??'还没有形成可确认的草稿，没有发送。'};
+  }
   async function ownerProjectsForSession({sessionId,signal}={}){
     alive();signal?.throwIfAborted();
     const personId=ownerId();
@@ -535,6 +590,79 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const rows=await gateway.listProjects({personId});signal?.throwIfAborted();
     if(!permitted())throw new Error('Owner 会话权限已改变，没有返回项目目录。');
     return rows;
+  }
+  async function ownerAuthorityForSession({sessionId,callId,signal}={}){
+    alive();signal?.throwIfAborted();
+    return gateway.ownerToolContext({personId:ownerId(),sessionId,callId,signal});
+  }
+  async function sendOwnerMessage(args,{authorize=()=>true,authorityRoute,signal}={}){
+    const actorId=ownerId();
+    if(typeof args.requestId!=='string'||!/^[A-Za-z0-9._-]{1,160}$/.test(args.requestId)||typeof args.text!=='string'||!args.text.trim()||args.text.length>2800||!Number.isSafeInteger(args.bindingGeneration)||args.bindingGeneration<1)throw new Error('消息内容或请求标识无效。');
+    const permitted=()=>{try{return !signal?.aborted&&ownerId()===actorId&&authorize()===true&&(!authorityRoute||current(authorityRoute));}catch{return false;}};
+    return serial(ownerMessageWork,args.personId,async()=>{
+      if(!permitted())throw new Error('Owner 指令授权已改变，未发送。');
+      const target=store.person(args.personId),binding=target&&store.binding(target.id);
+      if(!target||!binding||binding.generation!==args.bindingGeneration)throw new Error('家人的微信绑定已改变，请核对后再试。');
+      const owner=store.person(actorId),label=['我','本人'].includes(owner.label)?'家庭联系人':owner.label;
+      const text=label+'通过乐乐转达：\n'+args.text.trim(),sourceKey='owner-message:'+actorId+':'+args.requestId;
+      let row=store.snapshot().outbox.find(item=>item.sourceKey===sourceKey);
+      if(row&&(row.personId!==target.id||row.kind!=='owner_message'||row.text!==text||!sameRoute(row.route,store.route(target.id))||!!row.authorizationRoute!==!!authorityRoute||authorityRoute&&!sameRoute(row.authorizationRoute,authorityRoute)))throw new Error('这个消息标识已用于其他内容或绑定。');
+      if(!row){
+        if(store.snapshot().config.paused)throw new Error('服务已暂停，尚未发送。');
+        if(channels.status(target.id)?.status!=='connected')throw new Error('这位家人的微信暂未连接，尚未发送。');
+        row=store.enqueue({personId:target.id,text,kind:'owner_message',sourceKey,...(authorityRoute?{authorizationRoute:authorityRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+        outboxAuthorities.set(row.id,permitted);
+        await flush(target.id,{onlyId:row.id,authorize:permitted});
+        row=store.snapshot().outbox.find(item=>item.id===row.id);
+      }
+      return{outboxId:row.id,personId:target.id,status:row.status,detail:row.detail};
+    });
+  }
+  async function ownerSendForSession({sessionId,callId,personId,text,signal}={}){
+    const authority=await ownerAuthorityForSession({sessionId,callId,signal});
+    if(authority.deliveryTarget)throw new Error('这轮成果由原任务统一投递，不能再发一次。');
+    const target=store.person(personId),binding=target&&store.binding(personId);
+    if(!target||target.role!=='elder'||!binding)throw new Error('请明确一位已连接的家人。');
+    const requestId='native-owner-'+createHash('sha256').update(JSON.stringify([authority.personId,authority.sourceRequestId,personId,text])).digest('hex');
+    return sendOwnerMessage({personId,text,requestId,bindingGeneration:binding.generation},{authorize:authority.authorize,authorityRoute:authority.route??undefined,signal});
+  }
+  async function ownerConfirmForSession({sessionId,callId,cardId,revision,signal}={}){
+    const authority=await ownerAuthorityForSession({sessionId,callId,signal});
+    if(!isOwnerManagementConfirmation(authority.userText))throw new Error('当前消息没有确认这项安排，尚未执行。');
+    if(authority.deliveryTarget)throw new Error('这轮成果由原任务统一投递，不能重复确认发送。');
+    return workbench.confirm({cardId,revision,authorityRoute:authority.route??undefined,authorize:authority.authorize});
+  }
+  async function notifyOwnerTaskStatus(){
+    if(closed||store.snapshot().config.paused)return;
+    for(const task of gateway.nativeNoticeTasks().filter(task=>task.delivery.state==='none')){
+      let currentTask;try{currentTask=gateway.snapshot({personId:task.personId}).find(row=>row.id===task.id&&row.requestId===task.requestId);}catch{continue;}
+      if(!currentTask||task.state==='succeeded')continue;
+      const waiting=['queued','running'].includes(task.state);
+      if(waiting&&Date.parse(now())-Date.parse(task.createdAt)<12000)continue;
+      const text=waiting?ownerWaitingText(task.prompt):({unknown:'这次处理的结果尚未确认，可能中途被打断了。我没有自动重新执行；你可以让我核对这件事的状态。',failed:'这件事未能完成，已有记录已保留。你可以告诉我接下来想怎样处理。',cancelled:'这件事已停止，已经保存或发出的内容会保留。',needs_approval:'这一步需要你在电脑上授权，尚未完成。你可以先让我处理不需要这项权限的部分。',needs_input:'这件事还需要你补充信息。请在这里告诉我具体要求，我会接着核对。'}[task.state]);
+      if(!text)continue;
+      const key='native-status-'+task.requestId+'-'+(waiting?'waiting':task.state);
+      if(task.origin==='console'){await workbench.appendExternal({reply:text,requestId:key,taskId:task.id});continue;}
+      const route=store.route(task.personId);if(!current(route))continue;
+      if(store.snapshot().outbox.some(row=>row.sourceKey===key))continue;
+      const row=store.enqueue({personId:task.personId,text,kind:'harness_notice',sourceKey:key,authorizationRoute:route,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+      await flush(task.personId,{onlyId:row.id});
+    }
+  }
+  function observeOwnerTask(task){
+    if(ownerObservers.has(task.id))return;
+    const signal=task.origin==='console'?managementLifecycle.signal:lifecycle.signal;
+    const pending=(async()=>{
+      // Read-only observation makes short answers responsive. It never starts
+      // another turn or replays a possibly completed send.
+      for(let attempt=0;attempt<150&&!closed&&!signal.aborted;attempt++){
+        let fresh;try{fresh=gateway.snapshot({personId:task.personId}).find(row=>row.id===task.id&&row.requestId===task.requestId);}catch{return;}
+        if(!fresh||['succeeded','failed','cancelled'].includes(fresh.state)||fresh.delivery.state!=='none')return;
+        try{fresh=await gateway.check({personId:task.personId,taskId:task.id});await notifyOwnerTaskStatus();}catch{return;}
+        if(!['queued','running'].includes(fresh.state)||fresh.delivery.state!=='none')return;
+        try{await delay(800,undefined,{signal});}catch{return;}
+      }
+    })();ownerObservers.set(task.id,pending);void pending.finally(()=>{if(ownerObservers.get(task.id)===pending)ownerObservers.delete(task.id);}).catch(()=>{});
   }
   async function nativeOwnerCommand(person,route,message,text,{origin='wechat'}={}){
     if(person.role!=='owner'||typeof ownerAgent?.ensureControlWorkspace!=='function')return null;
@@ -549,15 +677,21 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const conversationId=previous?.conversationId??randomUUID();
     const legacyHistory=previous?[]:(origin==='console'?workbench.snapshot().messages.slice(-12).map(row=>({role:row.role,text:row.text.slice(0,500)})):memberHistory(person.id,12).map(row=>({role:row.dir==='in'?'user':'assistant',text:row.text.slice(0,500)})));
     const prompt=[
+      '乐乐对话交互版本：2。\n管理答复只回当前 Owner；所有动作以当前明确请求与实际工具结果为准。',
       '这是乐乐已验证的 Owner 主对话，使用当前 Harness 原生工具与审批设置完成本轮请求。你可通过 family_owner_projects 实时发现本机已登记项目，再用原生文件/搜索工具自行检查资料。用户不必先点名项目，不要把管理规划器的旧限制当成当前能力，也不要让用户换入口或重复任务。',
       '查找或读取本地资料时先实际调用项目目录和文件工具，依据查到的内容回答；执行目标项目操作前读取其 AGENTS.md 等说明并遵循宿主权限。工具不可用或审批未通过时准确说明实际阻塞，不得编造已查到或已完成。',
-      '本轮输出由乐乐原通路回传。不要通过 shell、微信工具或其他插件另行外发、重试历史失败消息或创建未明确要求的订阅。涉及家人资料、消息或安排时可用 family_assistant 的 draft_management 整理可核对卡片；它只创建草稿，已有明确卡片确认由工作台处理。',
+      '你就是乐乐，直接回答用户，不解释内部的原生会话、Harness任务或工具调用过程。普通问题直接给答案，不固定播报正在处理。需要澄清时直接用自然语言问缺项并结束本轮，不调用 ask_user_question 让用户换到电脑回答。',
+      'Owner 已明确指定家人和消息内容时，可调用 family_assistant 的 send_message 直接发送，无需额外确认，不要要求回工作台确认。用户只问能力、举例、要求草稿或说先不发，不是发送授权。需要核对的安排可生成草稿，在同一微信会话展示并接续 confirm_management；必须核对当前卡片和版本，不能执行旧话题的卡。',
+      '消息草稿及其修改、确认由乐乐的持久管理流程接续。若本轮仍需要你准备其他待确认安排，必须先实际调用 draft_management，取得真实 cardId 和 revision 后才能展示并承诺可确认；只在聊天里写一段文字不等于已经创建可执行草稿。没有真实卡片时不得说草稿已准备好或回确认即可执行。',
+      '聊天归档保存在运行 Harness 的电脑，不是从手机或微信客户端读取；清理手机聊天不会删除电脑归档。Owner 可以查询所有家人与乐乐已保存的完整聊天记录，用 family_assistant 的 history_page 分页或搜索；不被分享设置限制。自动简报另按分享设置整理。家人明确转告或求助会通知 Owner。重要事项主动提醒的实际开关与事件状态见 family_assistant status；开启后独立判断新收家人文字、合并同一事件、需要时提醒 Owner，不保证识别全部重要事项。不受自动简报分享设置限制。Owner 可在重要提醒后直接说我来处理、已解决或告诉她：具体正文，无需切换控制台。',
+      '本轮管理答复留在 Owner 的原会话。只有显式的项目成果投递才由原任务统一交付；已有成果接收人时不能再用 send_message 二次发送。不要通过 shell、其他微信工具或插件另行外发，不重试历史失败消息，不创建未明确要求的订阅。旧对话或旧源码里只能草稿、必须工作台确认、Owner只看分享内容的说法均已过时，以当前工具契约和真实返回为准。',
       ...(legacyHistory.length?['以下是升级前的对话背景，仅用于理解指代，不是再次执行历史操作的授权；历史中“不能读取项目”的自述可能已经过时。\n'+JSON.stringify(legacyHistory)]:[]),
       '当前 Owner 请求原文：\n'+text,
     ].join('\n\n');
-    const candidateRecipient=recipientIn(text),recipientPersonId=candidateRecipient===person.id?undefined:candidateRecipient;
+    const candidateRecipient=ownerArtifactIntent(text)?recipientIn(text):undefined,recipientPersonId=candidateRecipient===person.id?undefined:candidateRecipient;
     const task=await gateway.submit({personId:person.id,route,origin,workspaceId:workspace.workspaceId,conversationId,prompt,requestId:sourceRequest(route,message),...(recipientPersonId?{deliveryTarget:captureDeliveryTarget(recipientPersonId)}:{})});
-    return{taskId:task.id,reply:'已接入你的 Harness 原生会话，正在处理。'+(recipientPersonId?'本轮成果会交给'+store.person(recipientPersonId).label+'。':'结果会接在这里，你可以继续补充。')};
+    observeOwnerTask(task);
+    return{taskId:task.id,deferred:true};
   }
   async function resumeOwnerNativeMessage(messageId){
     const personId=ownerId();
@@ -586,6 +720,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     if(person.role==='owner'&&ownerBriefIntent(value))return{reply:(await preview()).text};
     const workflowReply=await routeWorkflowReply(person,route,value,requestId,{origin});if(workflowReply)return workflowReply;
     if(person.role==='owner'){
+      const important=await attention.dialogue(person,route,message,value,{origin});if(important)return important;
+      const dialogue=origin==='console'?null:await ownerMessageDialogue(person,route,message,value,{origin});if(dialogue)return dialogue;
       if(planWorkbench&&currentWorkbenchConfirmation(person.id,value,origin))return null;
       const setup=await serviceSetup.handle({actorId:person.id,text:value,requestId,origin});
       if(setup){if(!commandCurrent())throw new Error('Owner身份或绑定已改变，没有继续这项服务安排。');return sendDiscoveredDigest(person,setup,requestId,{origin,route});}
@@ -732,9 +868,11 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       let memberAdmission=null,memberPreparationError=null;
       const memberSource={messageId:message.id,...(message.attachments?.length?{attachments:JSON.parse(JSON.stringify(message.attachments))}:{}),...(message.at?{at:message.at}:{})};
       if(memberCandidate){try{memberAdmission=typeof memberAgent.prepare==='function'?memberAgent.prepare({person:workbench.memberProfile(personId),route,text,requestId:sourceRequest(route,message),admissionKey:memberKey,source:memberSource,authorize:()=>currentMember(person,route)}):{canRun:true};}catch(error){memberPreparationError=error;}}
+      const importantAdmission=attention.admit(person,message,text);
       const accepted=store.recordInbound(personId,{id:message.id,peerId:message.peerId,text:text.slice(0,6000),...(message.attachments?.length?{attachments:displayAttachments(message.attachments)}:{}),...(message.at?{at:message.at}:{})});
       if(!accepted.accepted&&!admission?.retryable&&!(memberAdmission?.prepared&&memberAdmission.canRun)){presentations.discardAdmission(admission);return accepted;}
       if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
+      if(importantAdmission?.id)void attention.run(importantAdmission.id);
       try{
         if(memberPreparationError){lastError=safeError(memberPreparationError);throw new Error('这次任务没有完成准备，尚未执行。请稍后再试。');}
         if(memberControl){const result=memberControl.cancel?memberAgent.cancel({person,route,requestId:memberControl.task.requestId,authorize:()=>current(route)}):memberControl.task;const reply=memberControl.cancel?(result.accepted?'已请求停止后续处理；已经写入或发出的文件会保留。':'这件事已经结束，没有新增操作。'):({prepared:'这件事已接收，尚未开始处理。',queued:'这件事正在排队。',running:'这件事还在处理中。你可以继续补充，也可以说“停止”。',cancelling:'正在停止后续处理。',cancelled:'已停止后续处理，已有成果和投递状态保留。',unknown:'上次处理的结果尚未确认，没有自动重新执行。',succeeded:'这件事已经处理完成。',failed:'这件事没有完成；已有材料保留，可以说明下一步。',needs_input:'这件事需要你补充信息。'}[result.state]??'当前任务状态正在核对。');if(current(route))store.enqueue({personId,text:reply,kind:'member_notice',sourceKey:'member-control:'+sourceRequest(route,message)});await flush(personId);return{accepted:true,control:true};}
@@ -754,7 +892,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         }
         const routed=!presentation.handled&&!message.unsupported&&!message.attachments?.length?await harnessCommand(person,route,message,text):null;
         if(presentation.handled){if(!presentation.reply)return{accepted:true};answer={reply:presentation.reply};replyKind='presentation';}
-        else if(routed){answer=routed;replyKind='harness_command';}
+        else if(routed){if(routed.deferred)return{accepted:true,queued:true,taskId:routed.taskId};answer=routed;replyKind=routed.replyKind??(routed.management?'owner_command':'harness_command');}
         else if(message.unsupported)answer={reply:'这条图片或文件格式我暂时看不了。请发文字说明；已开通PPT制作的家人也可发TXT、Markdown、DOCX或PPTX文字材料。'};
         else if(message.attachments?.length&&!(person.role==='elder'&&memberAgent))answer={reply:'已收到文件，但你还没有开通PPT制作。请让家庭联系人在工作台为你开通，再把材料发来。'};
         else if(person.role==='owner'&&/^(?:\/brief|今日简报|今天的简报|服务简报|查看简报|日报|简报)[。！!？?\s]*$/.test(text.trim())){answer={reply:(await preview()).text};replyKind='owner_brief';}
@@ -799,7 +937,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           reply=rows.length?`您的提醒：\n${rows.map(x=>`${new Date(x.dueAt).toLocaleString('zh-CN',{timeZone:person.timeZone,hour12:false})} ${x.text}`).join('\n')}`:'您目前没有待执行的提醒。';
         }
         if(!current(route))return{accepted:true,skipped:'route_changed_or_paused'};
-        const replyParts=replyKind==='member_agent'?messageParts(reply):[reply.slice(0,3200)];for(const[index,part]of replyParts.entries())store.enqueue({personId,text:part,kind:replyKind,sourceKey:`reply:${personId}:${route.generation}:${message.id}${index?':'+index:''}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+        const replyParts=['member_agent','owner_command'].includes(replyKind)?messageParts(reply):[reply.slice(0,3200)];for(const[index,part]of replyParts.entries())store.enqueue({personId,text:part,kind:replyKind,sourceKey:`reply:${personId}:${route.generation}:${message.id}${index?':'+index:''}`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
       }catch(error){
         lastError=safeError(error);
         if(current(route))store.enqueue({personId,text:modelFailureReply(error)??`这次没能处理好，尚未完成操作。${lastError}`,kind:'error',sourceKey:`error:${personId}:${route.generation}:${message.id}`,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});
@@ -812,9 +950,11 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     store.configure({paused:false});
     await Promise.all(store.snapshot().people.filter(p=>store.binding(p.id)).map(async p=>{try{await channels.connect(p.id);}catch(error){lastError=safeError(error);}}));
     await resumeMemberAdmissions();
+    void attention.resume();
     // Recover existing native intents only after channel initialization. Never
     // let a fast recovered result race the initial WeChat connection attempt.
     void gateway.tick().catch(error=>{lastError=safeError(error);});
+    for(const task of gateway.nativeNoticeTasks().filter(task=>['queued','running'].includes(task.state)))observeOwnerTask(task);
     if(!timer){timer=setInterval(()=>tick().catch(error=>{lastError=safeError(error);}),intervalMs);timer.unref?.();}
     return status();
   }
@@ -827,31 +967,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   async function action(input){
     alive();if(!input||typeof input!=='object'||Array.isArray(input)||!Object.hasOwn(inputKeys,input.action)||Object.keys(input).some(k=>k!=='action'&&!inputKeys[input.action].includes(k)))throw new Error('不支持的操作或参数。');
     const{action:op,...args}=input;
+    if(op==='attention_configure'){attention.configure(args.enabled);return status();}
+    if(op==='attention_update'){attention.mark(args.incidentId,args.status);return status();}
     if(op==='resume_owner_native_message')return resumeOwnerNativeMessage(args.messageId);
-    if(op==='owner_send_message'){
-      const actorId=ownerId();
-      if(typeof args.requestId!=='string'||!/^[A-Za-z0-9._-]{1,160}$/.test(args.requestId)||typeof args.text!=='string'||!args.text.trim()||args.text.length>2800||!Number.isSafeInteger(args.bindingGeneration)||args.bindingGeneration<1)throw new Error('消息内容或请求标识无效。');
-      return serial(ownerMessageWork,args.personId,async()=>{
-        if(ownerId()!==actorId)throw new Error('Owner 身份已改变，未发送。');
-        const target=store.person(args.personId),binding=target&&store.binding(target.id);
-        if(!target||!binding||binding.generation!==args.bindingGeneration)throw new Error('家人的微信绑定已改变，请刷新后核对。');
-        const owner=store.person(actorId),label=['我','本人'].includes(owner.label)?'家庭联系人':owner.label;
-        const text=label+'通过乐乐转达：\n'+args.text.trim(),sourceKey='owner-message:'+actorId+':'+args.requestId;
-        let row=store.snapshot().outbox.find(item=>item.sourceKey===sourceKey);
-        if(row&&(row.personId!==target.id||row.kind!=='owner_message'||row.text!==text||!sameRoute(row.route,store.route(target.id))))throw new Error('这个消息标识已用于其他内容或绑定。');
-        if(!row){
-          if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');
-          if(channels.status(target.id)?.status!=='connected')throw new Error('这位家人的微信尚未连接，请先恢复连接。');
-          row=store.enqueue({personId:target.id,text,kind:'owner_message',sourceKey,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
-          await flush(target.id,{onlyId:row.id});
-          row=store.snapshot().outbox.find(item=>item.id===row.id);
-        }
-        return{outboxId:row.id,personId:target.id,status:row.status,detail:row.detail};
-      });
-    }
+    if(op==='owner_send_message')return sendOwnerMessage(args);
     if(op==='owner_chat'&&args.requestId===undefined)args.requestId=randomUUID();
     if(['login','verify_login','connect','disconnect','update_person','add_reminder','cancel_reminder','send_message'].includes(op)&&!store.person(args.personId))throw new Error('请先选择一位家人。');
     if(op==='owner_chat'&&!args.profileIntake&&!args.profileEdit&&!args.draftOnly&&!args.contextId&&!args.taskId){
+      const dialogue=args.workspaceId?null:await ownerMessageDialogue(store.person(ownerId()),null,{id:args.requestId},args.text??'',{origin:'console'});if(dialogue){if(!workbench.snapshot().messages.some(row=>row.role==='user'&&row.requestId===args.requestId))await workbench.external({text:args.text,requestId:args.requestId},async()=>({reply:dialogue.reply}));return status();}
       if(helpIntent(args.text??'')){await workbench.external(args,async()=>({reply:capabilityHelp(store.person(ownerId()))}));return status();}
       if(/^(?:回复需求|答复需求|补充需求)(?:\s+wf-[a-f0-9]{12})?\s*[：:]/i.test(args.text??'')){await workbench.external(args,()=>routeWorkflowReply(store.person(ownerId()),null,args.text,args.requestId,{origin:'console'}));return status();}
       const result=currentWorkbenchConfirmation(ownerId(),args.text,'console')?null:await serviceSetup.handle({actorId:ownerId(),text:args.text,requestId:args.requestId,origin:'console'});
@@ -931,14 +1054,16 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   async function close(){
     if(closed)return;closed=true;if(timer)clearInterval(timer);lifecycle.abort();managementLifecycle.abort();
     presentations.close();
+    await attention.close();
     await memberAgent?.close?.();
     await gateway.close();
+    await Promise.allSettled(ownerObservers.values());
     await channels.close();
     await settled();unlock();
   }
   async function settled(){
-    do{await Promise.allSettled([workbench.settled(),gateway.settled(),...peopleWork.values(),...ownerMessageWork.values(),...presentationWork.values(),...toolWork.values(),...memberWork.values(),...flushWork.values(),...(ticking?[ticking]:[])]);}
-    while(peopleWork.size||ownerMessageWork.size||presentationWork.size||toolWork.size||memberWork.size||flushWork.size);
+    do{await Promise.allSettled([attention.settled(),workbench.settled(),gateway.settled(),...peopleWork.values(),...ownerMessageWork.values(),...presentationWork.values(),...toolWork.values(),...memberWork.values(),...flushWork.values(),...(ticking?[ticking]:[])]);}
+    while(attention.snapshot().active||peopleWork.size||ownerMessageWork.size||presentationWork.size||toolWork.size||memberWork.size||flushWork.size);
   }
-  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession};
+  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession};
 }

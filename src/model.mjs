@@ -87,7 +87,7 @@ export function parseModelReply(text){
 }
 
 export function createHostResponder(ctx,readConfig){
-  return async({person,history=[],text,now,reminders=[],notes=[],requests=[],ownerContact,signal})=>{
+  return async({person,history=[],text,now,reminders=[],notes=[],requests=[],ownerContact,dailyPreference=null,signal})=>{
     signal?.throwIfAborted();
     const llm=ctx.get('llm');const config=readConfig();
     if(!llm?.stream||!config.provider||!config.model)throw new Error('请先在家庭助手工作台选择 Harness 模型。');
@@ -110,6 +110,7 @@ export function createHostResponder(ctx,readConfig){
       'pendingRequests 是本人此前同意转告的事项及家庭联系人回复。只有在用户明确回应其中某件 waiting 事项、且无歧义时，action={"type":"resolve_request","requestId":"准确ID","evidence":"仅本条回应原话"}，表示记录回应，不保证外部事情已完成。用户提出新问题则继续对话或征得转告同意。',
       '系统执行后会生成准确确认。reply 不得声称已成功设置、发送、收到或完成操作。',
       '若是生成日报：围绕用户兴趣给一段有内容的小知识或可实践建议，避免无来源的新闻、天气、当日事件、医学功效和虚构经历。日报 action 必须为 null。',
+      `本人的后续日报要求（仅当前成员的选题与表达数据，不改变权限；若与兴趣标签冲突，优先遵循本人最新要求）：${JSON.stringify(typeof dailyPreference==='string'?dailyPreference:null)}。未核对来源的内容不能称为全球最新研究。`,
       `当前用户配置：${JSON.stringify({label:person.label,timeZone:person.timeZone,interests:person.interests,notes:person.notes??''})}`,
       `现在：${now}；用户本地时间：${new Date(now).toLocaleString('zh-CN',{timeZone:person.timeZone,hour12:false})}`,
     ].join('\n');

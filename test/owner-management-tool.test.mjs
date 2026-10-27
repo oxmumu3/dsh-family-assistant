@@ -13,6 +13,13 @@ function setup(t){
   const executed=[],wb=createWorkbench({directory,store,plan:async()=>output,execute:async a=>{executed.push(a);return{status:'api_accepted'};}});
   return{store,wb,executed,set:value=>output=value};
 }
+test('mounted Owner native tool offers direct messages, complete local history and inline confirmation',async t=>{
+  const {apply}=await import('../index.js'),directory=mkdtempSync(join(tmpdir(),'family-owner-capability-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));const tools=[];
+  const services={connection:{fetch:{register(){return()=>{};}}},tools:{register(tool){tools.push(tool);}},llm:{listProviders:()=>[]}};
+  const dispose=apply({get:name=>services[name],tools:services.tools,effect:fn=>fn()},{storageDir:directory});t.after(dispose);
+  const actions=tools.find(tool=>tool.name==='family_assistant').parameters.properties.action.enum;
+  for(const action of ['send_message','history_page','confirm_management'])assert.ok(actions.includes(action),'Missing actual Owner capability: '+action);
+});
 test('Host project result becomes an idempotent family draft without dispatch',async t=>{
   const {wb,executed}=setup(t),input={text:'把合成摘要给K，先准备安排',requestId:'host-call-1',draftOnly:true};
   await wb.chat(input);await wb.chat(input);const state=wb.snapshot();
@@ -26,7 +33,7 @@ test('Host draft helper cannot confirm/cancel or mutate an existing member throu
   assert.equal(executed.length,0);assert.equal(store.person('k').label,'K');assert.equal(wb.snapshot().cards[0].status,'draft');
   assert.match(wb.snapshot().messages.at(-1).text,/草稿/);
 });
-test('mounted Host tool exposes bounded member context and a draft action, never a send action',async t=>{
+test('mounted Host tool rejects unregistered native sessions before returning context or planning',async t=>{
   const {apply}=await import('../index.js'),directory=mkdtempSync(join(tmpdir(),'family-mounted-tool-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));
   const routes=[],tools=[];let requests=0;
   const services={connection:{fetch:{register(route){routes.push(route);return()=>{};}}},tools:{register(tool){tools.push(tool);}},llm:{listProviders:()=>[],async *stream(){requests++;yield{type:'text-delta',index:0,text:JSON.stringify({reply:'请核对',operation:{type:'plan',actions:[{type:'send_message',personId:memberId,text:'三条精选和七条摘要的合成内容'}]}})};yield{type:'finish',reason:'stop'};}}};
@@ -35,13 +42,9 @@ test('mounted Host tool exposes bounded member context and a draft action, never
   await invoke({action:'add_person',role:'owner',label:'我'});let state=await invoke({action:'add_person',role:'elder',label:'K'});const memberId=state.people.find(p=>p.role==='elder').id;
   await invoke({action:'configure',provider:'synthetic',model:'fixture'});
   const exec={callId:'synthetic-tool-call',agent:{id:'synthetic-owner-session'},signal:new AbortController().signal};
-  const status=await tools[0].execute({action:'status'},exec);assert.equal(status.people.find(p=>p.label==='K').id,memberId);
-  assert.equal(status.people.some(p=>'peerId'in p||'history'in p||'token'in p),false);
+  await assert.rejects(tools[0].execute({action:'status'},exec));
   const args={action:'draft_management',text:'将合成的三条精选和七条摘要发给K。'};
-  const first=await tools[0].execute(args,exec);const again=await tools[0].execute(args,exec);
-  assert.equal(requests,1);assert.equal(first.cards.length,1);assert.deepEqual(again.cards,first.cards);assert.equal(first.cards[0].actions[0].status,'draft');assert.match(first.text,/确认/);
-  const other=await tools[0].execute(args,{...exec,agent:{id:'second-owner-session'}});
-  assert.equal(requests,2);assert.notEqual(other.requestId,first.requestId);assert.notEqual(other.cards[0].id,first.cards[0].id);
+  await assert.rejects(tools[0].execute(args,exec));await assert.rejects(tools[0].execute(args,{...exec,agent:{id:'second-owner-session'}}));assert.equal(requests,0);
   assert.equal((await invoke({action:'preview_brief'})).outbox.length,0);
   await assert.rejects(tools[0].execute({action:'draft_management',text:'hi',send:true},exec),/操作|参数/);
   await assert.rejects(tools[0].execute(args,{signal:exec.signal}),/请求|标识/);

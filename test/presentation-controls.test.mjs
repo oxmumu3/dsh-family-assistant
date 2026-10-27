@@ -84,6 +84,7 @@ async function ui(snapshot,{post,storage=new Map()}={}){
     append(...children){this.children.push(...children);for(const child of children)child.parent=this;}
     replaceChildren(...children){this._text='';this.children=[];this.append(...children);}
     remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);}
+    contains(target){return target===this||this.children.some(child=>child.contains?.(target));}
     setAttribute(key,value){this.attributes[key]=String(value);}removeAttribute(key){delete this.attributes[key];}
     addEventListener(event,fn){(this.listeners[event]??=[]).push(fn);}fire(event){for(const fn of this.listeners[event]??[])fn({preventDefault(){},target:this});}
     focus(){document.activeElement=this;}reset(){this.dataset.dirty='';}querySelectorAll(selector){return descendants(this).filter(element=>selector.includes(element.tagName));}

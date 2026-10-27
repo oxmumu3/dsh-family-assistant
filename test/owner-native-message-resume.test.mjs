@@ -48,7 +48,7 @@ test('resume uses the saved Owner inbound and original request once without anot
  assert.equal(f.starts[0].prompt.endsWith(text),true);assert.equal(task.delivery.state,'accepted');
  assert.deepEqual(f.runtime.store.snapshot().messages.filter(row=>row.dir==='in'),before.messages.filter(row=>row.dir==='in'));
  assert.deepEqual(f.runtime.store.snapshot().outbox.filter(row=>row.kind==='harness_command'),before.outbox);
- assert.deepEqual(f.sent,[{personId:'owner',text:'Harness 任务结果\nAI日报正文合成结果'}]);
+ assert.deepEqual(f.sent,[{personId:'owner',text:'AI日报正文合成结果'}]);
  assert.deepEqual(f.runtime.store.snapshot().people,before.people);assert.deepEqual(f.runtime.store.snapshot().reminders,before.reminders);
  assert.equal(readFileSync(join(f.directory,'service-setup.json'),'utf8'),service);
  const again=await f.runtime.action({action:'resume_owner_native_message',messageId:f.message.id});await f.runtime.settled();
@@ -91,6 +91,6 @@ test('the original negative delivery request now enters native directly on both 
   else await f.runtime.action({action:'owner_chat',requestId:'new-native-'+origin,text});
   await f.runtime.settled();assert.equal(f.starts.length,1);assert.equal(f.starts[0].origin,origin);assert.equal(f.starts[0].deliveryTarget,undefined);
   assert.equal(f.sent.some(row=>row.personId==='k'),false);assert.equal(f.runtime.status().serviceSetup.length,1);
-  assert.equal(f.runtime.store.snapshot().outbox.length,before+(origin==='wechat'?2:0));
+  assert.equal(f.runtime.store.snapshot().outbox.length,before+(origin==='wechat'?1:0));
  }
 });

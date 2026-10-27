@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import { createFamilyToolbox } from '../src/family-toolbox.mjs';
 
 const now = () => '2026-10-25T00:00:00.000Z';
-function fixture(t, executors = {}) {
+function fixture(t, executors = {}, clock = now) {
   const directory = mkdtempSync(join(tmpdir(), 'family-toolbox-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const people = [{ id: 'owner', role: 'owner', createdAt: 'owner-v1' }, { id: 'mom', role: 'elder', createdAt: 'mom-v1' }, { id: 'dad', role: 'elder', createdAt: 'dad-v1' }];
   const bindings = [{ personId: 'mom', accountId: 'account', peerId: 'peer', generation: 1, status: 'connected' }];
   const store = { snapshot: () => structuredClone({ people, bindings }) };
-  const options = { directory, store, executors, now };
+  const options = { directory, store, executors, now: clock };
   return { directory, people, bindings, options, box: createFamilyToolbox(options) };
 }
 const grant = { actorId: 'owner', personId: 'mom', toolId: 'ai_digest', resource: { workspaceId: 'daily', relativePath: 'reports/latest.md' }, allowInvoke: true };
@@ -232,4 +232,54 @@ test('Owner may configure a disconnected family member, while invocation waits f
 test('trusted Owner administration does not depend on Owner WeChat being connected',t=>{
  const{box,bindings}=fixture(t);bindings.push({personId:'owner',accountId:'owner',peerId:'owner',generation:1,status:'disconnected'});
  assert.equal(box.assign(grant).personId,'mom');assert.equal(box.listRequests({actorId:'owner'}).length,0);
+});
+
+test('a missed subscription catches up through exactly two hours using its original occurrence identity',t=>{
+ let instant='2026-10-24T23:59:00.000Z';
+ const f=fixture(t,{ai_digest:()=> 'report'},()=>instant);
+ f.box.assign({...grant,schedule:{enabled:true,time:'08:00',timeZone:'Asia/Shanghai'}});
+ instant='2026-10-25T00:01:00.000Z';
+ const [due]=f.box.due();assert.ok(due);assert.equal(due.localDate,'2026-10-25');assert.equal(due.time,'08:00');
+ assert.equal(due.requestId,'tool:ai_digest:mom:1:2026-10-25:08:00');assert.equal(due.sourceKey,due.requestId);
+ instant='2026-10-25T02:00:00.000Z';assert.deepEqual(f.box.due(),[due]);
+ instant='2026-10-25T02:00:00.001Z';assert.deepEqual(f.box.due(),[]);
+ instant='2026-10-24T23:59:30.000Z';assert.deepEqual(f.box.due(),[]);
+});
+
+test('catch-up across local midnight preserves the previous date and the scheduled time',t=>{
+ let instant='2026-10-25T14:00:00.000Z';const f=fixture(t,{ai_digest:()=> 'report'},()=>instant);
+ f.box.assign({...grant,schedule:{enabled:true,time:'23:30',timeZone:'Asia/Shanghai'}});
+ instant='2026-10-25T16:30:00.000Z';const[due]=f.box.due();assert.ok(due);
+ assert.equal(due.localDate,'2026-10-25');assert.equal(due.time,'23:30');assert.equal(due.requestId,'tool:ai_digest:mom:1:2026-10-25:23:30');
+});
+
+test('a newly authorized or revised subscription never catches up an occurrence before its grant timestamp',t=>{
+ let instant='2026-10-25T00:01:00.000Z';const f=fixture(t,{ai_digest:()=> 'report'},()=>instant);
+ const scheduled={...grant,schedule:{enabled:true,time:'08:00',timeZone:'Asia/Shanghai'}};
+ f.box.assign(scheduled);assert.deepEqual(f.box.due(),[]);
+ instant='2026-10-26T00:10:00.000Z';assert.equal(f.box.due().length,1);
+ f.box.assign({...scheduled,schedule:{...scheduled.schedule,time:'08:05'}});assert.deepEqual(f.box.due(),[]);
+ instant='2026-10-27T00:05:00.000Z';const[due]=f.box.due();assert.equal(due.expectedRevision,2);assert.equal(due.time,'08:05');
+});
+
+test('DST fall-back is one original occurrence and a nonexistent spring-forward time is skipped',t=>{
+ let instant='2026-10-31T12:00:00.000Z';const f=fixture(t,{ai_digest:()=> 'report'},()=>instant);
+ f.box.assign({...grant,schedule:{enabled:true,time:'01:30',timeZone:'America/New_York'}});
+ instant='2026-11-01T05:30:00.000Z';const first=f.box.due();assert.equal(first.length,1);
+ instant='2026-11-01T06:45:00.000Z';assert.deepEqual(f.box.due(),first);
+ instant='2026-11-01T07:30:00.000Z';assert.deepEqual(f.box.due(),first);
+ instant='2026-11-01T07:30:00.001Z';assert.deepEqual(f.box.due(),[]);
+ instant='2026-03-07T12:00:00.000Z';f.box.assign({...grant,schedule:{enabled:true,time:'02:30',timeZone:'America/New_York'}});
+ instant='2026-03-08T07:00:00.000Z';assert.deepEqual(f.box.due(),[]);
+});
+
+for(const status of ['queued','running','succeeded','failed','uncertain'])test('a '+status+' subscription occurrence is never offered again, including after rebind or restart',async t=>{
+ let instant='2026-10-24T23:59:00.000Z';let calls=0;const f=fixture(t,{ai_digest:()=>{calls++;return 'report';}},()=>instant);
+ f.box.assign({...grant,schedule:{enabled:true,time:'08:00',timeZone:'Asia/Shanghai'}});
+ instant='2026-10-25T00:00:00.000Z';const[due]=f.box.due();
+ await f.box.invokeScheduled({personId:due.personId,toolId:due.toolId,requestId:due.requestId,expectedRevision:due.expectedRevision});
+ const file=join(f.directory,'family-toolbox.json'),saved=JSON.parse(readFileSync(file,'utf8'));
+ saved.runs[0].status=status;if(status!=='succeeded')delete saved.runs[0].result;writeFileSync(file,JSON.stringify(saved));
+ assert.deepEqual(f.box.due(),[]);instant='2026-10-25T00:30:00.000Z';f.bindings[0].generation++;
+ assert.deepEqual(f.box.due(),[]);assert.deepEqual(createFamilyToolbox(f.options).due(),[]);assert.equal(calls,1);
 });

@@ -29,6 +29,9 @@ test('general writing runs without a tool grant, native session, or JSON reply e
  assert.doesNotMatch(JSON.stringify(f.calls[0]),/account-mom|peer-mom|personId|sessionId|ownerAgent|\/Users\//);assert.ok(f.checks.length>=4);
  await f.agent.close();
 });
+test('member guidance reflects the actual automatic attention switch without inventing notification receipts',async t=>{
+ const f=fixture(t);await f.agent.run({...f.input,importantAlertsEnabled:true});assert.match(f.calls[0].system,/重要事项主动提醒已开启/);assert.match(f.calls[0].system,/不能.*已通知|没有.*回执/);assert.match(f.calls[0].system,/本机保存.*家庭联系人/);await f.agent.close();
+});
 test('the default agent retains only its own profile preferences and local time',async t=>{
  const f=fixture(t);await f.agent.run({...f.input,person:{...f.input.person,interests:['合成园艺'],notes:'解释时简短一点'}});
  const payload=JSON.parse(f.calls[0].messages[0].content[0].text);assert.deepEqual(payload.profile,{interests:['合成园艺'],notes:'解释时简短一点'});assert.match(f.calls[0].system,/Asia\/Shanghai/);assert.match(f.calls[0].system,/用户本地时间/);
@@ -315,4 +318,20 @@ test('an explicit preparation failure is terminal and requires current authority
  assert.equal(f.agent.rejectPrepared(taskInput(f)).state,'failed');assert.equal(f.agent.pendingInputs(taskInput(f)).length,0);assert.equal(f.agent.rejectPrepared(taskInput(f)).accepted,false);
  assert.equal(f.agent.status(taskInput(f)).state,'failed');assert.equal(f.calls.length,0);
  assert.throws(()=>f.agent.rejectPrepared({...taskInput(f),authorize:()=>false}));
+});
+
+test('a paraphrased preference can correct its quote once before any setting is changed',async t=>{
+ const text='以后日报少讲术语，多讲饮食结构',bad={instruction:'以后少讲专业词，多讲营养',evidence:text},good={instruction:text,evidence:text};let saved=0;
+ const f=fixture(t,[tool('set_my_report_preference',bad),options=>{assert.equal(saved,0);const reply=options.messages.at(-1);assert.equal(reply.role,'tool');assert.equal(reply.isError,true);assert.equal(JSON.parse(reply.content[0].text).status,'needs_correction');return tool('set_my_report_preference',good,'corrected-pref');},done('已保存本人的后续日报要求。')]);
+ const input={...f.input,text,setReportPreference:async args=>{assert.equal(args.instruction,text);assert.equal(args.evidence,text);saved++;return{revision:1,instruction:text};}};
+ assert.equal((await f.agent.run(input)).state,'succeeded');assert.equal(saved,1);assert.equal(f.calls.length,3);await f.agent.run(input);assert.equal(saved,1);assert.equal(f.calls.length,3);assert.equal(JSON.parse(readFileSync(join(f.workspace(),'.member-agent.json'))).requests[0].actions.length,1);
+});
+test('preference quote correction is bounded and never accepts repeated invented instructions',async t=>{
+ const text='以后日报写短一点',bad={instruction:'改为别人日报',evidence:text};let saved=0;const f=fixture(t,[tool('set_my_report_preference',bad),tool('set_my_report_preference',bad,'repeat-invalid')]);
+ assert.equal((await f.agent.run({...f.input,text,setReportPreference:async()=>{saved++;return{};}})).state,'failed');assert.equal(saved,0);assert.equal(f.calls.length,2);
+});
+test('a quote correction never bypasses revoked authority or retries a callback with unknown effects',async t=>{
+ const text='以后日报写短一点',bad={instruction:'无依据的改写',evidence:text},good={instruction:text,evidence:text};let saved=0;
+ const f=fixture(t,[tool('set_my_report_preference',bad),()=>{f.setAllowed(false);return tool('set_my_report_preference',good,'revoked');}]);const result=await f.agent.run({...f.input,text,setReportPreference:async()=>{saved++;return{};}});assert.equal(result.state,'failed');assert.equal(saved,0);assert.equal(f.calls.length,2);
+ const g=fixture(t,[tool('set_my_report_preference',good)]);let attempted=0;const uncertain=await g.agent.run({...g.input,text,setReportPreference:async()=>{attempted++;throw Object.assign(Error('disk uncertain'),{code:'IO_ERROR'});}});assert.equal(uncertain.state,'failed');assert.equal(attempted,1);assert.equal(g.calls.length,1);
 });

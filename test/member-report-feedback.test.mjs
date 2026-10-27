@@ -41,3 +41,39 @@ test('numeric-set equality cannot authorize swapped morning and evening medicine
 test('Chinese list labels without spaces are formatting rather than invented facts',async t=>{const original='活动日报：周五集合，周六整理照片。',rewritten='活动日报：\n1、周五集合\n2、周六整理照片';const f=fixture(t,{llm:{async *stream(){yield{type:'text-delta',index:0,text:rewritten};yield{type:'finish',reason:{kind:'stop'}};}}});set(f.feedback);assert.equal((await adapt(f.feedback,{text:original})).text,rewritten);});
 test('critical medicine instructions stay unchanged while other report prose may be rewritten',async t=>{const original='合成用药安排：早上1片，晚上2片。今天读3篇文章。',rewritten='合成用药安排：早上1片，晚上2片。今天可以慢慢读3篇文章。';const f=fixture(t,{llm:{async *stream(){yield{type:'text-delta',index:0,text:rewritten};yield{type:'finish',reason:{kind:'stop'}};}}});set(f.feedback);assert.equal((await adapt(f.feedback,{text:original})).text,rewritten);});
 test('a four-digit year followed by a Chinese separator is a fact rather than a list label',async t=>{const f=fixture(t,{llm:{async *stream(){yield{type:'text-delta',index:0,text:'2027年各有3项。'};yield{type:'finish',reason:{kind:'stop'}};}}});set(f.feedback);await assert.rejects(adapt(f.feedback,{text:'2026、2027年各有3项。'}),error=>error.code==='member_report_feedback_unknown');});
+
+for(const [label,original,rewritten]of[
+ ['ISO report heading and citation','健康日报｜2026-10-26\n今天学三件事：认识注射与口服，了解日常健康科普。\n来源[1]：https://example.org/health/2026-10-26','健康日报｜2026-10-26\n今天聊三件事：认识注射与口服，了解日常健康科普。\n来源[1]：https://example.org/health/2026-10-26'],
+ ['calendar heading before general treatment education','健康日报 2026年10月26日\n今天学三件事：看看治疗科普与口服常识。\n来源[1]：https://example.org/health','健康日报 2026年10月26日\n今天聊三件事：看看治疗科普与口服常识。\n来源[1]：https://example.org/health'],
+ ['dose-like source URL without a clinical amount','今天学一点：认识注射与口服\n来源[1]：https://example.org/health/1mg/2026','今天聊一点：认识注射与口服\n来源[1]：https://example.org/health/1mg/2026'],
+ ['numbered education rather than medicine instructions','1. 注射与口服有不同给药方式。','1. 注射与口服有不同给药途径。'],
+ ['line wrapping around actual unchanged medicine facts','合成医嘱：早上1片，晚上2片。今天读3篇文章。','合成医嘱：\n早上\n1片，晚上\n2片。今天慢慢读3篇文章。'],
+ ['standalone dated heading before dose-free injection education','健康日报2026-10-26\n注射与口服的科普可以慢慢了解。','健康日报2026-10-26\n注射与口服的科普可以一起聊聊。'],
+ ['dated educational heading with treatment terms before the date','注射与口服科普｜2026-10-26\n今天学三件事：认识不同给药途径。','注射与口服科普｜2026-10-26\n今天聊三件事：认识不同给药途径。'],
+])test('safe style rewrite does not lock '+label,async t=>{
+ const f=fixture(t,{llm:{async *stream(){yield{type:'text-delta',index:0,text:rewritten};yield{type:'finish',reason:{kind:'stop'}};}}});set(f.feedback);
+ const value=await adapt(f.feedback,{text:original});assert.equal(value.text,rewritten);assert.equal(value.adapted,true);
+ const saved=JSON.parse(readFileSync(join(f.directory,'member-report-feedback.json'),'utf8'));assert.equal(saved.reports[0].originalText,original);assert.equal(saved.reports[0].status,'ready');
+});
+
+for(const [label,original,rewritten]of[
+ ['morning and evening amounts across newlines','合成用药安排：\n早上1片\n晚上2片。','合成用药安排：\n早上2片\n晚上1片。'],
+ ['medicine to amount association across newlines','合成用药安排：\n药物A 1片\n药物B 2片。','合成用药安排：\n药物A 2片\n药物B 1片。'],
+ ['time labels separated from dose lines','合成医嘱：\n早上\n1片\n晚上\n2片。','合成医嘱：\n晚上\n1片\n早上\n2片。'],
+ ['repeated dose deletion with the same numeric set','合成医嘱：\n每天早上1片\n每天晚上1片。','合成医嘱：\n每天早上1片。'],
+ ['treatment clock associations','合成治疗安排：\n第一项治疗8:00\n第二项治疗20:00。','合成治疗安排：\n第一项治疗20:00\n第二项治疗8:00。'],
+ ['treatment duration associations','合成治疗安排：首阶段3天，后阶段7天。','合成治疗安排：首阶段7天，后阶段3天。'],
+ ['treatment calendar associations','合成治疗日期：首项2026-10-26，次项2026-10-27。','合成治疗日期：首项2026-10-27，次项2026-10-26。'],
+ ['clock values separated from time labels','合成治疗时间：\n早上\n8:00\n晚上\n20:00。','合成治疗时间：\n早上\n20:00\n晚上\n8:00。'],
+ ['bracketed treatment clock values are not citations','合成治疗时间：早上[8]:00，晚上[20]:00。','合成治疗时间：早上[20]:00，晚上[8]:00。'],
+ ['dates directly before clinical actions without a schedule label','合成治疗记录：2026-10-26注射A，2026-10-27注射B。','合成治疗记录：2026-10-27注射A，2026-10-26注射B。'],
+ ['dates after clinical actions without a schedule label','合成治疗记录：注射A于2026-10-26，注射B于2026-10-27。','合成治疗记录：注射A于2026-10-27，注射B于2026-10-26。'],
+ ['clinical date and action on adjacent lines','合成治疗记录：\n2026-10-26\n注射A\n2026-10-27\n注射B。','合成治疗记录：\n2026-10-27\n注射A\n2026-10-26\n注射B。'],
+ ['clinical action and date on adjacent lines','合成治疗记录：\n注射A\n2026-10-26\n注射B\n2026-10-27。','合成治疗记录：\n注射A\n2026-10-27\n注射B\n2026-10-26。'],
+ ['clinical dated actions without any heading','2026-10-26注射A，2026-10-27注射B。','2026-10-27注射A，2026-10-26注射B。'],
+ ['clinical actions with dates in parentheses','注射A（2026-10-26），注射B（2026-10-27）。','注射A（2026-10-27），注射B（2026-10-26）。'],
+])test('medical fact guard rejects changed '+label,async t=>{
+ const f=fixture(t,{llm:{async *stream(){yield{type:'text-delta',index:0,text:rewritten};yield{type:'finish',reason:{kind:'stop'}};}}});set(f.feedback);
+ await assert.rejects(adapt(f.feedback,{text:original}),error=>error.code==='member_report_feedback_unknown');
+ const saved=JSON.parse(readFileSync(join(f.directory,'member-report-feedback.json'),'utf8'));assert.equal(saved.reports[0].originalText,original);assert.equal(saved.reports[0].status,'unknown');assert.equal(saved.reports[0].text,null);
+});

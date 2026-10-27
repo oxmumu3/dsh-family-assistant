@@ -99,7 +99,7 @@ test('long native results still produce a bounded WeChat return instead of silen
  const content='合成正文。'.repeat(800);const{runtime,sent}=await setup(t,{ownerAgent:{listWorkspaces:async()=>[{workspaceId:'family',path:'/tmp/synthetic-family',title:'家庭资料',sessionIds:[]}],start:async()=>({state:'succeeded',text:content}),observe:async()=>({state:'succeeded',text:content})}});
  await inbound(runtime,'owner','long-native','在【家庭资料】项目执行：起草内容。');await runtime.settled();
  const rows=runtime.store.snapshot().outbox.filter(row=>row.kind==='harness_result');assert.ok(rows.length>=1);assert.ok(rows.every(row=>row.text.length<=3200));assert.equal(sent.some(row=>row.text.includes('合成正文')),true);
- assert.equal(rows.map(row=>row.text.replace(/^Harness 任务结果[^\n]*\n/,'')).join(''),content);assert.ok(sent.findIndex(row=>row.text.includes('任务已登记'))<sent.findIndex(row=>row.text.includes('合成正文')));
+ assert.equal(rows.map(row=>row.text.replace(/^（\d+\/\d+）\n/,'')).join(''),content);assert.ok(sent.findIndex(row=>row.text.includes('任务已登记'))<sent.findIndex(row=>row.text.includes('合成正文')));
  await inbound(runtime,'owner','long-native','在【家庭资料】项目执行：起草内容。');await runtime.settled();assert.equal(runtime.store.snapshot().outbox.filter(row=>row.kind==='harness_result').length,rows.length);
 });
 test('long family tool results produce a bounded return through the ordinary member route',async t=>{

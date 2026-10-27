@@ -69,6 +69,48 @@ const historyComposer=view=>byName(view.elements.get('workspace'),'owner-history
 const historyPost=body=>body.action==='history_page'?response({access:'full',messages:[{id:'saved-'+body.personId,dir:'in',text:'原始对话-'+body.personId,at:'2026-10-25T09:00:00Z'}],total:1,hasMore:false}):undefined;
 const openMember=async(view,id)=>{view.click('nav-family');descendants(view.elements.get('workspace')).find(n=>n.dataset.personId===id).fire('click');await view.settle();};
 
+const attentionIncident=(id,patch={})=>({id,personId:'mom',label:'测试家人甲',urgency:'soon',category:'needs_help',status:'open',quote:'这件事我有点担心，想让家人帮我看看。',reason:'家人可能需要你的帮助。',createdAt:'2026-10-26T10:00:00Z',updatedAt:'2026-10-26T10:00:00Z',deliveryStatus:'api_accepted',...patch});
+const withAttention=(incidents=[],enabled=true)=>({...connectedFamily(),attention:{enabled,incidents,pendingCount:incidents.filter(x=>x.status==='open').length,lastError:null}});
+
+test('important attention has one settings toggle and persists its read-back without changing brief settings',async()=>{
+ const snapshot=withAttention([],true);const view=await workbenchHarness({snapshot,post:body=>{if(body.action==='attention_configure'){snapshot.attention.enabled=body.enabled;return response(structuredClone(snapshot));}}});
+ view.click('settings-open');const toggle=view.elements.get('attention-enabled');assert.ok(toggle,'important attention settings are visible');assert.equal(toggle.checked,true);assert.equal(toggle.disabled,false);
+ toggle.checked=false;toggle.fire('change');toggle.fire('change');await view.settle();const changes=view.requests.filter(x=>x.body?.action==='attention_configure');assert.equal(changes.length,1);assert.deepEqual(changes[0].body,{action:'attention_configure',enabled:false});assert.equal(toggle.checked,false);assert.equal(view.requests.some(x=>x.body?.action==='configure'||x.body?.action==='send_brief'),false);
+});
+
+test('important attention settings recover the saved value after a failed request',async()=>{
+ const snapshot=withAttention([],false),view=await workbenchHarness({snapshot,post:body=>body.action==='attention_configure'?Promise.reject(new TypeError('offline')):undefined});view.click('settings-open');const toggle=view.elements.get('attention-enabled');assert.ok(toggle);toggle.checked=true;toggle.fire('change');await view.settle();assert.equal(toggle.checked,false);assert.equal(view.requests.filter(x=>x.body?.action==='attention_configure').length,1);assert.equal(view.elements.get('drawer-error').hidden,false);
+});
+
+test('important attention shows at most three active incidents as literal text and separates delivery from handling',async()=>{
+ const incidents=[attentionIncident('resolved',{status:'resolved',quote:'RESOLVED_QUOTE'}),attentionIncident('muted',{status:'muted',quote:'MUTED_QUOTE'}),attentionIncident('four'),attentionIncident('three'),attentionIncident('two'),attentionIncident('urgent',{urgency:'now',quote:'<img src=x onerror=alert(1)>需要帮忙',updatedAt:'2026-10-26T09:00:00Z'})];
+ const view=await workbenchHarness({snapshot:withAttention(incidents)}),rail=view.elements.get('rail-attention');assert.ok(rail,'existing response rail includes important attention');const cards=descendants(rail).filter(x=>x.className==='attention-incident');assert.equal(cards.length,3);assert.equal(cards[0].dataset.incidentId,'urgent');assert.match(cards[0].textContent,/需尽快关注/);assert.equal(view.elements.get('rail-followup-title').textContent,'需要你留意');assert.match(rail.textContent,/<img src=x onerror=alert\(1\)>需要帮忙/);assert.doesNotMatch(rail.textContent,/RESOLVED_QUOTE|MUTED_QUOTE/);assert.equal(descendants(rail).some(x=>x.tagName==='img'),false);assert.match(rail.textContent,/接口已接受|接口已接收/);assert.match(rail.textContent,/不代表.*已读|未核实阅读/);assert.doesNotMatch(rail.textContent,/Owner已读|主人已读/);assert.match(rail.textContent,/另有1件/);
+});
+
+test('opening an important incident uses the existing selected family archive',async()=>{
+ const view=await workbenchHarness({snapshot:withAttention([attentionIncident('open-history')]),post:historyPost});const rail=view.elements.get('rail-attention');assert.ok(rail);button(rail,'查看对话').fire('click');await view.settle();assert.equal(view.elements.get('nav-family').getAttribute('aria-current'),'page');assert.equal(view.requests.filter(x=>x.body?.action==='history_page').at(-1).body.personId,'mom');assert.match(view.elements.get('workspace').textContent,/原始对话-mom/);
+});
+
+test('important attention handling updates one incident and only removes resolved items after read-back',async()=>{
+ const snapshot=withAttention([attentionIncident('handle')]),view=await workbenchHarness({snapshot,post:body=>{if(body.action==='attention_update'){snapshot.attention.incidents.find(x=>x.id===body.incidentId).status=body.status;return response(structuredClone(snapshot));}}});let rail=view.elements.get('rail-attention');assert.ok(rail);button(rail,'我来处理').fire('click');await view.settle();assert.deepEqual(view.requests.find(x=>x.body?.action==='attention_update').body,{action:'attention_update',incidentId:'handle',status:'acknowledged'});rail=view.elements.get('rail-attention');assert.match(rail.textContent,/你在处理/);assert.match(rail.textContent,/接口已接受|接口已接收/);assert.equal(button(rail,'我来处理'),undefined);button(rail,'已解决').fire('click');await view.settle();assert.equal(view.requests.filter(x=>x.body?.action==='attention_update').length,2);assert.equal(view.requests.filter(x=>x.body?.action==='attention_update').at(-1).body.status,'resolved');assert.doesNotMatch(view.elements.get('rail-attention').textContent,/这件事我有点担心/);assert.equal(view.requests.some(x=>x.body?.action==='owner_send_message'||x.body?.action==='send_message'),false);
+});
+
+test('important attention mute is a secondary action and failure preserves the unresolved incident',async()=>{
+ const snapshot=withAttention([attentionIncident('mute')]),view=await workbenchHarness({snapshot,post:body=>body.action==='attention_update'?Promise.reject(new TypeError('offline')):undefined});let rail=view.elements.get('rail-attention');assert.ok(rail);const lowFrequency=descendants(rail).find(x=>x.tagName==='details');assert.ok(lowFrequency);button(lowFrequency,'不再提醒这件事').fire('click');await view.settle();assert.deepEqual(view.requests.find(x=>x.body?.action==='attention_update').body,{action:'attention_update',incidentId:'mute',status:'muted'});assert.match(view.elements.get('rail-attention').textContent,/这件事我有点担心/);assert.equal(view.requests.filter(x=>x.body?.action==='attention_update').length,1);
+});
+
+test('attention-only refresh updates the rail and has a reachable compact chat fallback for narrow layouts',async()=>{
+ const snapshot=withAttention([]),view=await workbenchHarness({snapshot});assert.equal(view.elements.get('rail-followup-section').hidden,true);snapshot.attention.incidents.push(attentionIncident('new-attention'));view.click('refresh');await view.settle();assert.equal(view.elements.get('rail-followup-section').hidden,false);assert.match(view.elements.get('rail-attention').textContent,/这件事我有点担心/);const compact=descendants(view.elements.get('workspace')).find(x=>x.className==='attention-inline');assert.ok(compact);assert.equal(compact.tagName,'details');assert.match(descendants(compact).find(x=>x.tagName==='summary').textContent,/1件需要你留意/);assert.ok(button(compact,'查看对话'));
+});
+
+test('an expanded compact attention list stays open while fresh service state arrives',async()=>{
+ const snapshot=withAttention([attentionIncident('reading')]),view=await workbenchHarness({snapshot});let compact=descendants(view.elements.get('workspace')).find(x=>x.className==='attention-inline');assert.ok(compact);compact.open=true;compact.fire('toggle');snapshot.attention.incidents[0].reason='已更新的关注原因';view.click('refresh');await view.settle();compact=descendants(view.elements.get('workspace')).find(x=>x.className==='attention-inline');assert.equal(compact.open,true);assert.match(compact.textContent,/已更新的关注原因/);
+});
+
+test('attention toggle stays unavailable when its service contract or Owner is absent',async()=>{
+ let view=await workbenchHarness({snapshot:connectedFamily()});assert.ok(view.elements.get('attention-enabled'));assert.equal(view.elements.get('attention-enabled').disabled,true);const snapshot=withAttention([]);snapshot.people=snapshot.people.filter(x=>x.role!=='owner');view=await workbenchHarness({snapshot});assert.equal(view.elements.get('attention-enabled').disabled,true);
+});
+
 test('family history sends once with the captured recipient and preserves a new draft after a late receipt',async()=>{
  const snapshot=connectedFamily();let finish;
  const view=await workbenchHarness({snapshot,post:body=>body.action==='owner_send_message'?new Promise(resolve=>{finish=()=>resolve(response({outboxId:'sent-one',personId:body.personId,status:'api_accepted',detail:''}));}):historyPost(body)});

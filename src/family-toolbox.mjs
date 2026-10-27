@@ -2,6 +2,8 @@ import { mkdirSync, lstatSync, realpathSync, existsSync, readFileSync, openSync,
 import { resolve, join, parse } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { normalizeDigestResource } from './digest-discovery.mjs';
+import { addLocalDays, localDate, localDateTimeToInstant } from './brief.mjs';
+import { CATCH_UP_MS } from './scheduler.mjs';
 
 const templates = [
   { toolId: 'ai_digest', title: 'AI 精选日报', description: '阅读已授权的日报文件' },
@@ -238,11 +240,20 @@ export function createFamilyToolbox({ directory, store, executors = {}, now = ()
     updateRequest(args) { object(args,['actorId','personId','requestId','status','note']);owner(args.actorId);id(args.personId);text(args.requestId,512);if(!['pending','accepted','completed','declined'].includes(args.status))fail('invalid_argument');if(args.note!==undefined)text(args.note,2000);const state=load(),row=state.requests.find(item=>item.personId===args.personId&&item.requestId===args.requestId);if(!row)fail('unknown_request');row.status=args.status;row.updatedAt=clock();if(args.note!==undefined)row.note=args.note;save(state);return clone(row); },
     serviceLedger({actorId}){owner(actorId);const shared=new Set(store.snapshot().people.filter(person=>person.role==='owner'||['summary','full'].includes(person.shareWithOwner)).map(person=>person.id));return clone(load().runs.filter(row=>shared.has(row.personId)).map(({personId,toolId,status,createdAt,updatedAt})=>({personId,toolId,status,createdAt,updatedAt})));},
     due() {
-      return load().grants.filter(row => { try { member(row.personId); return row.schedule?.enabled && typeof executors[row.toolId] === 'function'; } catch { return false; } }).flatMap(row => {
-        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: row.schedule.timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(clock()));
-        const value = name => parts.find(part => part.type === name).value, time = `${value('hour')}:${value('minute')}`, localDate = `${value('year')}-${value('month')}-${value('day')}`;
-        const sourceKey = `tool:${row.toolId}:${row.personId}:${row.revision}:${localDate}:${time}`;
-        return time === row.schedule.time ? [{ personId: row.personId, toolId: row.toolId, expectedRevision: row.revision, localDate, time, timeZone: row.schedule.timeZone, sourceKey, requestId: sourceKey }] : [];
+      const state=load(),instant=clock(),nowMs=Date.parse(instant);
+      return state.grants.filter(row => { try { member(row.personId); return row.schedule?.enabled && typeof executors[row.toolId] === 'function'; } catch { return false; } }).flatMap(row => {
+        const authorizedAt=Date.parse(row.updatedAt),day=localDate(instant,row.schedule.timeZone),time=row.schedule.time;
+        if(!Number.isFinite(authorizedAt))return [];
+        // Use the same DST and bounded catch-up policy as ordinary reminders.
+        // Updating a grant starts a new revision; it cannot authorize an earlier occurrence.
+        return [addLocalDays(day,-1),day].flatMap(date=>{
+          const dueAt=localDateTimeToInstant(date,time,row.schedule.timeZone),dueMs=dueAt===null?NaN:Date.parse(dueAt);
+          if(!Number.isFinite(dueMs)||dueMs<authorizedAt||dueMs>nowMs||nowMs-dueMs>CATCH_UP_MS)return [];
+          const sourceKey=`tool:${row.toolId}:${row.personId}:${row.revision}:${date}:${time}`;
+          // Any durable attempt owns this occurrence, even failed or uncertain work.
+          if(state.runs.some(run=>run.personId===row.personId&&run.requestId===sourceKey))return [];
+          return [{personId:row.personId,toolId:row.toolId,expectedRevision:row.revision,localDate:date,time,timeZone:row.schedule.timeZone,sourceKey,requestId:sourceKey}];
+        });
       });
     },
   });

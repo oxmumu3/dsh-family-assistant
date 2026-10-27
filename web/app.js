@@ -14,6 +14,7 @@
   let historySignature = '';
   let ownerCommandSignature = '';
   let modelSignature = '';
+  let attentionExpanded = false;
   let ownerAgentBridge=null;
   try{ownerAgentBridge=window.parent?.__FamilyOwnerAgent || null;}catch{ownerAgentBridge=null;}
   const ownerProjectStates={queued:'等待执行',running:'正在处理',needs_approval:'等待你的审批',needs_input:'需要你补充信息',succeeded:'已完成',failed:'执行未完成',cancelled:'已取消',unknown:'结果暂不确定'};
@@ -111,6 +112,7 @@
     $('request-send').disabled = busy || !activeRequestId;
     $('family-intake-submit').disabled = busy || !owner || !$('family-intake-input').value.trim();
     $('family-intake-input').disabled = !owner;
+    $('attention-enabled').disabled = busy || !owner || typeof state?.attention?.enabled !== 'boolean';
     document.body.setAttribute('aria-busy', String(busy));
     renderVoiceControls();capabilities?.syncDisabled();
   }
@@ -607,6 +609,36 @@
     const row=node('div',null,'field-row');row.append(node('dt',label),node('dd',Array.isArray(value)?value.join('、'):String(value)));list.append(row);
   }
   function statusPill(value,status) { const pill=node('span',value,'state-pill');pill.dataset.state=status;return pill; }
+  function activeAttention() {
+    if(!state?.people.some(person=>person.role==='owner'))return [];
+    const urgency={now:2,soon:1,urgent:2,important:1};
+    return (Array.isArray(state.attention?.incidents)?state.attention.incidents:[])
+      .filter(item=>item&&typeof item.id==='string'&&['open','acknowledged'].includes(item.status)&&state.people.some(person=>person.id===item.personId&&person.role==='elder'))
+      .slice().sort((a,b)=>(urgency[b.urgency]||0)-(urgency[a.urgency]||0)||String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||'')));
+  }
+  function attentionView(item) {
+    const card=node('article',null,'attention-incident'),person=state.people.find(person=>person.id===item.personId),label=person?.label||item.label||'家人';
+    card.dataset.incidentId=item.id;const head=node('div',null,'attention-head');head.append(node('strong',label),statusPill(item.status==='acknowledged'?'你在处理':'待你关注',item.status));card.append(head);
+    const excerpt=(value,max)=>typeof value==='string'&&value.length>max?value.slice(0,max)+'…':String(value||'');
+    card.append(node('p',['now','urgent'].includes(item.urgency)?'需尽快关注':'请你留意','attention-urgency'),node('p',excerpt(item.quote,280),'attention-quote'));
+    if(item.reason)card.append(node('p',excerpt(item.reason,160),'attention-reason'));
+    const delivery={api_accepted:'微信接口已接受，不代表你已读',pending:'微信提醒等待提交',dispatching:'微信提醒正在提交',failed:'微信提醒未能提交',blocked:'微信提醒暂时受阻',uncertain:'微信投递尚未确认',unknown:'微信投递尚未确认',cancelled:'微信提醒已取消'};
+    card.append(node('p',delivery[item.deliveryStatus]||'微信提醒状态待核对','attention-delivery'));
+    const actions=node('div',null,'attention-actions'),add=(label,callback,target=actions)=>{const button=actionButton(label,callback,'text-button');button.dataset.focusKey='attention:'+item.id+':'+label;button.dataset.attentionId=item.id;target.append(button);};
+    add('查看对话',()=>{select(item.personId);setTab('family');capabilities?.openHistory(item.personId);});
+    if(item.status==='open')add('我来处理',()=>{void mutate({action:'attention_update',incidentId:item.id,status:'acknowledged'},{notice:'已标记由你处理；这不代表微信已读。'});});
+    add('已解决',()=>{void mutate({action:'attention_update',incidentId:item.id,status:'resolved'},{notice:'这件事已标记为解决。'});});
+    const more=node('details',null,'attention-more');more.append(node('summary','更多'));add('不再提醒这件事',()=>{void mutate({action:'attention_update',incidentId:item.id,status:'muted'},{notice:'已停止提醒这件事。'});},more);actions.append(more);card.append(actions);return card;
+  }
+  function attentionList(root,items) {
+    for(const item of items.slice(0,3))root.append(attentionView(item));
+    if(items.length>3)root.append(node('p',`另有${items.length-3}件，处理后会继续显示。`,'hint'));
+    if(items.length&&state.attention?.enabled===false)root.append(node('p','自动提醒已关闭；已发现的事项仍可处理。','hint'));
+  }
+  function renderAttentionSettings() {
+    const attention=state?.attention;$('attention-enabled').checked=attention?.enabled===true;
+    text('attention-status',typeof attention?.enabled!=='boolean'?'重要事项提醒暂未接通。':attention.lastError?'最近一次判断未完成，已有事项仍可查看。':attention.enabled?'开启后，发现需要关注的事会主动提醒你。':'已关闭主动提醒；家人明确转达的事项仍会通知你。');
+  }
   async function serviceAction(action,draft,choiceId){
     if(busy)return;
     const key=['service',draft.id,draft.revision,action,choiceId||''].join(':'),requestId=attemptId(attempts,key,key);
@@ -744,10 +776,12 @@
     document.querySelector?.('.composer-area')?.toggleAttribute?.('hidden',activeTab!=='chat');
     capabilities?.setView(activeTab);capabilities?.onState();
     text('chat-title',tabTitles[activeTab][0]);text('chat-subtitle',tabTitles[activeTab][1]);renderContext();
-    const signature=JSON.stringify([activeTab,activeContext,data,state.people,state.reminders,state.outbox,state.presentations,state.harness,state.serviceSetup,ownerProject]);
+    const signature=JSON.stringify([activeTab,activeContext,data,state.people,state.reminders,state.outbox,state.presentations,state.harness,state.serviceSetup,state.attention,ownerProject]);
     if(signature!==workbenchSignature){
-      workbenchSignature=signature;const space=$('workspace'),nearBottom=space.scrollHeight-space.scrollTop-space.clientHeight<100,focusKey=document.activeElement?.dataset?.focusKey;
+      workbenchSignature=signature;const space=$('workspace'),nearBottom=space.scrollHeight-space.scrollTop-space.clientHeight<100,focusKey=document.activeElement?.dataset?.focusKey,attentionFocus=$('rail-attention').contains(document.activeElement)?document.activeElement?.dataset?.attentionId:null;
       space.replaceChildren();
+      const attention=activeAttention();
+      if(activeTab==='chat'&&attention.length){const inline=node('details',null,'attention-inline');inline.open=attentionExpanded;inline.addEventListener('toggle',()=>{attentionExpanded=inline.open;});inline.append(node('summary',`${attention.length}件需要你留意`));attentionList(inline,attention);space.append(inline);}
       if(activeTab==='chat')renderChat(space);
       if(activeTab==='family'&&capabilities)capabilities.renderFamily(space);
       else if(activeTab==='family'){if(!state.people.length)space.append(emptyState('还没有家人资料。','先设置你自己，再通过对话添加家人。'));const list=node('div',null,'family-list');for(const person of state.people)list.append(personView(person));space.append(list);}
@@ -756,9 +790,11 @@
       if(activeTab==='tools'){if(capabilities)capabilities.renderTools(space);else space.append(emptyState('工具库暂未就绪','请刷新家庭助手后重试。'));}
       if(activeTab==='arrangements'){if(capabilities){const panel=node('section');space.append(panel);capabilities.renderHarness(panel);}space.append(node('h2','家庭服务安排','section-heading'));renderActivity(space);}
       if(nearBottom&&activeTab==='chat')space.scrollTop=space.scrollHeight;
-      if(focusKey)for(const button of space.querySelectorAll('button'))if(button.dataset.focusKey===focusKey)button.focus();
-      const rail=$('rail-requests');rail.replaceChildren();const pending=data.requests.filter(item=>item.status!=='resolved');text('rail-request-count',pending.length?String(pending.length):'');
-      if(!pending.length)rail.append(node('p','目前没有待回应事项。','muted small'));for(const item of pending.slice(-2))rail.append(requestView(item,true));
+      if(focusKey&&!attentionFocus)for(const button of space.querySelectorAll('button'))if(button.dataset.focusKey===focusKey)button.focus();
+      const rail=$('rail-requests');rail.replaceChildren();const pending=data.requests.filter(item=>item.status!=='resolved');text('rail-request-count',pending.length+attention.length?String(pending.length+attention.length):'');text('rail-followup-title','需要你留意');show('rail-followup-section',Boolean(pending.length||attention.length));
+      const attentionRail=$('rail-attention');attentionRail.replaceChildren();attentionList(attentionRail,attention);
+      if(pending.length)rail.append(node('h3','家人明确转达','attention-subtitle'));for(const item of pending.slice(-2))rail.append(requestView(item,true));
+      if(attentionFocus){const buttons=attentionRail.querySelectorAll('button'),next=[...buttons].find(button=>button.dataset.focusKey===focusKey)||[...buttons].find(button=>button.dataset.attentionId===attentionFocus);next?.focus();}
     }
     if(drawerKind==='request')renderRequest();
     if(drawerKind==='family-intake')renderFamilyIntake();
@@ -854,6 +890,7 @@
     text('brief-preview', state.lastBrief?.text || '先预览，再决定是否发送。');
     if (loadConfig || !$('brief-schedule').dataset.dirty) { $('brief-enabled').checked = Boolean(state.config.ownerBriefEnabled); setValue('brief-time', state.config.ownerBriefTime || '20:00'); }
     if (loadConfig || !$('service-settings').dataset.dirty) { setValue('service-zone', state.config.timeZone || 'Asia/Shanghai'); setValue('model-provider', state.config.provider); setValue('model-name', state.config.model); }
+    renderAttentionSettings();
     const modelSelected = Boolean(state.config.provider?.trim() && state.config.model?.trim());
     text('model-status', state.model?.available
       ? modelSelected ? '模型服务可用，将按当前项目与工具授权处理。' : '已发现宿主模型服务，请选择服务与模型。'
@@ -942,6 +979,7 @@
     if (!validZone($('service-zone').value.trim())) return fail('请填写有效的默认时区。');
     void mutate({ action: 'configure', timeZone: $('service-zone').value.trim(), provider: $('model-provider').value.trim(), model: $('model-name').value.trim() }, { resetForm: 'service-settings', notice: '服务设置已保存。' });
   });
+  $('attention-enabled').addEventListener('change',async()=>{const enabled=$('attention-enabled').checked;const ok=await mutate({action:'attention_configure',enabled},{notice:enabled?'已开启重要事项主动提醒。':'已关闭重要事项主动提醒。'});if(!ok)renderAttentionSettings();});
   onSubmit('verify-login', () => {
     const person = selectedPerson(); const code = $('verification-code').value.trim(); if (!person || !code) return;
     void mutate({ action: 'verify_login', personId: person.id, code }, { resetForm: 'verify-login', notice: '验证码已提交，请等待微信确认结果。' });

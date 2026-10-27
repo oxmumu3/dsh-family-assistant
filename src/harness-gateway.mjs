@@ -103,7 +103,7 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
     if(closed||!readyResult(task)||task.delivery.state!=='none')return;
     if(!eligible(task)||!targetAllowed(task)){update(task.id,{delivery:{state:'suppressed',at:clock()}});return;}
     task=update(task.id,{delivery:{state:'dispatching',at:clock()}});
-    const event={task:{id:task.id,personId:task.personId,workspaceId:task.workspaceId,sessionId:task.sessionId,requestId:task.requestId,route:clone(task.route),origin:task.origin??'wechat',executor:task.executor,state:task.state,files:clone(task.files??[]),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget),artifactScope:clone(task.artifactScope)}:{})},text:task.deliveryTarget?sanitizeOwnerTaskText(task.text,{cwd:task.cwd}):task.text};
+    const event={task:{id:task.id,personId:task.personId,workspaceId:task.workspaceId,sessionId:task.sessionId,requestId:task.requestId,route:clone(task.route),origin:task.origin??'wechat',executor:task.executor,state:task.state,files:clone(task.files??[]),...(task.conversationId?{conversationId:task.conversationId}:{}),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget),artifactScope:clone(task.artifactScope)}:{})},text:task.deliveryTarget?sanitizeOwnerTaskText(task.text,{cwd:task.cwd}):task.text};
     const key=task.id+':'+task.requestId;activeDeliveries.add(key);try{await onResult(event);if(!closed)update(task.id,{delivery:{state:'accepted',at:clock()}});}catch(error){if(!closed)update(task.id,{delivery:{state:error?.sendOutcome==='failed'?'failed':'unknown',at:clock()}});}finally{activeDeliveries.delete(key);}
   }
   async function perform(taskId,method){
@@ -147,6 +147,33 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
       open();person(personId);const rows=await registry(),who=person(personId);
       if(who.role==='owner')return rows.map(row=>({workspaceId:row.workspaceId,title:row.title,path:row.path}));
       return rows.filter(row=>['read','task'].some(capability=>{try{return access?.authorize({personId,workspaceId:row.workspaceId,capability})?.allowed===true;}catch{return false;}})).map(row=>({workspaceId:row.workspaceId,title:row.title}));
+    },
+    async ownerToolContext(input={}){
+      open();if(!object(input,['personId','sessionId','callId','signal'])||!id(input.personId)||!text(input.sessionId,240)||!text(input.callId,512)||input.signal!==undefined&&!(input.signal instanceof AbortSignal))fail('gateway_invalid_argument');
+      const {personId,sessionId,callId}=input,signal=AbortSignal.any([lifecycle.signal,...(input.signal?[input.signal]:[])]),forbidden=()=>fail('gateway_owner_tool_forbidden');signal.throwIfAborted();
+      if(store.snapshot().people?.find(row=>row.id===personId)?.role!=='owner')forbidden();
+      // Session names are not credentials. The native request and its active
+      // tool call must both be observed from a persisted Owner conversation.
+      const candidates=tasks.filter(task=>task.personId===personId&&task.sessionId===sessionId&&task.conversationId&&task.executor!=='family_project'&&!terminal(task.state)&&eligible(task)).map(clone);
+      if(!candidates.length||typeof ownerAgent?.observe!=='function')forbidden();
+      const current=captured=>{const task=tasks.find(row=>row.id===captured.id);return !closed&&!signal.aborted&&task?.requestId===captured.requestId&&task.personId===personId&&task.sessionId===sessionId&&task.conversationId===captured.conversationId&&!terminal(task.state)&&eligible(task);};
+      const read=async task=>{
+        if(!current(task))forbidden();let observed;
+        try{observed=await ownerAgent.observe(clone(task),{signal});}catch{signal.throwIfAborted();forbidden();}
+        signal.throwIfAborted();if(!current(task))forbidden();
+        if(!observed||observed.workspaceId!==task.workspaceId||observed.sessionId!==sessionId||observed.requestId!==task.requestId||observed.cwd!==task.cwd)forbidden();
+        return observed;
+      };
+      // A long conversation may retain unknown requests outside the bounded
+      // history window. Probe only the latest intent for the live session's
+      // active RPC, then read that exact request instead of scanning old turns.
+      const latest=candidates.at(-1),probe=await read(latest);
+      if(probe.foreign!==false||!Number.isSafeInteger(probe.activeTurn)||probe.activeTurn<0||!Array.isArray(probe.activeRequestIds)||probe.activeRequestIds.length!==1)forbidden();
+      const matches=candidates.filter(task=>task.requestId===probe.activeRequestIds[0]);if(matches.length!==1)forbidden();
+      const task=matches[0],observed=task.id===latest.id?probe:await read(task);
+      if(observed.state!=='running'||observed.requestSeen!==true||observed.queued!==false||observed.foreign!==false||!Number.isSafeInteger(observed.turn)||observed.turn<0||observed.activeTurn!==observed.turn||observed.activeTurn!==probe.activeTurn||!Array.isArray(observed.activeRequestIds)||observed.activeRequestIds.length!==1||observed.activeRequestIds[0]!==task.requestId||!Array.isArray(observed.events)||observed.events.length>10000||!observed.events.some(event=>['tool/call','tool/ptc-dispatch-start'].includes(event?.type)&&event.turn===observed.turn&&event.callId===callId&&event.status==='running')||!current(task))forbidden();
+      const previous=tasks.slice(0,tasks.findIndex(row=>row.id===task.id)).filter(row=>row.personId===personId&&row.sessionId===sessionId&&row.conversationId===task.conversationId).at(-1);
+      return{taskId:task.id,requestId:task.requestId,sourceRequestId:task.sourceRequestId,previousSourceRequestId:previous?.sourceRequestId??null,previousUserText:previous?conversationPrompt(previous.prompt):null,personId,origin:task.origin??'wechat',route:clone(task.route),userText:conversationPrompt(task.prompt),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget)}:{}),authorize:()=>current(task)};
     },
     async submit(input){
       open();if(!object(input,['personId','route','workspaceId','prompt','requestId','origin','deliveryTarget','conversationId'])||!id(input.personId)||!(input.origin==='console'?input.route===null:validRoute(input.route))||input.origin!==undefined&&!['console','wechat'].includes(input.origin)||!text(input.workspaceId,240)||!text(input.prompt,64000)||!text(input.requestId,512)||input.conversationId!==undefined&&!uuid(input.conversationId))fail('gateway_invalid_argument');
@@ -203,6 +230,9 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
     canDeliver({taskId,requestId}){const task=tasks.find(row=>row.id===taskId&&row.requestId===requestId);return Boolean(!closed&&task&&task.delivery.state==='dispatching'&&activeDeliveries.has(taskId+':'+requestId)&&readyResult(task)&&eligible(task)&&targetAllowed(task));},
     // This summary is for the trusted Owner control layer, not an HTTP identity.
     snapshotForOwner(){return tasks.map(ownerView);},
+    // Notices were introduced with this prompt contract. Historical unknown
+    // tasks must never emit a new message merely because the plugin upgraded.
+    nativeNoticeTasks(){return tasks.filter(task=>task.conversationId&&task.prompt.startsWith('乐乐对话交互版本：2。\n')).map(ownerView);},
     async checkForOwner({actorId,taskId}){if(person(actorId).role!=='owner')fail('gateway_person_forbidden');const task=tasks.find(row=>row.id===taskId);if(!task)fail('gateway_invalid_task');if(eligible(task))await api.check({personId:task.personId,taskId});return ownerView(tasks.find(row=>row.id===taskId));},
     async cancelForOwner({actorId,taskId}){if(person(actorId).role!=='owner')fail('gateway_person_forbidden');const task=tasks.find(row=>row.id===taskId);if(!task)fail('gateway_invalid_task');const result=await api.cancel({personId:task.personId,taskId});return{...result,task:ownerView(tasks.find(row=>row.id===taskId))};},
     async settled(){while(jobs.size||admissions.size)await Promise.all([...jobs.values(),...Array.from(admissions.values(),entry=>entry.promise)]);},

@@ -1,25 +1,21 @@
 # 安装与首次接入
 
-此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.21.tgz`。通过 GitHub Release 分发预览版，未上架官方插件市场。
+此包是 DeepSeek Harness 社区插件，目标宿主 0.2.1-rc.2 或 0.2.1-rc.3，Node 22.13+。安装文件是 `dsh-family-assistant-0.2.0-preview.30.tgz`。从 [正式仓库 Releases](https://github.com/oxmumu3/dsh-family-assistant/releases) 取得本版本的 tgz、INSTALL-AGENT.txt 与 SHA256SUMS；未上架官方插件市场。
 
-本版为固定预览发行；以 Release 页实际资产和 SHA256SUMS 为准，勿将本地开发包路径作为公开下载入口。
+安装前核对 tgz 的 SHA256。下载入口以正式 Release 的实际资产为准。
 
 ## 桌面端
 
-打开 Harness 的插件管理，选择“添加插件”，在安装来源输入框填写下方完整下载地址，或已下载 tgz 的本地绝对路径，启用家庭助手。然后点击左侧主列表中的“家庭助手”，进入独立工作台。安装不会重置或复用现有单人微信插件的绑定，也不会访问微信客户端。
+打开 Harness 的插件管理，选择“添加插件”，在安装来源输入框填写已取得并校验的 tgz 的本地绝对路径，启用家庭助手。然后点击左侧主列表中的“家庭助手”，进入独立工作台。安装不会重置或复用现有单人微信插件的绑定，也不会访问微信客户端。
 
-也可以切到 Harness“创造模式”，让它通过原生 `plugin_manager` 的 `install_bundle` 安装本地绝对路径并启用。其他预设默认不提供这个工具；需要权限时按宿主提示批准安装。固定版本下载地址：
+也可以切到 Harness“创造模式”，让它通过原生 `plugin_manager` 的 `install_bundle` 安装经过校验的 tgz 本地绝对路径并启用。其他预设默认不提供这个工具；需要权限时按宿主提示批准安装。
 
-```text
-https://github.com/oxmumu3/dsh-family-assistant/releases/download/v0.2.0-preview.21/dsh-family-assistant-0.2.0-preview.21.tgz
-```
-
-Release 页面提供 `SHA256SUMS`。如先下载到本地，核验 SHA256 后再导入；固定链接不是自动跟随更新的 latest。
+可将 Release 随附的 INSTALL-AGENT.txt 直接交给 Harness 创造模式执行，或手动导入下载后的 tgz。每位家人仍需本人扫码。
 
 ## Web 端
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.21.tgz
+dsh plugin --profile web add /absolute/path/dsh-family-assistant-0.2.0-preview.30.tgz
 dsh web
 ```
 
@@ -72,3 +68,9 @@ preview.7 另外增加 `presentations.json` 与 `presentation-files/`，保存�
 连接微信后，家人可直接提出写稿、分析本人材料、改写已收到的日报、制作本人PPT和查询公开信息等需求，默认在该绑定独立的个人工作区处理。工具库用于预设快捷服务和定时投送；Owner本地项目另行选择共享范围，家人的普通请求不会继承Owner终端、全局记忆或其他家人的资料。明确禁止转告的内容不会作为Owner求助发送。
 
 长任务可在原微信会话询问“进度”或要求“停止刚才的任务”。家人明确说“以后日报都这样写”时，偏好只作用于本人的后续服务稿，不改写Owner源项目。
+
+## 重要事项主动提醒
+
+全新安装默认关闭。在设置开启“重要事项主动提醒”，或在已绑定的 Owner 微信说“开启重要事项主动提醒”。从启用后新收到的家人文字开始判断，不补发旧记录。普通明确保密请求不自动转告；明确的本人当前即时人身危险有严格证据例外。
+
+Owner 微信收到提醒后，可在同一话题直接说“我来处理”“已解决”“不再提醒这件事”或“告诉她：具体回复”。控制台“需要你留意”也可处理。关闭开关只停止自动判断，不影响正常对话和明确转告；原自动简报分享设置保持独立。提醒只是辅助，不保证识别所有重要情况。

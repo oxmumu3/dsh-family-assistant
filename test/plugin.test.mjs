@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Context} from '@deepseek-ai/cordis';
 
-test('plugin mounts authenticated exact routes and a draft-only host tool without polling',async t=>{
+test('plugin mounts authenticated exact routes and scoped Owner management tools without polling',async t=>{
   const {apply}=await import('../index.js');const directory=mkdtempSync(join(tmpdir(),'family-plugin-'));
   t.after(()=>rmSync(directory,{recursive:true,force:true}));const routes=[],tools=[];
   const services={connection:{fetch:{register(route){routes.push(route);return async()=>{};}}},tools:{register(tool){tools.push(tool);return()=>{};}},llm:{listProviders:()=>[]}};
@@ -14,7 +14,7 @@ test('plugin mounts authenticated exact routes and a draft-only host tool withou
   assert.deepEqual(routes.map(x=>x.path),['/api/family/control','/api/family/workbench','/api/family/qr','/api/family/voice','/api/family/voice/action']);
   const response=await routes[0].fetch(new Request('http://dsh.internal/api/family/control'));
   const state=await response.json();assert.equal(state.config.paused,true);assert.equal(state.people.length,0);
-  assert.deepEqual(tools.map(tool=>tool.name),['family_assistant','family_owner_projects']);assert.deepEqual(tools[0].parameters.properties.action.enum,['status','preview_brief','draft_management']);
+  assert.deepEqual(tools.map(tool=>tool.name),['family_assistant','family_owner_projects']);assert.deepEqual(tools[0].parameters.properties.action.enum,['status','preview_brief','history_page','draft_management','send_message','confirm_management']);
 });
 
 test('actual Cordis unload releases the runtime and routes before the same plugin is enabled again',async t=>{
