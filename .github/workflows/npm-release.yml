@@ -1,0 +1,187 @@
+# Manual validation is the default. Only the explicit publish job has OIDC permission.
+# Bind npm Trusted Publisher to this exact repository and npm-release.yml before publishing.
+name: Validate or publish npm release
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the validated tarball using the configured npm Trusted Publisher.
+        type: boolean
+        required: true
+        default: false
+permissions: {}
+concurrency:
+  group: npm-release-dsh-family-assistant
+  cancel-in-progress: false
+env:
+  EXPECTED_REPOSITORY: oxmumu3/dsh-family-assistant
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+  NPM_CONFIG_IGNORE_SCRIPTS: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  validate:
+    name: Validate source and pack
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'oxmumu3/dsh-family-assistant' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      family_sha256: ${{ steps.pack.outputs.family_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      run_attempt: ${{ steps.pack.outputs.run_attempt }}
+    steps:
+      - name: Checkout the dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - &a1
+        name: Use Node 22.22.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22.22.0
+          package-manager-cache: false
+      - &a2
+        name: Use an empty credential-free npm configuration
+        run: |-
+          printf "registry=https://registry.npmjs.org/\nignore-scripts=true\n" > "$RUNNER_TEMP/npm-release.npmrc"
+          printf "NPM_CONFIG_USERCONFIG=%s\n" "$RUNNER_TEMP/npm-release.npmrc" >> "$GITHUB_ENV"
+      - &a3
+        name: Use npm 11.15.0
+        run: |-
+          npm install --global npm@11.15.0 --ignore-scripts --no-audit --no-fund
+          node --version
+          npm --version
+      - name: Install the locked source dependencies without hooks
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check and build the actual package
+        run: |-
+          node scripts/build-client.mjs
+          node scripts/build-client.mjs --check
+          node --test test/owner-bridge.test.mjs test/owner-agent-client.test.mjs test/voice-capture.test.mjs test/plugin.test.mjs
+      - name: Stage the public whitelist, pack and hash the exact archives
+        id: pack
+        run: |-
+          set -euo pipefail
+          python3 - <<'PY'
+          import fnmatch,hashlib,json,os,re,shutil,subprocess,tarfile
+          from pathlib import Path,PurePosixPath
+          # Package staging stays outside the OIDC-enabled publication job.
+          PACKAGES=[["@oxmumu3/dsh-family-assistant",".","family_sha256"]]
+          repo=os.environ['EXPECTED_REPOSITORY'];root=Path.cwd();temp=Path(os.environ['RUNNER_TEMP']);out=temp/'release-artifact';out.mkdir(parents=True,exist_ok=True)
+          def canonical(value):return value.removeprefix('git+').removesuffix('.git').rstrip('/')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('run_attempt='+os.environ['GITHUB_RUN_ATTEMPT']+'\n')
+          for expected,relative,output_key in PACKAGES:
+           source=root/relative;metadata=json.loads((source/'package.json').read_text());assert metadata['name']==expected
+           assert metadata['author']=='牛村木木山' and canonical(metadata['repository']['url'])=='https://github.com/'+repo
+           if relative!='.':assert metadata['repository'].get('directory')==relative
+           assert metadata['publishConfig']=={'access':'public','tag':'latest'}
+           assert re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?',metadata['version'])
+           stage=temp/'release-stages'/expected.split('/')[-1];stage.mkdir(parents=True,exist_ok=False)
+           for item in metadata['files']:
+            rel=PurePosixPath(item);assert not rel.is_absolute() and '..' not in rel.parts
+            src=source/item;dst=stage/item
+            assert src.exists() and not src.is_symlink()
+            assert not any(p.name in {'.git','.agent','.runtime','.npmrc','.env'} or p.is_symlink() for p in ([src]+list(src.rglob('*')) if src.is_dir() else [src]))
+            dst.parent.mkdir(parents=True,exist_ok=True)
+            if src.is_dir():shutil.copytree(src,dst)
+            else:shutil.copy2(src,dst)
+           for field in ['scripts','devDependencies','private']:metadata.pop(field,None)
+           (stage/'package.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
+           if metadata.get('bundledDependencies') or metadata.get('bundleDependencies'):
+            # Preserve the already locked dependency tree; npm includes only the declared bundle closure.
+            shutil.copytree(root/'node_modules',stage/'node_modules',symlinks=True)
+           target=out/expected.split('/')[-1];target.mkdir(parents=True,exist_ok=False)
+           rows=json.loads(subprocess.check_output(['npm','pack','--json','--ignore-scripts','--pack-destination',str(target)],cwd=stage,text=True))
+           assert len(rows)==1 and rows[0]['name']==expected and rows[0]['version']==metadata['version']
+           filename=rows[0]['filename'];assert Path(filename).name==filename and filename.endswith('.tgz')
+           archive=target/filename;assert archive.is_file() and not archive.is_symlink() and archive.stat().st_size<=32*1024*1024
+           with tarfile.open(archive,'r:gz') as tar:
+            names=set();expanded=0
+            for member in tar.getmembers():
+             path=PurePosixPath(member.name);assert path.parts and path.parts[0]=='package' and not path.is_absolute() and '..' not in path.parts
+             assert member.name not in names and (member.isfile() or member.isdir());names.add(member.name);expanded+=member.size;assert expanded<=128*1024*1024
+            packed=json.load(tar.extractfile('package/package.json'));assert packed==metadata
+            patch=packed['dsh']['bundle']['patch'].removeprefix('./');patch_text=tar.extractfile('package/'+patch).read().decode()
+            assert re.search(r'^\s*name:\s*([\'\"])'+re.escape(expected)+r'\1\s*$',patch_text,re.M),'Scoped YAML reference must be quoted'
+            client=packed['exports']['./client'].removeprefix('./');client_text=tar.extractfile('package/'+client).read().decode()
+            assert re.search(r'\bid\s*:\s*[\'\"]'+re.escape(expected)+r'[\'\"]',client_text)
+            for value in packed['exports'].values():
+             assert isinstance(value,str) and any(fnmatch.fnmatch(name,'package/'+value.removeprefix('./')) for name in names),'Missing export target'
+           digest=hashlib.sha256(archive.read_bytes()).hexdigest()
+           manifest={'name':expected,'version':metadata['version'],'filename':filename,'sha256':digest,'repository':repo,'source_directory':relative,'source_commit':os.environ['GITHUB_SHA'],'run_id':os.environ['GITHUB_RUN_ID'],'run_attempt':os.environ['GITHUB_RUN_ATTEMPT']}
+           (target/'release-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+           with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write(output_key+'='+digest+'\n')
+           print(json.dumps(manifest))
+          PY
+      - name: Upload the immutable artifact for this run
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: npm-release
+          path: ${{ runner.temp }}/release-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+  publish:
+    name: Publish validated npm artifact
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'oxmumu3/dsh-family-assistant' && github.ref == 'refs/heads/main' && inputs.publish == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    env:
+      EXPECTED_PACKAGE: "@oxmumu3/dsh-family-assistant"
+      EXPECTED_SOURCE_DIRECTORY: .
+      VALIDATED_SHA256: ${{ needs.validate.outputs.family_sha256 }}
+      VALIDATED_RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
+    steps:
+      - *a1
+      - *a2
+      - *a3
+      - name: Download the artifact ID produced by this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release-artifact/
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify bytes and hardcoded package identity without executing product code
+        id: verify
+        run: |-
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,re,tarfile
+          from pathlib import Path,PurePosixPath
+          ALLOWED=[["@oxmumu3/dsh-family-assistant","."]]
+          expected=os.environ['EXPECTED_PACKAGE'];relative=os.environ['EXPECTED_SOURCE_DIRECTORY'];assert [expected,relative] in ALLOWED
+          root=Path(os.environ['RUNNER_TEMP'])/'release-artifact'/expected.split('/')[-1]
+          manifest=json.loads((root/'release-manifest.json').read_text());assert manifest['name']==expected and manifest['source_directory']==relative
+          assert manifest['repository']==os.environ['EXPECTED_REPOSITORY'] and manifest['source_commit']==os.environ['GITHUB_SHA']
+          assert manifest['run_id']==os.environ['GITHUB_RUN_ID'] and manifest['run_attempt']==os.environ['VALIDATED_RUN_ATTEMPT']
+          assert re.fullmatch('[a-f0-9]{64}',os.environ['VALIDATED_SHA256']) and manifest['sha256']==os.environ['VALIDATED_SHA256']
+          filename=manifest['filename'];assert Path(filename).name==filename and filename.endswith('.tgz');archive=root/filename
+          assert archive.is_file() and not archive.is_symlink() and archive.stat().st_size<=32*1024*1024
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==manifest['sha256'],'Tarball digest mismatch'
+          with tarfile.open(archive,'r:gz') as tar:
+           names=set();expanded=0
+           for member in tar.getmembers():
+            path=PurePosixPath(member.name);assert path.parts and path.parts[0]=='package' and not path.is_absolute() and '..' not in path.parts
+            assert member.name not in names and (member.isfile() or member.isdir());names.add(member.name);expanded+=member.size;assert expanded<=128*1024*1024
+           metadata=json.load(tar.extractfile('package/package.json'));assert metadata['name']==expected and metadata['version']==manifest['version']
+           assert metadata['repository']['url'].removeprefix('git+').removesuffix('.git').rstrip('/')=='https://github.com/'+os.environ['EXPECTED_REPOSITORY']
+           if relative!='.':assert metadata['repository'].get('directory')==relative
+           assert metadata['publishConfig']=={'access':'public','tag':'latest'}
+           assert not set(metadata.get('scripts',{})) & {'preinstall','install','postinstall','prepare','prepack','postpack','prepublish','prepublishOnly','publish','postpublish'}
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('tarball='+str(archive)+'\nname='+expected+'\nversion='+manifest['version']+'\n')
+          print('Verified publication artifact:',expected,manifest['version'],manifest['sha256'])
+          PY
+      - name: Publish through npm OIDC
+        env:
+          TARBALL: ${{ steps.verify.outputs.tarball }}
+        run: npm publish "$TARBALL" --ignore-scripts --access public --tag latest --registry https://registry.npmjs.org/
