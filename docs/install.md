@@ -67,13 +67,13 @@ CLI 须与目标宿主版本一致。当前机器全局 `dsh` 可能是更旧版
 
 ## 从旧版升级
 
-固定入口更新不会自动更新电脑上已经安装的插件。官方 rc.3 中，重复安装相同 npm 包名会提示已安装；隔离测试中，移除后再次安装 `@latest` 也曾仍得到旧版。因此升级时先在 [npm 页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)核对当前版本，再使用精确版本，例如本轮已验证的 `@oxmumu3/dsh-family-assistant@0.2.0-preview.31`。
+固定入口更新不会自动更新电脑上已经安装的插件。官方 rc.3 中，重复安装相同 npm 包名会提示已安装；隔离测试中，移除后再次安装 `@latest` 也曾仍得到旧版。因此升级时先在 [npm 页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)核对当前版本，再使用精确版本，例如本轮已验证的 `@oxmumu3/dsh-family-assistant@0.2.0-preview.32`。
 
 旧 tgz 的包名 `dsh-family-assistant` 与新 npm 包名 `@oxmumu3/dsh-family-assistant` 是两个安装身份，不能直接叠加启用。按下面顺序操作，始终沿用原 `storageDir`：
 
 1. 等待当前扫码和发送结束，在家庭助手暂停服务，备份原数据目录；若使用自定义 `storageDir`，记下并继续使用它。
 2. 在 Harness 插件管理移除旧的家庭助手插件包，保留数据目录。确认旧插件已停止；若宿主提示需要重启，先完全退出并重开 Harness，再继续安装。
-3. 安装 npm 当前版本的精确包名，例如 `@oxmumu3/dsh-family-assistant@0.2.0-preview.31`，并启用。隔离验收使用 npm 官方源 `https://registry.npmjs.org/`；可在创造模式明确要求原生插件管理器使用这个源安装精确版本。
+3. 安装 npm 当前版本的精确包名，例如 `@oxmumu3/dsh-family-assistant@0.2.0-preview.32`，并启用。隔离验收使用 npm 官方源 `https://registry.npmjs.org/`；可在创造模式明确要求原生插件管理器使用这个源安装精确版本。
 4. 完全退出并重新打开 Harness，确认只保留一个家庭助手插件，原成员与绑定还在，再恢复服务。
 
 本轮在官方 rc.3 隔离环境验证了 scoped preview.21 升级和旧 tgz preview.30 迁移到 scoped preview.31；合成成员、绑定和聊天记录保持，未使用真实微信凭据或发送消息。真实微信登录是否仍有效还取决于微信平台；过期时需成员本人重新扫码。不要删除 `family.json`、成员通道目录或私有数据来更新插件。
