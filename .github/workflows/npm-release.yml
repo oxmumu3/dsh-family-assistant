@@ -21,7 +21,12 @@ defaults:
   run:
     shell: bash
 jobs:
+  sdk-compatibility:
+    uses: ./.github/workflows/sdk-compatibility.yml
+    permissions:
+      contents: read
   validate:
+    needs: sdk-compatibility
     name: Validate source and pack
     if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'oxmumu3/dsh-family-assistant' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -62,6 +67,8 @@ jobs:
           node scripts/build-client.mjs
           node scripts/build-client.mjs --check
           node --test test/owner-bridge.test.mjs test/owner-agent-client.test.mjs test/voice-capture.test.mjs test/plugin.test.mjs
+      - name: Recheck official latest immediately before packing
+        run: node scripts/compatibility.mjs --latest
       - name: Stage the public whitelist, pack and hash the exact archives
         id: pack
         run: |-
