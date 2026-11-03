@@ -1,5 +1,7 @@
 # 乐乐家庭助手 · AI 分身家庭版
 
+📖 设计思考与生态复盘：[《DeepSeek Harness 要走向极客玩具还是大众普惠？》](https://mp.weixin.qq.com/s/RIAYNqo8OsUVx2JpR8MPyA)
+
 一个 DeepSeek Harness Host，同时服务多位长辈。长辈各自在微信里聊天、设置提醒、接收个性化日报；Owner 在工作台管理，在自己的微信接收每日服务简报。
 
 目标宿主 **0.2.1-rc.2 / 0.2.1-rc.3**。固定发行入口为 [npm 公开包](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant) `@oxmumu3/dsh-family-assistant@latest`；每次发布新版到 npm 时更新 `latest`，分享的包名无需改变。这是社区插件，未上架 Harness 官方插件市场。
