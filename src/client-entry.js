@@ -142,9 +142,58 @@ window.__ModuleLoader__.load({
           style: { display: 'block', flex: '1 1 0', width: '100%', height: '100%', minHeight: 0, marginTop: 'min(var(--dsh-frame-leading-clearance, 0px), 48px)', border: 0, background: 'transparent', colorScheme: 'normal' },
         });
       }
+      /** Native panel shell: a bounded Harness-styled overview first, the full
+       * workbench iframe only when the owner asks for it. */
+      function FamilyAssistantShell() {
+        const [view, setView] = React.useState('overview');
+        const [health, setHealth] = React.useState(null);
+        const [healthError, setHealthError] = React.useState('');
+        React.useEffect(() => {
+          let active = true;
+          Promise.resolve().then(() => globalThis.fetch('/api/family/control', { credentials: 'same-origin' }))
+            .then(response => { if (!response.ok) throw new Error('status'); return response.json(); })
+            .then(state => { if (active) setHealth(state && state.health ? state.health : null); })
+            .catch(() => { if (active) setHealthError('暂时读不到家庭状态'); });
+          return () => { active = false; };
+        }, []);
+        const muted = { opacity: 0.72 };
+        const header = React.createElement('header', {
+          style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 16px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.25))', fontSize: '13px' },
+        },
+          React.createElement('strong', { style: { fontSize: '13px' } }, '乐乐家庭助手'),
+          React.createElement('span', { style: muted },
+            health ? `在线 ${health.totals.online}/${health.totals.people} · 待发 ${health.totals.pending}` : (healthError || '正在读取家庭状态…')),
+          health && health.totals.attention
+            ? React.createElement('span', { style: { color: 'var(--dsh-color-warning, #b26a00)' } }, `需关注 ${health.totals.attention}`)
+            : null,
+          React.createElement('button', {
+            type: 'button',
+            onClick: () => setView(value => value === 'workbench' ? 'overview' : 'workbench'),
+            style: { marginLeft: 'auto', fontSize: '12px' },
+          }, view === 'workbench' ? '收起完整工作台' : '打开完整工作台'));
+        const overview = React.createElement('div', { style: { padding: '16px', overflow: 'auto', flex: '1 1 0', minHeight: 0 } },
+          health
+            ? (health.people.length
+              ? health.people.map(row => React.createElement('div', {
+                key: row.personId,
+                style: { display: 'flex', gap: '12px', padding: '8px 0', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.15))', fontSize: '13px' },
+              },
+                React.createElement('span', { style: { minWidth: '4em' } }, row.role === 'owner' ? '我' : row.label),
+                React.createElement('span', { style: muted }, row.connected ? '在线' : '离线'),
+                row.pending ? React.createElement('span', { style: muted }, `待发 ${row.pending}`) : null,
+                row.uncertain24h ? React.createElement('span', { style: { color: 'var(--dsh-color-warning, #b26a00)' } }, `待核对 ${row.uncertain24h}`) : null,
+                row.failed24h ? React.createElement('span', { style: muted }, `24h 失败 ${row.failed24h}`) : null)))
+              : React.createElement('p', { style: muted }, '还没有登记家人。打开完整工作台开始添加。'))
+            : React.createElement('p', { style: muted }, healthError || '正在读取家庭状态…'),
+          React.createElement('p', { style: { ...muted, marginTop: '16px', fontSize: '12px' } }, '详细设置、日记与工具仍在完整工作台里。'));
+        const body = view === 'workbench'
+          ? React.createElement(FamilyAssistant)
+          : overview;
+        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, body);
+      }
       ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({
         name: 'main', key: 'family-assistant',
-      }, FamilyAssistant)));
+      }, FamilyAssistantShell)));
       ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
         name: 'sidebar.panellist', id: 'family-assistant', order: 6, label: '家庭助手',
       }, FamilyIcon)));
