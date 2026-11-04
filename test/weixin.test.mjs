@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { createWeixinApi } from '../src/weixin.mjs';
 const reply = (body, status=200) => ({ok:status>=200&&status<300,status,text:async()=>typeof body==='string'?body:JSON.stringify(body)});
 const auth={token:'secret',baseUrl:'https://ilinkai.weixin.qq.com',peerId:'peer',contextToken:'ctx',text:'你好',clientId:'c1'};
-test('business rejection preserves the specific numeric error code instead of hiding it behind a generic return code',async()=>{
+test('conflicting business codes stay uncertain, keep the first numeric code and never leak the response text',async()=>{
  const api=createWeixinApi({fetchImpl:async()=>reply({ret:-1,errcode:-14,errmsg:'Bearer private-context'})});
- await assert.rejects(()=>api.send(auth),error=>{assert.equal(error.code,-14);assert.equal(error.sendOutcome,'failed');assert.equal(JSON.stringify(error).includes('private-context'),false);return true;});
+ await assert.rejects(()=>api.send(auth),error=>{assert.equal(error.code,-14);assert.equal(error.sendOutcome,'uncertain');assert.equal(error.message,'微信接口拒绝了请求');assert.equal(JSON.stringify(error).includes('private-context'),false);return true;});
 });
 test('QR uses official POST protocol with empty local tokens and normalized confirmation', async()=>{
  const calls=[];const api=createWeixinApi({fetchImpl:async(u,o)=>{calls.push([u,o]);return reply(calls.length===1?{qrcode:'q',qrcode_img_content:'https://weixin.qq.com/q'}:{status:'confirmed',bot_token:'t',ilink_bot_id:'a',ilink_user_id:'p',baseurl:auth.baseUrl});}});
@@ -24,9 +24,11 @@ test('send acceptance requires explicit success and rejects API business failure
  for(const body of [{ret:0},{errcode:0},{message_id:'18446744073709551615'}]){
   let count=0;const api=createWeixinApi({fetchImpl:async()=>{count++;return reply(body);}});assert.equal((await api.send(auth)).status,'api_accepted');assert.equal(count,1);
  }
- for(const body of [{ret:-1},{ret:0,errcode:-14},{message_id:'1',ret:-2}]){
+ for(const body of [{ret:-1},{ret:0,errcode:-14}]){
   await assert.rejects(()=>createWeixinApi({fetchImpl:async()=>reply(body)}).send(auth),e=>e.sendOutcome==='failed');
  }
+ // A rejected response that still carries an acknowledgement id is ambiguous.
+ await assert.rejects(()=>createWeixinApi({fetchImpl:async()=>reply({message_id:'1',ret:-2})}).send(auth),e=>e.sendOutcome==='uncertain');
 });
 test('network and unconfirmed send outcomes are uncertain without retry',async()=>{
  for(const fetchImpl of [async()=>{throw new Error('socket gone');},async()=>reply({}),async()=>reply('bad json'),async()=>reply({},502)]){
@@ -89,16 +91,21 @@ test('send diagnoses external cancellation without exposing the reason or retryi
  await assert.rejects(()=>api.send({...auth,signal:controller.signal}),error=>checkDiagnostic(error,{reason:'请求中断',phase:'request',externalAbort:true}));
  assert.equal(calls,1);
 });
-test('business rejection keeps failed outcome and never exports an untrusted response code',async()=>{
- for(const ret of [-14,sensitive]){
-  let calls=0;
-  const api=createWeixinApi({fetchImpl:async()=>{calls++;return reply({ret});}});
-  await assert.rejects(()=>api.send(auth),error=>{
-   assert.equal(error.sendOutcome,'failed');assert.equal(error.message,'微信接口拒绝了请求');
-   assert.equal(error.code,typeof ret==='number'?ret:undefined);
-   assert.doesNotMatch(JSON.stringify(error),/token-test-secret|private\.example|private-context/);
-   return true;
-  });
-  assert.equal(calls,1);
- }
+test('a single numeric rejection is failed, an untrusted payload is uncertain and exports no code',async()=>{
+ let calls=0;
+ const failed=createWeixinApi({fetchImpl:async()=>{calls++;return reply({ret:-14});}});
+ await assert.rejects(()=>failed.send(auth),error=>{
+  assert.equal(error.sendOutcome,'failed');assert.equal(error.message,'微信接口拒绝了请求');assert.equal(error.code,-14);
+  assert.doesNotMatch(JSON.stringify(error),/token-test-secret|private\.example|private-context/);
+  return true;
+ });
+ assert.equal(calls,1);
+ let ambiguousCalls=0;
+ const ambiguous=createWeixinApi({fetchImpl:async()=>{ambiguousCalls++;return reply({ret:sensitive});}});
+ await assert.rejects(()=>ambiguous.send(auth),error=>{
+  assert.equal(error.sendOutcome,'uncertain');assert.equal(error.code,undefined);
+  assert.doesNotMatch(JSON.stringify(error),/token-test-secret|private\.example|private-context/);
+  return true;
+ });
+ assert.equal(ambiguousCalls,1);
 });
