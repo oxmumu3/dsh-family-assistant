@@ -945,6 +945,23 @@
     text('run-status', (state.config.paused ? '服务已暂停' : '服务运行中') + healthText);
     $('run-status').dataset.state = state.config.paused ? 'paused' : 'running';
     text('run-toggle', state.config.paused ? '开始服务' : '暂停服务');
+    const healthBox = $('family-health');
+    if (healthBox) {
+      const rows = health && Array.isArray(health.people) ? health.people : [];
+      healthBox.hidden = rows.length === 0;
+      healthBox.replaceChildren(...rows.map(row => {
+        const chip = document.createElement('span');
+        chip.dataset.state = row.state;
+        chip.textContent = [
+          row.role === 'owner' ? '我' : row.label,
+          row.connected ? '在线' : '离线',
+          row.pending ? `待发 ${row.pending}` : '',
+          row.uncertain24h ? `待核对 ${row.uncertain24h}` : '',
+        ].filter(Boolean).join(' · ');
+        if (row.state === 'attention') chip.style.color = 'var(--danger,#934a35)';
+        return chip;
+      }));
+    }
     const owner = state.people.find(person => person.role === 'owner');
     text('brief-recipient', owner ? '接收人：' + owner.label + ' · ' + (connected(owner) ? '微信已连接' : '请先连接微信') : '添加一位“我自己”，作为简报接收人。');
     text('brief-preview', state.lastBrief?.text || '先预览，再决定是否发送。');
