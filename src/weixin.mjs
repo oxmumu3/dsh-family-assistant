@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { normalizeFileItem, downloadWeixinFile, uploadWeixinFile, mediaFailure } from './weixin-media.mjs';
+import { normalizeFileItem, normalizeVoiceItem, downloadWeixinFile, downloadWeixinVoice, uploadWeixinFile, mediaFailure } from './weixin-media.mjs';
 
 const DEFAULT_BASE = 'https://ilinkai.weixin.qq.com';
 const CHANNEL_VERSION = '2.4.10';
@@ -37,9 +37,14 @@ export function validateWeixinBaseUrl(input) {
 function businessError(value) {
   for (const key of ['ret', 'errcode']) {
     if (value[key] !== undefined && value[key] !== 0) {
-      const code=[value.errcode,value.ret].find(item=>Number.isSafeInteger(item)&&item!==0);
+      const values=[value.ret,value.errcode],code=[value.errcode,value.ret].find(item=>Number.isSafeInteger(item)&&item!==0);
+      // Conflicting codes or even a contradictory acknowledgement are not
+      // evidence of definite non-acceptance. Do not repeat those requests.
+      const conflict=values.some(item=>item!==undefined&&!Number.isSafeInteger(item))||new Set(values.filter(item=>Number.isSafeInteger(item)&&item!==0)).size>1||[...ID_KEYS].some(key=>Object.hasOwn(value,key));
+      const contextRecoveryEligible=code===-2&&!conflict;
       return Object.assign(new Error('微信接口拒绝了请求'), {
-        ...(code!==undefined ? { code } : {}), sendOutcome: 'failed',
+        ...(code!==undefined ? { code } : {}), sendOutcome: conflict?'uncertain':'failed', ...(contextRecoveryEligible?{contextRecoveryEligible:true}:{}),
+        weixinResponse:{kind:conflict?'conflict':'rejected',descriptionPresent:typeof value.errmsg==='string'&&value.errmsg.trim().length>0},
       });
     }
   }
@@ -50,31 +55,39 @@ function parse(text) {
     ? (context?.source ?? String(value)) : value);
 }
 function normalizeMessage(msg) {
-  const parts = [], attachments = []; let unsupported = false;
+  const parts = [], attachments = [], voices = []; let unsupported = false,voiceError,hasVoice=false;
   for (const item of Array.isArray(msg.item_list) ? msg.item_list : []) {
     if (item.type === 1 && typeof item.text_item?.text === 'string') parts.push(item.text_item.text);
-    else if (item.type === 3 && nonempty(item.voice_item?.text)) parts.push(item.voice_item.text);
+    else if (item.type === 3) {
+      hasVoice=true;
+      if(nonempty(item.voice_item?.text))parts.push(item.voice_item.text);
+      else {const voice=normalizeVoiceItem(item);if(voice)voices.push(voice);else voiceError='format';}
+    }
     else if (item.type === 4) { const file = normalizeFileItem(item); if (file) attachments.push(file); else unsupported = true; }
     else unsupported = true;
   }
+  const created=Number.isSafeInteger(msg.create_time_ms)?new Date(msg.create_time_ms):null;
+  const providerAt=created&&Number.isFinite(created.getTime())?created.toISOString():null;
   return {
     id: String(msg.message_id ?? msg.client_id ?? ''), peerId: msg.from_user_id ?? '',
     accountId: msg.to_user_id, groupId: msg.group_id, messageType: msg.message_type,
     text: parts.join('\n'), unsupported, contextToken: msg.context_token, ...(attachments.length ? { attachments } : {}),
-    ...(Number.isFinite(msg.create_time_ms) ? { at: new Date(msg.create_time_ms).toISOString() } : {}),
+    ...(voices.length ? {voices} : {}),...(voiceError ? {voiceError} : {}),
+    ...(hasVoice?{inputKind:'voice'}:{}),
+    ...(providerAt ? { at: providerAt } : {}),
   };
 }
 
 export function createWeixinApi({ fetchImpl = globalThis.fetch, baseUrl = DEFAULT_BASE } = {}) {
   const initialBase = validateWeixinBaseUrl(baseUrl);
   const qrHosts = new Map();
-  async function request(host, endpoint, { token, body, signal, timeout = 15_000, send = false } = {}) {
+  async function request(host, endpoint, { token, body, signal, timeout = 15_000, send = false, sharedDeadline } = {}) {
     const base = validateWeixinBaseUrl(host);
     const headers = { 'iLink-App-Id': 'bot', 'iLink-App-ClientVersion': String(2 * 65536 + 4 * 256 + 10) };
     if (body !== undefined) Object.assign(headers, { 'Content-Type': 'application/json', AuthorizationType: 'ilink_bot_token',
       'X-WECHAT-UIN': Buffer.from(String(randomBytes(4).readUInt32BE())).toString('base64') });
     if (token) headers.Authorization = `Bearer ${token}`;
-    const timed = AbortSignal.timeout(timeout);
+    const timed = sharedDeadline ?? AbortSignal.timeout(timeout);
     const started = performance.now();
     let phase = 'request', httpStatus, rejected;
     try {
@@ -104,6 +117,7 @@ export function createWeixinApi({ fetchImpl = globalThis.fetch, baseUrl = DEFAUL
   }
   return {
     downloadFile(options) { return downloadWeixinFile(fetchImpl, options); },
+    downloadVoice(options) { return downloadWeixinVoice(fetchImpl, options); },
     async sendFile({ token, baseUrl: host, peerId, contextToken, bytes, name, clientId = randomUUID(), signal, authorize = () => true }) {
       if (![token, peerId, clientId].every(nonempty)) throw mediaFailure();
       const item = await uploadWeixinFile(fetchImpl, (body, uploadSignal) => request(host, 'ilink/bot/getuploadurl', {
@@ -155,14 +169,45 @@ export function createWeixinApi({ fetchImpl = globalThis.fetch, baseUrl = DEFAUL
       return { messages: (Array.isArray(value.msgs) ? value.msgs : []).map(normalizeMessage),
         cursor: typeof value.get_updates_buf === 'string' ? value.get_updates_buf : cursor };
     },
-    async send({ token, baseUrl: host, peerId, contextToken, text, clientId = randomUUID(), signal }) {
+    async send({ token, baseUrl: host, peerId, contextToken, text, clientId = randomUUID(), signal, authorize = () => true }) {
       if (![token, peerId, text, clientId].every(nonempty)) throw Object.assign(new Error('发送参数不完整'), { sendOutcome: 'failed' });
-      const value = await request(host, 'ilink/bot/sendmessage', { token, signal, send: true, body: {
+      // The SDK's context_token is optional delivery context, not the bot's
+      // credential or the local Owner grant. A *definite* -2 rejection may try
+      // that optional-field alternative once, under the same request identity,
+      // route authorization and original total deadline. Never retry uncertainty.
+      const deadline = AbortSignal.timeout(15_000);
+      const check = (recovery = false) => {
+        let allowed = false; try { allowed = typeof authorize === 'function' && authorize() === true; } catch {}
+        if (signal?.aborted || recovery && deadline.aborted || !allowed) throw Object.assign(new Error('发送已取消、绑定或指令授权已变化'), { sendOutcome: 'failed' });
+      };
+      let value, contextRecovery, attempts=0,firstResult,descriptionPresent=false;
+      const dispatch = (context, recovery = false) => {
+        check(recovery);
+        attempts++;if(recovery)contextRecovery='without_context';
+        return request(host, 'ilink/bot/sendmessage', { token, signal, sharedDeadline: deadline, send: true, body: {
         msg: { from_user_id: '', to_user_id: peerId, client_id: clientId, message_type: 2, message_state: 2,
-          item_list: [{ type: 1, text_item: { text } }], ...(contextToken ? { context_token: contextToken } : {}) },
+          item_list: [{ type: 1, text_item: { text } }], ...(context ? { context_token: context } : {}) },
         base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' },
-      } });
-      return { status: 'api_accepted', ...(nonempty(value.message_id) ? { messageId: value.message_id } : {}) };
+        } });
+      };
+      try{
+        try { value = await dispatch(contextToken); }
+        catch (error) {
+          firstResult=error?.weixinResponse?.kind==='conflict'?'conflict':error?.weixinResponse?.kind==='rejected'&&error.code===-2?'minus2_rejected':'other';
+          descriptionPresent=error?.weixinResponse?.descriptionPresent===true;
+          if (error?.sendOutcome !== 'failed' || error.code !== -2 || error.contextRecoveryEligible!==true || !nonempty(contextToken)) throw error;
+          check(true);
+          value = await dispatch(undefined, true);
+        }
+      }catch(error){
+        if(contextRecovery)error.contextRecovery=contextRecovery;
+        if(firstResult==='minus2_rejected'||firstResult==='conflict'){
+          const finalResult=error?.weixinResponse?.kind==='rejected'?(error.code===-2?'minus2_rejected':'other_rejected'):error?.sendOutcome==='uncertain'?'uncertain':'guard_stopped';
+          error.weixinSendDiagnostic={initialContext:nonempty(contextToken)?'present':'absent',attempts,recovery:attempts===2?'without_context':'not_attempted',firstResult,finalResult,descriptionPresent:descriptionPresent||error?.weixinResponse?.descriptionPresent===true};
+        }
+        throw error;
+      }
+      return { status: 'api_accepted', ...(nonempty(value.message_id) ? { messageId: value.message_id } : {}), ...(contextRecovery ? { contextRecovery } : {}) };
     },
   };
 }

@@ -4,6 +4,8 @@ import {createHash,randomUUID} from 'node:crypto';
 import {timestamp,recordMatchesBinding} from './store.mjs';
 import {localDate,localParts,addLocalDays,localDateTimeToInstant,validDate} from './brief.mjs';
 import {assertReminderTime} from './owner-commands.mjs';
+import {sourceTimingState} from './source-timing.mjs';
+import {parseOwnerRelativeReminder} from './owner-relative-reminder.mjs';
 
 const clone=value=>structuredClone(value);
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -89,7 +91,25 @@ export function createPersonalOrganizer({directory,store,now=()=>new Date().toIS
  if(secure({optional:true}))read();else persist({version:1,notes:[],operations:[]},{initial:true});
  return{
   file,
-  context(personId){member(personId);const notes=currentNotes(read(),personId,scope(personId)).map(({id,text,createdAt})=>({id,text:text.slice(0,240),createdAt}));const reminders=currentReminders(personId).map(({id,personId,text,dueAt,repeat,time,timeZone,status,createdAt})=>({id,personId,text,dueAt,repeat,...(time?{time}:{}),timeZone,status,createdAt}));return{notes,reminders,latestReminderId:latest(reminders)?.id??null};},
+  // Internal verified Owner entry: same deterministic ID and same scheduler as
+  // ordinary personal reminders. The caller supplies a live-route guard, never
+  // a model-supplied due time or reminder body.
+  remindOwnerRelative({personId,text,requestId,sourceTiming,authorize}={}){
+   if(typeof authorize!=='function'||authorize()!==true||store.snapshot().config.paused||sourceTimingState(sourceTiming,now())!=='fresh')fail('当前消息时间或授权无法确认，尚未安排提醒。');
+   const person=member(personId);if(person.role!=='owner')fail('只能为当前 Owner 安排本条提醒。');string(text,1000);string(requestId,512);
+   const match=parseOwnerRelativeReminder(text);
+   if(!match)fail('目前只支持“2分钟后提醒我「具体内容」”这一明确单句。');
+   const digit={'一':1,'二':2,'两':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9},word=match.amount;let minutes;
+   if(/^\d+$/.test(word))minutes=Number(word);else if(word==='十')minutes=10;else if(word.includes('十')){const parts=word.split('十');if(parts.length!==2||parts[0].length>1||parts[1].length>1)fail('请明确提醒分钟数。');minutes=(parts[0]?digit[parts[0]]:1)*10+(parts[1]?digit[parts[1]]:0);}else minutes=digit[word];
+   if(!Number.isInteger(minutes)||minutes<1||minutes>60)fail('目前只支持 1 至 60 分钟后提醒。');
+   const dueAt=new Date(Date.parse(sourceTiming.providerCreatedAt)+minutes*60000).toISOString();if(Date.parse(dueAt)<=Date.parse(now()))fail('提醒时间已经过去，尚未安排。');
+   const reminderId='personal-'+hash([personId,scope(personId),requestId]).slice(0,48),old=store.reminders(personId).find(row=>row.id===reminderId);
+   if(authorize()!==true||store.snapshot().config.paused||sourceTimingState(sourceTiming,now())!=='fresh')fail('当前消息时间或授权已改变，尚未安排提醒。');
+   if(old&&(old.personId!==personId||old.text!==match.text||old.dueAt!==dueAt||old.repeat!=='once'||old.timeZone!==person.timeZone||old.status!=='active'))fail('原有同一请求的提醒内容、时间或状态不一致，请先核对旧提醒。');
+   const reminder=store.addReminder({id:reminderId,personId,text:match.text,dueAt,repeat:'once',timeZone:person.timeZone});
+   return{status:old?'duplicate':'scheduled',id:reminder.id,dueAt:reminder.dueAt,text:old?'这条提醒之前已安排，不会重复创建。':`已安排一次提醒：${reminder.text}。时间：${stamp(reminder.dueAt,person)}（${person.timeZone}），尚未发送。`};
+  },
+  context(personId){member(personId);const notes=currentNotes(read(),personId,scope(personId)).map(({id,text,createdAt})=>({id,text:text.slice(0,240),createdAt}));const reminders=currentReminders(personId).map(({id,personId,text,dueAt,repeat,time,timeZone,status,createdAt,purpose})=>({id,personId,text,dueAt,repeat,...(time?{time}:{}),timeZone,status,createdAt,...(purpose?{purpose}:{})}));return{notes,reminders,latestReminderId:latest(reminders)?.id??null};},
   execute({personId,text,action,requestId}={}){
    if(!action||!actions.includes(action.type))return null;
    const person=member(personId);string(text,8000);string(requestId,512);const instant=timestamp(now()),bindingScope=scope(personId);

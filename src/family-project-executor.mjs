@@ -37,13 +37,13 @@ function chain(root,relativePath='',{create=false,file=false}={}){
  if(realpathSync(current)!==current)fail('unsafe_path');return{path:current,rows,stat:rows.at(-1)?.stat??lstatSync(root)};
 }
 const unchanged=(a,b)=>a.rows.length===b.rows.length&&a.rows.every((row,index)=>row.path===b.rows[index].path&&same(row.stat,b.rows[index].stat));
-function readTextFile(root,path,maxBytes,signal){
+function readTextFile(root,path,maxBytes,signal,{firstLine=false}={}){
  let fd;
  try{
-  signal?.throwIfAborted();const before=chain(root,path,{file:true});if(before.stat.size>maxBytes)fail('budget');
+  signal?.throwIfAborted();const before=chain(root,path,{file:true});if(!firstLine&&before.stat.size>maxBytes)fail('budget');
   fd=openSync(before.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);const opened=fstatSync(fd);if(!opened.isFile()||opened.nlink!==1||!sameFile(before.stat,opened))fail('source_changed');
   const bytes=Buffer.alloc(maxBytes+1);let size=0;
-  while(size<bytes.length){signal?.throwIfAborted();const count=readSync(fd,bytes,size,bytes.length-size,null);if(!count)break;size+=count;}
+  while(size<bytes.length){signal?.throwIfAborted();const count=readSync(fd,bytes,size,firstLine?1:bytes.length-size,null);if(!count)break;size+=count;if(firstLine&&bytes[size-1]===10)break;}
   if(size>maxBytes)fail('budget');const after=chain(root,path,{file:true});if(!sameFile(opened,fstatSync(fd))||!sameFile(opened,after.stat)||!unchanged(before,after))fail('source_changed');
   let text;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,size));}catch{fail('invalid_text');}
   safeContent(text,maxBytes);signal?.throwIfAborted();return{bytes:bytes.subarray(0,size),text};
@@ -88,16 +88,25 @@ async function response(llm,options){
 export function createFamilyProjectExecutor({ownerAgent,ctx,llm,readConfig,now=()=>new Date().toISOString()}={}){
  if(typeof ownerAgent?.listWorkspaces!=='function'||typeof readConfig!=='function'||typeof now!=='function')fail('invalid_configuration');
  const execute=async function(input){
-  let root,files=[],spent=0;
+  let root,files=[],spent=0,confinedReadComplete=false;
   try{
-   if(!plain(input,['personId','workspaceId','prompt','history','signal','authorize'],['personId','workspaceId','prompt','authorize'])||!identifier(input.personId)||!validText(input.workspaceId,240)||!validText(input.prompt,6000)||typeof input.authorize!=='function')fail('invalid_argument');
-   const {personId,workspaceId,prompt,signal,authorize}=input;
+   if(!plain(input,['personId','workspaceId','prompt','history','signal','authorize','readScope'],['personId','workspaceId','prompt','authorize'])||!identifier(input.personId)||!validText(input.workspaceId,240)||!validText(input.prompt,6000)||typeof input.authorize!=='function')fail('invalid_argument');
+   const {personId,workspaceId,prompt,signal,authorize}=input;let readScope=null;if(input.readScope!==undefined){if(!plain(input.readScope,['relativePath','firstLine'])||typeof input.readScope.firstLine!=='boolean')fail('invalid_argument');readScope={relativePath:pathOf(input.readScope.relativePath,personId),firstLine:input.readScope.firstLine};}
    const permitted=async(capability,phase)=>{signal?.throwIfAborted();try{const decision=await authorize({capability,phase});signal?.throwIfAborted();return decision===true||decision?.allowed===true;}catch{return false;}};
    const guard=async(phase,...capabilities)=>{for(const capability of ['task',...capabilities])if(!await permitted(capability,phase))fail('authorization_changed');signal?.throwIfAborted();};
    const consume=bytes=>{spent+=bytes;if(bytes>FILE_LIMIT||spent>TOTAL_LIMIT)fail('budget');};
    await guard('admission','read');const rows=await ownerAgent.listWorkspaces({signal});await guard('admission_after','read');
    if(!Array.isArray(rows)||rows.length>10000)fail('registry');const matches=rows.filter(row=>row?.workspaceId===workspaceId);if(matches.length!==1||!validText(matches[0].path,4096)||!isAbsolute(matches[0].path))fail('registry');
-   root=resolve(matches[0].path);chain(root);const config=readConfig(),service=llm??ctx?.get('llm');
+   root=resolve(matches[0].path);chain(root);
+   // The Dot Owner's exact first-line task does not need interpretation.
+   // Produce the answer from the confined bytes, never from an unverified
+   // model completion. Retain the same registry and authorization barriers.
+   if(readScope?.relativePath==='README.md'&&readScope.firstLine===true){
+    await guard('before_operation','read');const value=readTextFile(root,'README.md',FILE_LIMIT,signal,{firstLine:true});consume(value.bytes.length);await guard('after_operation','read');
+    const first=value.text.replace(/\r?\n$/u,'');if(first.length>2000)fail('budget');await guard('complete','read');
+    return{state:'succeeded',text:first?`README.md 第一行：\n${scrub(first,root)}`:'README.md 第一行为空。'};
+   }
+   const config=readConfig(),service=llm??ctx?.get('llm');
    if(typeof service?.stream!=='function'||!validText(config?.provider,120)||!validText(config?.model,240))fail('model_unavailable');
    let history=[];if(input.history!==undefined){if(!Array.isArray(input.history)||input.history.length>5||input.history.some(row=>!plain(row,['prompt','text'])||typeof row.prompt!=='string'||typeof row.text!=='string'))fail('invalid_argument');let left=20000;history=input.history.slice(-5).map(row=>{const item={prompt:row.prompt.slice(0,Math.min(2000,left)),text:row.text.slice(0,Math.min(2000,Math.max(0,left-2000)))};left-=item.prompt.length+item.text.length;return item;});}
    const messages=[{role:'user',content:[{type:'text',text:JSON.stringify({project:{title:typeof matches[0].title==='string'?matches[0].title.slice(0,240):'当前项目'},history,request:prompt})}]}];
@@ -113,8 +122,8 @@ export function createFamilyProjectExecutor({ownerAgent,ctx,llm,readConfig,now=(
      if(entries.length>100)fail('budget');const result={relativePath:path,entries};consume(Buffer.byteLength(JSON.stringify(result)));if(!unchanged(before,chain(root,path)))fail('source_changed');await guard('after_operation','read');return result;
     }
     if(call.name==='read_project_file'){
-     if(!plain(args,['relativePath']))fail('tool_arguments');const path=pathOf(args.relativePath,personId);await guard('before_operation','read');
-     const value=readTextFile(root,path,FILE_LIMIT,signal);consume(value.bytes.length);await guard('after_operation','read');return{relativePath:path,text:scrub(value.text,root)};
+     if(!plain(args,['relativePath']))fail('tool_arguments');const path=pathOf(args.relativePath,personId);if(readScope&&path!==readScope.relativePath)fail('unsafe_path');await guard('before_operation','read');
+     const value=readTextFile(root,path,FILE_LIMIT,signal,{firstLine:readScope?.firstLine===true});consume(value.bytes.length);await guard('after_operation','read');if(readScope)confinedReadComplete=true;return{relativePath:path,text:scrub(value.text,root)};
     }
     if(call.name==='write_project_note'){
      if(!plain(args,['name','content'])||typeof args.name!=='string'||args.name.length>120||args.name.includes('/')||!safeSegment(args.name)||!EXT.test(args.name))fail('tool_arguments');const content=safeContent(args.content);consume(Buffer.byteLength(content));if(/\.json$/iu.test(args.name)){try{JSON.parse(content);}catch{fail('invalid_text');}}
@@ -127,8 +136,9 @@ export function createFamilyProjectExecutor({ownerAgent,ctx,llm,readConfig,now=(
    };
    for(let round=0;round<8;round++){
     await guard('before_model','read');const canWrite=await permitted('write','tools'),tools=structuredClone(canWrite?schemas:schemas.slice(0,2));
+    if(readScope)tools.splice(0,tools.length,...tools.filter(tool=>tool.name==='read_project_file'));
     const model=await response(service,{provider:config.provider,model:config.model,...familyModelControls(config),system,messages:structuredClone(messages),tools,maxTokens:3500,signal});await guard('after_model','read');
-    if(!model.calls.length){safeContent(model.text);if(!model.text.trim())fail('empty_result');if(files.length)await guard('complete','read','write');return{state:'succeeded',text:scrub(model.text,root),...(files.length?{files}: {})};}
+    if(!model.calls.length){if(readScope&&!confinedReadComplete)fail('source_unread');safeContent(model.text);if(!model.text.trim())fail('empty_result');if(files.length)await guard('complete','read','write');return{state:'succeeded',text:scrub(model.text,root),...(files.length?{files}: {})};}
     messages.push({id:randomUUID(),role:'assistant',source:{kind:'model',provider:config.provider,model:config.model},content:model.content});
     for(const call of model.calls){if(!tools.some(tool=>tool.name===call.name))fail('tool_unavailable');const result=await operation(call);messages.push({id:randomUUID(),role:'tool',source:{kind:'tool',callId:call.id},toolCallId:call.id,isError:false,content:[{type:'text',text:JSON.stringify(result)}]});}
    }

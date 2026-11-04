@@ -103,8 +103,8 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
     if(closed||!readyResult(task)||task.delivery.state!=='none')return;
     if(!eligible(task)||!targetAllowed(task)){update(task.id,{delivery:{state:'suppressed',at:clock()}});return;}
     task=update(task.id,{delivery:{state:'dispatching',at:clock()}});
-    const event={task:{id:task.id,personId:task.personId,workspaceId:task.workspaceId,sessionId:task.sessionId,requestId:task.requestId,route:clone(task.route),origin:task.origin??'wechat',executor:task.executor,state:task.state,files:clone(task.files??[]),...(task.conversationId?{conversationId:task.conversationId}:{}),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget),artifactScope:clone(task.artifactScope)}:{})},text:task.deliveryTarget?sanitizeOwnerTaskText(task.text,{cwd:task.cwd}):task.text};
-    const key=task.id+':'+task.requestId;activeDeliveries.add(key);try{await onResult(event);if(!closed)update(task.id,{delivery:{state:'accepted',at:clock()}});}catch(error){if(!closed)update(task.id,{delivery:{state:error?.sendOutcome==='failed'?'failed':'unknown',at:clock()}});}finally{activeDeliveries.delete(key);}
+    const event={task:{id:task.id,personId:task.personId,workspaceId:task.workspaceId,sessionId:task.sessionId,requestId:task.requestId,sourceRequestId:task.sourceRequestId,route:clone(task.route),origin:task.origin??'wechat',executor:task.executor,state:task.state,files:clone(task.files??[]),...(task.conversationId?{conversationId:task.conversationId}:{}),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget),artifactScope:clone(task.artifactScope)}:{})},text:task.deliveryTarget?sanitizeOwnerTaskText(task.text,{cwd:task.cwd}):task.text};
+    const key=task.id+':'+task.requestId;activeDeliveries.add(key);try{const result=await onResult(event);if(!closed)update(task.id,{delivery:{state:result?.suppressed===true?'suppressed':'accepted',at:clock()}});}catch(error){if(!closed)update(task.id,{delivery:{state:error?.sendOutcome==='failed'?'failed':'unknown',at:clock()}});}finally{activeDeliveries.delete(key);}
   }
   async function perform(taskId,method){
     let task=tasks.find(item=>item.id===taskId);if(closed||!task)return;
@@ -143,6 +143,16 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
   // those channels are connected. Dispatch uncertainty above is always durable.
   if(recoverOnCreate)for(const task of tasks)if(task.executor!=='family_project'&&!terminal(task.state)||readyResult(task)&&task.delivery.state==='none')schedule(task.id,readyResult(task)?'deliver':'observe');
   const api={
+    // This is a local identity check, not an authorization to read or send.
+    // Unlike snapshot(), it intentionally does not infer a changed identity
+    // from a transient transport status. Callers must separately check online.
+    ownerConversationMatches({personId,sessionId,route}={}){
+      if(closed||!id(personId)||!text(sessionId,240)||!validRoute(route))return false;
+      try{
+        if(person(personId).role!=='owner'||route.personId!==personId||!sameRoute(store.route(personId),route))return false;
+        return tasks.some(task=>task.personId===personId&&task.sessionId===sessionId&&task.conversationId&&task.origin==='wechat'&&task.executor!=='family_project'&&sameRoute(task.route,route));
+      }catch{return false;}
+    },
     async listProjects({personId}={}){
       open();person(personId);const rows=await registry(),who=person(personId);
       if(who.role==='owner')return rows.map(row=>({workspaceId:row.workspaceId,title:row.title,path:row.path}));
@@ -173,7 +183,18 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
       const task=matches[0],observed=task.id===latest.id?probe:await read(task);
       if(observed.state!=='running'||observed.requestSeen!==true||observed.queued!==false||observed.foreign!==false||!Number.isSafeInteger(observed.turn)||observed.turn<0||observed.activeTurn!==observed.turn||observed.activeTurn!==probe.activeTurn||!Array.isArray(observed.activeRequestIds)||observed.activeRequestIds.length!==1||observed.activeRequestIds[0]!==task.requestId||!Array.isArray(observed.events)||observed.events.length>10000||!observed.events.some(event=>['tool/call','tool/ptc-dispatch-start'].includes(event?.type)&&event.turn===observed.turn&&event.callId===callId&&event.status==='running')||!current(task))forbidden();
       const previous=tasks.slice(0,tasks.findIndex(row=>row.id===task.id)).filter(row=>row.personId===personId&&row.sessionId===sessionId&&row.conversationId===task.conversationId).at(-1);
-      return{taskId:task.id,requestId:task.requestId,sourceRequestId:task.sourceRequestId,previousSourceRequestId:previous?.sourceRequestId??null,previousUserText:previous?conversationPrompt(previous.prompt):null,personId,origin:task.origin??'wechat',route:clone(task.route),userText:conversationPrompt(task.prompt),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget)}:{}),authorize:()=>current(task)};
+      // A previous native turn can authorize a numbered reply only if the
+      // host itself proves the exact preview tool result in that same turn.
+      // Its delivery receipts are independently checked by the runtime.
+      let previousReview;
+      const prior=task.turns?.at(-1)??previous,priorTask=task.turns?.length?task:previous;
+      if(prior?.state==='succeeded'&&typeof prior.text==='string'){
+        try{const older=await ownerAgent.observe({...clone(priorTask),requestId:prior.requestId,prompt:prior.prompt},{signal});
+          if(current(task)&&older?.foreign===false&&older.requestSeen===true&&older.state==='succeeded'&&older.workspaceId===priorTask.workspaceId&&older.sessionId===sessionId&&older.requestId===prior.requestId&&older.cwd===priorTask.cwd&&older.text===prior.text&&/^[a-f0-9]{64}$/.test(older.reviewViewToken??''))previousReview={taskId:priorTask.id,requestId:prior.requestId,sourceRequestId:prior.sourceRequestId,text:prior.text,viewToken:older.reviewViewToken};
+        }catch{signal.throwIfAborted();}
+      }
+      if(!current(task))forbidden();
+      return{taskId:task.id,requestId:task.requestId,sourceRequestId:task.sourceRequestId,previousSourceRequestId:prior?.sourceRequestId??previous?.sourceRequestId??null,previousUserText:prior?conversationPrompt(prior.prompt):previous?conversationPrompt(previous.prompt):null,...(previousReview?{previousReview}:{}),personId,origin:task.origin??'wechat',route:clone(task.route),userText:conversationPrompt(task.prompt),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget)}:{}),authorize:()=>current(task)};
     },
     async submit(input){
       open();if(!object(input,['personId','route','workspaceId','prompt','requestId','origin','deliveryTarget','conversationId'])||!id(input.personId)||!(input.origin==='console'?input.route===null:validRoute(input.route))||input.origin!==undefined&&!['console','wechat'].includes(input.origin)||!text(input.workspaceId,240)||!text(input.prompt,64000)||!text(input.requestId,512)||input.conversationId!==undefined&&!uuid(input.conversationId))fail('gateway_invalid_argument');

@@ -14,7 +14,7 @@ test('plugin mounts authenticated exact routes and scoped Owner management tools
   assert.deepEqual(routes.map(x=>x.path),['/api/family/control','/api/family/workbench','/api/family/qr','/api/family/voice','/api/family/voice/action']);
   const response=await routes[0].fetch(new Request('http://dsh.internal/api/family/control'));
   const state=await response.json();assert.equal(state.config.paused,true);assert.equal(state.people.length,0);
-  assert.deepEqual(tools.map(tool=>tool.name),['family_assistant','family_owner_projects']);assert.deepEqual(tools[0].parameters.properties.action.enum,['status','preview_brief','history_page','draft_management','send_message','confirm_management']);
+  assert.deepEqual(tools.map(tool=>tool.name),['family_assistant','family_owner_projects']);assert.deepEqual(tools[0].parameters.properties.action.enum,['status','preview_brief','history_page','library_query','draft_management','send_message','confirm_management']);
 });
 
 test('actual Cordis unload releases the runtime and routes before the same plugin is enabled again',async t=>{

@@ -69,7 +69,8 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     const contextSources = new Set(['runtime-context', 'agent-instructions', 'compact-checkpoint', 'model-selection',
       'time-context', 'tmux-context', 'user-approval', 'working-directory', 'repeat-tool-reminder',
       'plan-mode', 'tool-registry', 'ptc-mode', 'skill-catalog', 'skill-invocation', 'session-reference', 'tool-goal']);
-    const events = [];
+    const events = [], reviewPayloads = new Map();
+    const reviewToken=content=>{const values=Array.isArray(content)?content.slice(1).filter(row=>row?.type==='text'&&/^DSH_REVIEW_VIEW_TOKEN:[a-f0-9]{64}$/.test(row.text??'')):[];return values.length===1?values[0].text.slice('DSH_REVIEW_VIEW_TOKEN:'.length):null;};
     for (const record of records) {
       const e = record?.event, d = e?.data;
       if (record?.type !== 'event' || !d) continue;
@@ -78,8 +79,15 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
       if (e.type === 'user/message') events.push({ type: e.type, seq: e.seq, requestId: d.source?.rpcId ?? null, sourceKind: d.source?.kind ?? 'unknown', callId: d.source?.callId });
       if (e.type === 'assistant/message') events.push({ type: e.type, seq: e.seq, turn: d.turn, text: (Array.isArray(d.message?.content) ? d.message.content : []).filter(part => part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n'), interrupted: d.interrupted === true });
       if (e.type === 'approval/asked' || e.type === 'approval/decided') events.push({ type: e.type, seq: e.seq, id: d.id });
-      if (e.type === 'tool/call' || e.type === 'tool/ptc-dispatch-start' || e.type === 'tool/ptc-dispatch') events.push({ type: e.type, seq: e.seq, turn: d.turn, name: d.name, callId: e.type === 'tool/call' ? d.callId : d.subCallId, status: e.type === 'tool/ptc-dispatch' ? d.isError ? 'failed' : 'completed' : 'running' });
-      if (e.type === 'tool/result') events.push({ type: e.type, seq: e.seq, turn: d.turn, callId: d.message?.toolCallId, status: d.error || d.message?.isError ? 'failed' : 'completed' });
+      if (e.type === 'tool/call' || e.type === 'tool/ptc-dispatch-start' || e.type === 'tool/ptc-dispatch') {
+        events.push({ type: e.type, seq: e.seq, turn: d.turn, name: d.name, callId: e.type === 'tool/call' ? d.callId : d.subCallId, status: e.type === 'tool/ptc-dispatch' ? d.isError ? 'failed' : 'completed' : 'running' });
+        if(d.name==='personal_review'){try{const args=typeof d.arguments==='string'?JSON.parse(d.arguments):d.arguments,first=Array.isArray(d.content)?d.content[0]:null;reviewPayloads.set(e.seq,{preview:args?.action==='preview',token:reviewToken(d.content),...(first?.type==='text'&&typeof first.text==='string'&&first.text.length<=3200?{text:first.text}:{})});}catch{}}
+      }
+      if (e.type === 'tool/result') {
+        events.push({ type: e.type, seq: e.seq, turn: d.turn, callId: d.message?.toolCallId, status: d.error || d.message?.isError ? 'failed' : 'completed' });
+        const first=Array.isArray(d.message?.content)?d.message.content[0]:null;
+        if(first?.type==='text'&&typeof first.text==='string'&&first.text.length<=3200)reviewPayloads.set(e.seq,{text:first.text,token:reviewToken(d.message.content)});
+      }
     }
     events.sort((a, b) => a.seq - b.seq);
     if (new Set(events.map(e => e.seq)).size !== events.length) throw fail('owner_agent_observation_invalid');
@@ -134,8 +142,19 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
       if (e.text.length < full.length) e.truncated = true;
     }
     const messages = ownedEvents.filter(e => e.type === 'assistant/message').map(e => ({ role: 'assistant', text: e.text, seq: e.seq, interrupted: e.interrupted, truncated: e.truncated === true }));
+    // Personal review's verified renderer owns the evidence, dates, links and
+    // feedback numbering. Do not let a later model paraphrase alter them. This
+    // applies only to one successful preview in this exact completed turn;
+    // all ambiguous, foreign, failed and non-preview calls retain normal flow.
+    let text=messages.filter(item => !item.interrupted).at(-1)?.text ?? '',reviewViewToken;
+    const reviews=ownedEvents.filter(e=>e.turn===targetTurn&&['tool/call','tool/ptc-dispatch'].includes(e.type)&&e.name==='personal_review');
+    if(state==='succeeded'&&reviews.length===1&&reviewPayloads.get(reviews[0].seq)?.preview===true){
+      const results=ownedEvents.filter(e=>e.turn===targetTurn&&e.type==='tool/result'&&e.callId===reviews[0].callId&&e.status==='completed');
+      const original=reviews[0].type==='tool/ptc-dispatch'&&reviews[0].status==='completed'?reviewPayloads.get(reviews[0].seq)?.text:results.length===1?reviewPayloads.get(results[0].seq)?.text:null;
+      if(typeof original==='string'&&/^(?:每日回顾|每周回顾)/u.test(original)){text=original;reviewViewToken=reviews[0].type==='tool/ptc-dispatch'?reviewPayloads.get(reviews[0].seq)?.token:reviewPayloads.get(results[0].seq)?.token;}
+    }
     return { workspaceId: intent.workspaceId, sessionId: intent.sessionId, requestId: intent.requestId, cwd: intent.cwd, state, events: ownedEvents, messages,
-      text: messages.filter(item => !item.interrupted).at(-1)?.text ?? '', queued, requestSeen: events.some(e => e.type === 'user/message' && e.requestId === intent.requestId),
+      text, ...(reviewViewToken?{reviewViewToken}:{}), queued, requestSeen: events.some(e => e.type === 'user/message' && e.requestId === intent.requestId),
       turn: targetTurn, terminalReason: ending, pendingApprovals: approvals.size, questions, foreign,
       activeTurn, activeRequestIds: activeTurn === null ? [] : [...(requests.get(activeTurn) ?? [])], pendingInput: inbox.length > 0 };
   }

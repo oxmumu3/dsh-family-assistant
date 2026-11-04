@@ -9,7 +9,7 @@ import { isAbsolute, resolve } from 'node:path';
  * and request identities before dispatch. Never use this adapter for a family
  * member: ordinary native create/prompt APIs have no per-request tool ACL.
  */
-export function createOwnerAgentHost({ workspaceController, sessionController, controlWorkspacePath, timeoutMs = 30_000 } = {}) {
+export function createOwnerAgentHost({ workspaceController, sessionController, controlWorkspacePath, timeoutMs = 30_000, beforePrompt } = {}) {
   const fail = code => Object.assign(new Error(code), { code });
   const method = (controller, name) => {
     if (typeof controller?.[name] !== 'function') throw fail('owner_agent_controller_unavailable');
@@ -31,7 +31,12 @@ export function createOwnerAgentHost({ workspaceController, sessionController, c
     session: {
       // Official create takes one argument; prompt/follow/page take a signal.
       create: async request => plain(await method(sessionController, 'create')(request), value => typeof value.sessionId === 'string' && value.sessionId.length > 0),
-      prompt: async (request, signal) => plain(await method(sessionController, 'prompt')(request, signal), value => value.accepted === true),
+      prompt: async (request, signal) => {
+        // The hook receives the request so an Owner-scope policy that is verified
+        // active can drop the duplicated policy prefix from the user message.
+        if(beforePrompt)await beforePrompt(request.sessionId, request);
+        return plain(await method(sessionController, 'prompt')(request, signal), value => value.accepted === true);
+      },
       follow: (request, signal) => method(sessionController, 'follow')(request, signal),
       page: async (request, signal) => plain(await method(sessionController, 'page')(request, signal), value => Array.isArray(value.records)),
     },

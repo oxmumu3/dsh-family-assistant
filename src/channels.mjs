@@ -17,7 +17,7 @@ function delay(ms, signal) {
   });
 }
 
-export function createChannelManager({ directory, api = createWeixinApi(), onMessage = async () => {}, onStatus = () => {}, onBound, now = () => new Date().toISOString(), qrTimeoutMs = 300_000, qrIntervalMs = 1_000, pollRetryMs = 2_000 } = {}) {
+export function createChannelManager({ directory, api = createWeixinApi(), transcribeVoice, lookupInboundVoice, onMessage = async () => {}, onStatus = () => {}, onBound, now = () => new Date().toISOString(), qrTimeoutMs = 300_000, qrIntervalMs = 1_000, pollRetryMs = 2_000 } = {}) {
   if (!directory || typeof onBound !== 'function') throw new Error('缺少通道配置');
   const states = new Map(); let closed = false;
   function state(personId) {
@@ -83,6 +83,9 @@ export function createChannelManager({ directory, api = createWeixinApi(), onMes
         if (!active(s, epoch, signal)) break;
         // An inbound page is proof that this session recovered before handlers reply.
         status(s, 'connected');
+        // The complete poll page arrived at this host time; it is not a claim
+        // about when the person sent the message or whether it was delayed.
+        const receivedAt=now();
         for (const message of result.messages ?? []) {
           if (!active(s, epoch, signal)) break;
           if (message.peerId !== s.auth.peerId || message.groupId || message.group_id ||
@@ -90,8 +93,39 @@ export function createChannelManager({ directory, api = createWeixinApi(), onMes
               (message.accountId && message.accountId !== s.auth.accountId) || !present(message.id)) continue;
           // The response may need this latest context immediately, inside onMessage.
           if (present(message.contextToken)) { s.auth.contextToken = message.contextToken; save(s); }
-          await onMessage(s.personId, { id: message.id, peerId: message.peerId, text: message.text ?? '',
-            unsupported: !!message.unsupported, at: message.at ?? now(),
+          let text=message.text??'',voiceError=['format','limit'].includes(message.voiceError)?message.voiceError:undefined;
+          const voices=Array.isArray(message.voices)?message.voices:[];
+          // Runtime owns durable dedup and unfinished admission recovery. Reuse
+          // its admitted transcript, but still deliver the message to that gate.
+          const knownVoice=(voices.length||voiceError||message.inputKind==='voice')&&typeof lookupInboundVoice==='function'?lookupInboundVoice(s.personId,message.id):null;
+          const reuseVoice=present(knownVoice?.text)&&knownVoice.text.length<=8000;
+          if(reuseVoice){text=knownVoice.text;voiceError=['unavailable','format','limit','empty','failed'].includes(knownVoice.voiceError)?knownVoice.voiceError:undefined;}
+          if(voices.length>3)voiceError='limit';
+          if(voices.length&&!voiceError&&!reuseVoice){
+            if(typeof transcribeVoice!=='function'||typeof api.downloadVoice!=='function')voiceError='unavailable';
+            else {
+              const transcripts=[];
+              try {
+                for(const descriptor of voices){
+                  if(!active(s,epoch,signal))break;
+                  const audio=await api.downloadVoice({descriptor,signal});
+                  if(!active(s,epoch,signal))break;
+                  const result=await transcribeVoice({bytes:audio.bytes,descriptor,signal});
+                  if(!active(s,epoch,signal))break;
+                  if(!present(result?.text)||result.text.length>6000)throw Object.assign(new Error('No transcript'),{code:'family-voice/empty'});
+                  transcripts.push(result.text.trim());
+                }
+                text=[text,...transcripts].filter(present).join('\n');
+              } catch(error) {
+                voiceError=({'family-voice/unavailable':'unavailable','family-voice/format':'format','family-voice/limit':'limit','family-voice/empty':'empty'})[error?.code]??'failed';
+              }
+            }
+          }
+          if(!active(s,epoch,signal))break;
+          await onMessage(s.personId, { id: message.id, peerId: message.peerId, text,
+            unsupported: !!message.unsupported, at: reuseVoice&&present(knownVoice.at)?knownVoice.at:message.at ?? now(),
+            ...(voices.length||voiceError||message.inputKind==='voice'?{inputKind:'voice'}:{}),...(voiceError?{voiceError}:{}),
+            sourceTiming:{receivedAt,...(typeof message.at==='string'?{providerCreatedAt:message.at}:{})},
             ...(Array.isArray(message.attachments) && message.attachments.length ? { attachments: structuredClone(message.attachments) } : {}) });
           if (!active(s, epoch, signal)) break;
           s.lastInboundAt = now();
@@ -215,7 +249,8 @@ export function createChannelManager({ directory, api = createWeixinApi(), onMes
       const task = s.outbound.catch(() => {}).then(async () => {
         if (!valid() || signal?.aborted || !authorize()) throw Object.assign(new Error('发送已取消、绑定或指令授权已变化'), { sendOutcome: 'failed' });
         const result = await api.send({ token: s.auth.token, baseUrl: s.auth.baseUrl, peerId: s.auth.peerId,
-          contextToken: s.auth.contextToken, text, clientId, signal: signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal });
+          contextToken: s.auth.contextToken, text, clientId, signal: signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal,
+          authorize: () => valid() && !signal?.aborted && authorize() === true });
         if (result?.status !== 'api_accepted') throw Object.assign(new Error('发送结果尚未确认'), { sendOutcome: 'uncertain' });
         s.lastOutboundAt = now(); status(s, 'connected'); return result;
       });

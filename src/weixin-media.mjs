@@ -1,8 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_VOICE_BYTES = 4 * 1024 * 1024;
+export const MAX_VOICE_DURATION_MS = 120_000;
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c';
 export const mediaFailure = () => Object.assign(new Error('微信文件处理未完成，请检查文件或连接后重试'), { code: 'WEIXIN_FILE_FAILED', sendOutcome: 'failed' });
+export const voiceMediaFailure = () => Object.assign(new Error('这段语音未能读取，请重新说一次，或转成文字发给我。'), { code: 'WEIXIN_VOICE_FAILED' });
 const nonempty = value => typeof value === 'string' && value.length > 0;
 
 /** A display name is never accepted as a local path. */
@@ -48,8 +51,26 @@ export function normalizeFileItem(item) {
     media: Object.fromEntries(['encrypt_query_param', 'aes_key', 'encrypt_type', 'full_url'].filter(k => raw.media[k] !== undefined).map(k => [k, raw.media[k]])) };
   try { fileDescriptor(attachment); return attachment; } catch { return null; }
 }
-async function readBounded(response, signal) {
-  const limit = MAX_FILE_BYTES + 16, declared = response.headers?.get('content-length');
+function voiceDescriptor(value) {
+  if (!value || value.kind !== 'voice' || !value.media || typeof value.media !== 'object') throw voiceMediaFailure();
+  if (value.media.encrypt_type !== undefined && ![0, 1].includes(value.media.encrypt_type)) throw voiceMediaFailure();
+  for (const [name, min, max] of [['encodeType',1,8], ['sampleRate',8000,48000], ['bitsPerSample',8,32], ['durationMs',1,MAX_VOICE_DURATION_MS]]) {
+    if (value[name] !== undefined && (!Number.isSafeInteger(value[name]) || value[name] < min || value[name] > max)) throw voiceMediaFailure();
+  }
+  const key=decodeKey(value.media.aes_key);
+  const url=value.media.full_url !== undefined ? cdnUrl(value.media.full_url,'download') : parameterUrl(value.media.encrypt_query_param,'download');
+  return {key,url};
+}
+/** Voice text is optional in Tencent's protocol. Keep media capabilities only until the bound channel consumes them. */
+export function normalizeVoiceItem(item) {
+  const raw=item?.voice_item;
+  if (!raw || typeof raw !== 'object' || !raw.media || typeof raw.media !== 'object') return null;
+  const descriptor={kind:'voice',...Object.fromEntries([['encode_type','encodeType'],['sample_rate','sampleRate'],['bits_per_sample','bitsPerSample'],['playtime','durationMs']].filter(([key])=>raw[key]!==undefined).map(([key,name])=>[name,raw[key]])),
+    media:Object.fromEntries(['encrypt_query_param','aes_key','encrypt_type','full_url'].filter(key=>raw.media[key]!==undefined).map(key=>[key,raw.media[key]]))};
+  try {voiceDescriptor(descriptor);return descriptor;} catch {return null;}
+}
+async function readBounded(response, signal, maxBytes = MAX_FILE_BYTES) {
+  const limit = maxBytes + 16, declared = response.headers?.get('content-length');
   if (declared !== null && declared !== undefined && (!/^\d+$/u.test(declared) || Number(declared) > limit)) throw mediaFailure();
   if (!response.body?.getReader) throw mediaFailure();
   const reader = response.body.getReader(), chunks = []; let size = 0, done = false;
@@ -65,6 +86,19 @@ async function readBounded(response, signal) {
   } finally { signal.removeEventListener('abort', abort); if (!done) await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 function boundedSignal(signal) { return signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000); }
+
+/** CDN query and AES key authenticate this media; bot tokens never go to the CDN. */
+export async function downloadWeixinVoice(fetchImpl,{descriptor,signal}) {
+  try {
+    const {key,url}=voiceDescriptor(descriptor),combined=boundedSignal(signal);combined.throwIfAborted();
+    const response=await fetchImpl(url,{method:'GET',redirect:'error',signal:combined});
+    if(!response.ok)throw voiceMediaFailure();
+    const encrypted=await readBounded(response,combined,MAX_VOICE_BYTES);
+    if(!encrypted.length||encrypted.length%16!==0)throw voiceMediaFailure();
+    const decipher=createDecipheriv('aes-128-ecb',key,null),bytes=Buffer.concat([decipher.update(encrypted),decipher.final()]);
+    if(!bytes.length||bytes.length>MAX_VOICE_BYTES)throw voiceMediaFailure();combined.throwIfAborted();return{bytes};
+  } catch {throw voiceMediaFailure();}
+}
 
 export async function downloadWeixinFile(fetchImpl, { attachment, signal }) {
   try {

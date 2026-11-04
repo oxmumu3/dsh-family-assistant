@@ -14,6 +14,8 @@
   let historySignature = '';
   let ownerCommandSignature = '';
   let modelSignature = '';
+  let libraryPanel=null,libraryRenderedKey='',libraryRenderSignature='';
+  const libraryViews=new Map();
   let attentionExpanded = false;
   let ownerAgentBridge=null;
   try{ownerAgentBridge=window.parent?.__FamilyOwnerAgent || null;}catch{ownerAgentBridge=null;}
@@ -100,6 +102,7 @@
     if (owner && $('add-role').value === 'owner') $('add-role').value = 'elder';
     for (const id of ['nav-chat','nav-family','nav-inbox','nav-activity','drawer-close','settings-open','brief-open','context-clear']) $(id).disabled = !state;
     $('drawer-close').disabled = false;
+    if(libraryPanel&&person){const view=libraryView(person);for(const control of libraryPanel.querySelectorAll('button, input, select, textarea'))control.disabled=busy||view.loading;}
     $('notice-dismiss').disabled = false;
     $('owner-input').disabled = !state || !owner;
     $('send-owner').disabled = busy || voiceActive() || !owner || !$('owner-input').value.trim() || (ownerProject.active?Boolean(blockingOwnerProject()):Boolean(activeContext && !contextLabel(activeContext)));
@@ -277,7 +280,58 @@
     text('presentation-service-help',presentation.available?'支持 txt、md、docx、pptx 中的文字材料，制作可编辑 PPT；可在同一微信对话继续修改。':'PPT 制作未就绪，请先检查服务与模型设置。');
     if (load || !$('preferences').dataset.dirty) loadPreferences(person);
     text('message-label', '发送给 ' + person.label + ' 的内容');
-    renderReminders(person); renderHistory(person); renderOwnerCommands(person);
+    renderReminders(person); renderHistory(person); renderOwnerCommands(person); renderLibrary(person,{background:!load});
+  }
+  function libraryView(person){
+    const key=person.id+':'+(person.binding?.generation??0);
+    if(!libraryViews.has(key))libraryViews.set(key,{key,personId:person.id,query:'',kind:'',date:'',entries:[],notice:'',loading:false,loaded:false,attempted:false,version:0,nextBefore:null,edit:null,reportPreference:null});
+    return libraryViews.get(key);
+  }
+  async function loadLibrary(view,{more=false}={}){
+    if(view.loading)return;view.loading=true;view.attempted=true;const version=++view.version;renderLibrary(selectedPerson());
+    try{
+      const body={action:'library_query',personId:view.personId,limit:20,...(view.kind?{kind:view.kind}:{}),...(view.date?{date:view.date}:view.query?{query:view.query}:{}),...(more&&view.nextBefore?{before:view.nextBefore}:{})};
+      const result=await request(body,null,{raw:true});
+      if(version!==view.version)return;if(!result||!Array.isArray(result.entries))throw new Error('日记与资料暂时无法读取，请稍后刷新。');
+      view.entries=more?[...view.entries,...result.entries]:result.entries;view.nextBefore=result.nextBefore??null;view.reportPreference=result.reportPreference??null;view.notice=result.notice??'';view.loaded=true;
+    }catch(error){if(version===view.version)view.notice=error.message;}
+    finally{if(version===view.version){view.loading=false;if(selectedPerson()&&libraryView(selectedPerson())===view)renderLibrary(selectedPerson());}}
+  }
+  async function changeLibrary(view,entry,operation){
+    if(view.loading)return;const editing=view.edit,textValue=editing?.text?.trim();if(operation==='library_update'&&!textValue)return;
+    const body={action:operation,personId:view.personId,id:entry.id,expectedRevision:entry.revision,requestId:crypto.randomUUID(),...(operation==='library_update'?{text:textValue}:{})};
+    view.loading=true;renderLibrary(selectedPerson());
+    try{
+      await request(body,null,{raw:true});view.edit=null;view.loaded=false;view.notice=operation==='library_delete'?'已从有效日记与资料中删除，原聊天记录仍会保留。':'修改已保存，原始来源保留可查。';
+    }catch(error){view.notice=error.message;}
+    finally{view.loading=false;if(selectedPerson()&&libraryView(selectedPerson())===view)renderLibrary(selectedPerson());}
+    if(!view.loaded)await loadLibrary(view);
+  }
+  function renderLibrary(person,{background=false}={}){
+    if(!person)return;
+    if(!libraryPanel){libraryPanel=node('section',null,'section member-library');libraryPanel.setAttribute('aria-label','日记与资料');$('person-detail').append(libraryPanel);}
+    const view=libraryView(person),signature=JSON.stringify([view.key,person.timeZone,canReadHistory(person),view.version,view.loading,view.loaded,view.attempted,view.query,view.kind,view.date,view.edit,view.notice,view.nextBefore,view.entries,view.reportPreference]),active=document.activeElement;
+    if(background&&libraryRenderedKey===view.key&&(signature===libraryRenderSignature||libraryPanel.contains(active)&&['input','textarea','select'].includes(String(active?.tagName).toLowerCase())))return;
+    libraryRenderedKey=view.key;libraryRenderSignature=signature;libraryPanel.replaceChildren();const title=node('div',null,'section-title');title.append(node('h3','日记与资料'),node('span',view.loading?'正在读取…':view.entries.length+' 条','muted small'));libraryPanel.append(title,node('p','本人微信留下的日记、资料与记住的事。可以查原话、修正或删除。','hint'));
+    if(!canReadHistory(person)){libraryPanel.append(node('p','登记 Owner 后可在这里查看已保存记录。','hint'));return;}
+    if(view.reportPreference){const preference=node('article',null,'library-entry effective-report-preference');preference.append(node('strong','当前生效的日报偏好'),node('p',view.reportPreference.instruction,'library-text'),node('p','来源：本人日报服务 · '+localDate(view.reportPreference.updatedAt,person.timeZone),'hint'),node('p','此处显示实际生效设置。本人在微信说明以后日报怎样写，即可调整。','hint'));libraryPanel.append(preference);}
+    const form=node('form',null,'library-search'),label=node('label','查找这位家人的记录');label.htmlFor='library-query';const query=node('input');query.id='library-query';query.value=view.query||view.date;query.maxLength=200;query.placeholder='原话、昨天、上周的今天、去年的今天';query.addEventListener('input',()=>{view.query=query.value;view.date='';});
+    const typeLabel=node('label','内容');typeLabel.htmlFor='library-kind';const kind=node('select');kind.id='library-kind';for(const[value,label]of[['','全部'],['diary','日记'],['file','资料'],['fact','记住的事'],['preference','长期偏好'],['task','正在办']]){const option=node('option',label);option.value=value;kind.append(option);}kind.value=view.kind;kind.addEventListener('change',()=>{view.kind=kind.value;view.edit=null;void loadLibrary(view);});
+    const search=actionButton('查找',()=>{});search.type='submit';form.append(label,query,typeLabel,kind,search);form.addEventListener('submit',event=>{event.preventDefault();const value=query.value.trim();view.date=/^(?:今天|昨天|前天|上周的今天|上周今天|去年的今天|去年今天|\d{4}-\d{2}-\d{2})$/.test(value)?value:'';view.query=view.date?'':value;view.edit=null;void loadLibrary(view);});libraryPanel.append(form);
+    const recalls=node('div',null,'library-recalls');for(const date of ['上周的今天','去年的今天'])recalls.append(actionButton(date,()=>{view.date=date;view.query='';view.kind='diary';view.edit=null;void loadLibrary(view);},'text-button'));recalls.append(actionButton('刷新记录',()=>{void loadLibrary(view);},'text-button'));libraryPanel.append(recalls);
+    if(view.notice){const notice=node('p',view.notice,'hint');notice.setAttribute('role','status');libraryPanel.append(notice);}
+    const list=node('div',null,'library-entries');libraryPanel.append(list);
+    if(view.loaded&&!view.entries.length)list.append(node('p','没有找到这段时间或内容的记录。','empty-list'));
+    for(const entry of view.entries){
+      const article=node('article',null,'library-entry'),header=node('div',null,'section-title');header.append(node('strong',entry.date||entry.eventDateLabel||'日期不详'),node('span',({diary:'日记',fact:'记住的事',preference:'长期偏好',task:'正在办',file:'资料'}[entry.kind]||'记录')+' · 第 '+entry.revision+' 版','muted small'));article.append(header);
+      if(view.edit?.id===entry.id){const editorLabel=node('label','修正后的内容');editorLabel.htmlFor='library-edit';const editor=node('textarea');editor.id='library-edit';editor.rows=4;editor.maxLength=12000;editor.value=view.edit.text;editor.addEventListener('input',()=>{view.edit.text=editor.value;});article.append(editorLabel,editor);const controls=node('div',null,'card-actions');controls.append(actionButton('保存修改',()=>{void changeLibrary(view,entry,'library_update');},'primary'),actionButton('取消修改',()=>{view.edit=null;renderLibrary(person);}));article.append(controls);}
+      else if(entry.readOnly){article.append(node('p',entry.text,'library-text'),node('p',entry.notice||'历史摘要，仅供查看；不会改变当前生效的日报偏好。','hint'));}
+      else{article.append(node('p',entry.text,'library-text'));const controls=node('div',null,'card-actions');controls.append(actionButton('修改',()=>{view.edit={id:entry.id,text:entry.text};renderLibrary(person);}),actionButton('删除',()=>{void changeLibrary(view,entry,'library_delete');},'text-button'));article.append(controls);}
+      const sources=node('details',null,'library-sources');sources.append(node('summary','查看原话与来源'));for(const source of entry.sources||[]){sources.append(node('p',(source.providedBy==='owner'?'Owner 修订 · ':'本人原话 · ')+localDate(source.at,person.timeZone),'hint'),node('pre',source.text,'library-source'));}article.append(sources);list.append(article);
+    }
+    if(view.nextBefore)libraryPanel.append(actionButton('查看更多记录',()=>{void loadLibrary(view,{more:true});}));
+    for(const control of libraryPanel.querySelectorAll('button, input, select, textarea'))control.disabled=busy||view.loading;
+    if(drawerKind==='person'&&!view.loaded&&!view.loading&&!view.attempted)void loadLibrary(view);
   }
   function renderModelOptions() {
     const providers = state.model?.providers || [];
@@ -809,7 +863,7 @@
     show('drawer-overlay',true);$('drawer-content').scrollTop = 0;$('app-shell').inert = true;$('drawer-panel').focus();
   }
   function closeDrawer() {capabilities?.cancelDialog();if(drawerKind==='family-intake'){cancelVoice();familyIntake.draft=$('family-intake-input').value;persistDrafts();}if(drawerKind==='owner-project')ownerProjectPending=null;show('drawer-overlay',false);$('app-shell').inert = false;drawerKind='';lastFocus?.focus?.();}
-  function openPerson(id) {select(id);openDrawer('person');}
+  function openPerson(id) {select(id);openDrawer('person');renderLibrary(selectedPerson());}
   function editFamily(id){const person=state?.people.find(p=>p.id===id);if(!person)return;familyIntake={...emptyFamilyIntake(),personId:id};openDrawer('family-intake');text('drawer-title','补充'+person.label+'的资料');setValue('family-intake-input','');renderFamilyIntake();updateButtons();$('family-intake-input').focus();}
   async function openBrief(){openDrawer('brief');const root=$('brief-direct-content');root.replaceChildren();const paint=()=>{root.replaceChildren(node('h3','今日家庭服务简报'),node('p',state?.lastBrief?.text||'还没有生成今天的简报。','brief-body'));root.append(actionButton('重新整理简报',async()=>{const ok=await mutate({action:'preview_brief'});if(ok&&drawerKind==='brief')paint();}),actionButton('简报投送设置',()=>openDrawer('settings'),'text-button'));};paint();if(!state?.lastBrief){await mutate({action:'preview_brief'});if(drawerKind==='brief')paint();}}
   function startAddFamily() {

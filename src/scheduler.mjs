@@ -1,9 +1,10 @@
+import {DIARY_INVITATION_WINDOW_MS,diaryInvitationText} from './diary-invitations.mjs';
 import {recordMatchesBinding} from './store.mjs';
 import { addLocalDays, asInstant, buildElderDaily, buildOwnerBrief, localDate, localDateTimeToInstant } from './brief.mjs';
 
 export const CATCH_UP_MS = 120 * 60 * 1000;
-const expiry = due => new Date(Date.parse(due)+CATCH_UP_MS+1).toISOString();
-const eligible = (due, nowMs) => due !== null && nowMs>=Date.parse(due) && nowMs-Date.parse(due)<=CATCH_UP_MS;
+const expiry = (due,window=CATCH_UP_MS) => new Date(Date.parse(due)+window+1).toISOString();
+const eligible = (due, nowMs,window=CATCH_UP_MS) => due !== null && nowMs>=Date.parse(due) && nowMs-Date.parse(due)<=window;
 function dailyCandidates(date,time,timeZone) {
   return [addLocalDays(date,-1),date].map(day=>({date:day,due:localDateTimeToInstant(day,time,timeZone)}));
 }
@@ -17,7 +18,7 @@ function nextDailyAfter(reminder, instant) {
 }
 
 /** Enqueues at most one occurrence per source key. It never performs transport effects. */
-export function scheduleTick(store,{now}={}) {
+export function scheduleTick(store,{now,hasDiary=()=>false}={}) {
   const state=store.snapshot();
   if(state.config.paused) return [];
   const instant=asInstant(now);
@@ -41,10 +42,13 @@ export function scheduleTick(store,{now}={}) {
         if(candidate.due && Date.parse(candidate.due)>=Date.parse(reminder.dueAt) && Date.parse(candidate.due)<=nowMs && Date.parse(candidate.due)>Date.parse(occurrence)) occurrence=candidate.due;
       }
     }
-    if(eligible(occurrence,nowMs)) {
+    const diary=reminder.purpose==='diary_invitation',window=diary?DIARY_INVITATION_WINDOW_MS:CATCH_UP_MS,date=localDate(occurrence,reminder.timeZone);
+    if(eligible(occurrence,nowMs,window)) {
+      if(diary&&hasDiary(reminder.personId,date)){store.markReminder(reminder.id,reminder.repeat==='once'?{status:'completed'}:{dueAt:nextDailyAfter(reminder,instant)});continue;}
       const record=enqueue({
-        personId:reminder.personId,text:`提醒：${reminder.text}`,kind:'reminder',
-        sourceKey:`reminder:${reminder.id}:${occurrence}`,expiresAt:expiry(occurrence),
+        personId:reminder.personId,text:diary?diaryInvitationText(reminder.personId,date):`提醒：${reminder.text}`,kind:diary?'diary_invitation':'reminder',
+        ...(diary?{authorizationRoute:store.route(reminder.personId)}:{}),
+        sourceKey:`reminder:${reminder.id}:${occurrence}`,expiresAt:expiry(occurrence,window),
       });
       if(!record) continue; // A new explicit binding may become available inside this occurrence's window.
       if(reminder.repeat==='once') store.markReminder(reminder.id,{status:'completed'});

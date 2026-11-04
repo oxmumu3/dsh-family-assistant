@@ -9,6 +9,53 @@ window.__ModuleLoader__.load({
         return React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, focusable: false },
           React.createElement('path', { d: 'M3 10.5 12 3l9 7.5M5 9v11h14V9M9 20v-6h6v6' }));
       }
+      /** Sample the live Harness shell so the embedded workbench inherits its
+       * canvas colour, colour scheme, font size and --dsh-* tokens. */
+      function readHostTheme() {
+        try {
+          const root = getComputedStyle(document.documentElement);
+          const body = getComputedStyle(document.body);
+          const opaque = value => /^rgba?\(\s*\d+/.test(value ?? '') ? value : '';
+          const canvas = opaque(body.backgroundColor) || opaque(root.backgroundColor) || '';
+          const match = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(canvas);
+          const fallbackDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+          const dark = match
+            ? (0.2126 * Number(match[1]) + 0.7152 * Number(match[2]) + 0.0722 * Number(match[3])) / 255 < 0.5
+            : fallbackDark;
+          const tokens = [];
+          for (const style of [root, body]) {
+            for (const name of style) {
+              if (name.startsWith('--dsh-')) tokens.push(`${name}:${style.getPropertyValue(name).trim()}`);
+            }
+          }
+          const size = Number.parseFloat(root.fontSize) || 16;
+          return {
+            dark,
+            tokens: [...new Set(tokens)],
+            fontSize: Math.min(20, Math.max(13, size)),
+            fontFamily: root.fontFamily || body.fontFamily || '',
+            canvas: canvas || (dark ? '#14170f' : '#faf9f5'),
+          };
+        } catch {
+          return { dark: false, tokens: [], fontSize: 16, fontFamily: '', canvas: '#faf9f5' };
+        }
+      }
+      function applyHostTheme(source, theme) {
+        const declarations = [
+          `color-scheme:${theme.dark ? 'dark' : 'light'}`,
+          `--host-canvas:${theme.canvas}`,
+          `--host-font-size:${theme.fontSize}px`,
+          theme.fontFamily ? `--host-font-family:${theme.fontFamily}` : '',
+          ...theme.tokens,
+        ].filter(Boolean).join(';');
+        const style = `<style id="family-host-theme">:root{${declarations}}`
+          + 'html{font-size:var(--host-font-size)}'
+          + 'body{background:var(--host-canvas);font-family:var(--host-font-family,inherit)}</style>';
+        const themed = source.includes('</head>')
+          ? source.replace(/<\/head>/i, `${style}</head>`)
+          : style + source;
+        return themed.replace(/<html(\s[^>]*)?>/i, (_m, rest) => `<html${rest ?? ''} data-host-theme="${theme.dark ? 'dark' : 'light'}">`);
+      }
       function FamilyAssistant() {
         const [html, setHtml] = React.useState('');
         const [error, setError] = React.useState('');
@@ -62,7 +109,7 @@ window.__ModuleLoader__.load({
           setError('');
           Promise.resolve().then(() => globalThis.fetch('/api/family/workbench', { credentials: 'same-origin' }))
             .then(response => { if (!response.ok) throw new Error('unavailable'); return response.text(); })
-            .then(source => { if (active) setHtml(source); })
+            .then(source => { if (active) setHtml(applyHostTheme(source, readHostTheme())); })
             .catch(() => { if (active) setError('家庭助手暂时无法载入，请确认插件已启用后重试。'); });
           return () => {
             active = false;
@@ -92,7 +139,7 @@ window.__ModuleLoader__.load({
           sandbox: 'allow-scripts allow-same-origin allow-forms allow-downloads',
           // The main slot already owns the available height. Only reserve the
           // macOS window controls when the Host has collapsed its sidebar.
-          style: { display: 'block', flex: '1 1 0', width: '100%', height: '100%', minHeight: 0, marginTop: 'min(var(--dsh-frame-leading-clearance, 0px), 48px)', border: 0, background: '#faf9f5' },
+          style: { display: 'block', flex: '1 1 0', width: '100%', height: '100%', minHeight: 0, marginTop: 'min(var(--dsh-frame-leading-clearance, 0px), 48px)', border: 0, background: 'transparent', colorScheme: 'normal' },
         });
       }
       ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({

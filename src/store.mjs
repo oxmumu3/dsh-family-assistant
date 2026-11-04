@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync, chmodSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -32,7 +32,7 @@ const bindingFields = ['personId','accountId','peerId','generation','status','la
 const messageFields = ['id','personId','dir','text','kind','at','attachments','bindingGeneration'];
 function attachmentMetadata(value){if(!Array.isArray(value)||value.length>4)fail('附件信息无效');return value.map(row=>{object(row,['name','size','mimeType']);string(row.name,'附件名称',180);if(/[\\/]/.test(row.name))fail('附件名称无效');if(row.size!==undefined&&(!Number.isSafeInteger(row.size)||row.size<0||row.size>10*1024*1024))fail('附件大小无效');if(row.mimeType!==undefined&&(typeof row.mimeType!=='string'||!/^[-a-z0-9.+]+\/[-a-z0-9.+]+$/i.test(row.mimeType)))fail('附件类型无效');return clone(row);});}
 
-const reminderFields = ['id','personId','text','dueAt','repeat','time','timeZone','status','createdAt','updateRequestIds','bindingGeneration'];
+const reminderFields = ['id','personId','text','dueAt','repeat','time','timeZone','status','createdAt','updateRequestIds','bindingGeneration','purpose'];
 const outboxFields = ['id','personId','route','text','kind','sourceKey','status','createdAt','expiresAt','detail','authorizationRoute'];
 const ownerCommandFields = ['id','requestedBy','targetPersonId','inboundMessageId','action','status','requestRoute','resultId','detail','createdAt','updatedAt'];
 const ownerCommandStatuses = ['pending','scheduled','api_accepted','failed','uncertain','cancelled'];
@@ -65,7 +65,7 @@ function validateState(s) {
   if(s.people.filter(p=>p.role==='owner').length > 1) fail('只能有一位 Owner');
   const bound = new Set(); const peers = new Set(); const accounts = new Set(); for(const b of s.bindings) { object(b,bindingFields); validateRoute({personId:b.personId,accountId:b.accountId,peerId:b.peerId,generation:b.generation}); if(!ids.has(b.personId)||bound.has(b.personId)||peers.has(b.peerId)||accounts.has(b.accountId)) fail('绑定冲突'); bound.add(b.personId); peers.add(b.peerId); accounts.add(b.accountId); oneOf(b.status,connectionStatuses,'连接状态'); if(own(b,'lastError')) string(b.lastError,'连接错误',500,true); for(const k of ['lastInboundAt','lastOutboundAt']) if(own(b,k)) timestamp(b[k]); }
   const messageKeys = new Set(); for(const m of s.messages) { object(m,messageFields); if(!ids.has(m.personId)) fail('未知消息成员'); string(m.id,'消息标识',512); const key=m.personId+'\0'+m.dir+'\0'+m.id; if(messageKeys.has(key)) fail('消息重复'); messageKeys.add(key); oneOf(m.dir,['in','out'],'消息方向'); string(m.text,'消息',8000); string(m.kind,'消息类型',80); timestamp(m.at);validateBindingGeneration(m);if(m.attachments!==undefined)attachmentMetadata(m.attachments); }
-  const reminderIds = new Set(); for(const r of s.reminders) { object(r,reminderFields); safeId(r.id); if(reminderIds.has(r.id)||!ids.has(r.personId)) fail('提醒成员或标识无效'); reminderIds.add(r.id); string(r.text,'提醒内容',1000); timestamp(r.dueAt); oneOf(r.repeat,['once','daily'],'重复方式'); if(own(r,'time')) validTime(r.time); if(r.repeat==='daily'&&!r.time) fail('每日提醒需要时间'); validTimeZone(r.timeZone); oneOf(r.status,['active','cancelled','completed','expired'],'提醒状态'); timestamp(r.createdAt);validateBindingGeneration(r); if(own(r,'updateRequestIds')) {if(!Array.isArray(r.updateRequestIds)||r.updateRequestIds.length>1000||new Set(r.updateRequestIds).size!==r.updateRequestIds.length)fail('提醒修改记录无效');for(const id of r.updateRequestIds)string(id,'提醒请求标识',512);} }
+  const reminderIds = new Set(); for(const r of s.reminders) { object(r,reminderFields);if(r.purpose!==undefined)oneOf(r.purpose,['diary_invitation'],'提醒用途'); safeId(r.id); if(reminderIds.has(r.id)||!ids.has(r.personId)) fail('提醒成员或标识无效'); reminderIds.add(r.id); string(r.text,'提醒内容',1000); timestamp(r.dueAt); oneOf(r.repeat,['once','daily'],'重复方式'); if(own(r,'time')) validTime(r.time); if(r.repeat==='daily'&&!r.time) fail('每日提醒需要时间'); validTimeZone(r.timeZone); oneOf(r.status,['active','cancelled','completed','expired'],'提醒状态'); timestamp(r.createdAt);validateBindingGeneration(r); if(own(r,'updateRequestIds')) {if(!Array.isArray(r.updateRequestIds)||r.updateRequestIds.length>1000||new Set(r.updateRequestIds).size!==r.updateRequestIds.length)fail('提醒修改记录无效');for(const id of r.updateRequestIds)string(id,'提醒请求标识',512);} }
   const sources = new Set(); const outIds=new Set(); for(const o of s.outbox) { object(o,outboxFields); safeId(o.id); if(outIds.has(o.id)||!ids.has(o.personId)||sources.has(o.sourceKey)) fail('待发标识无效'); sources.add(o.sourceKey); outIds.add(o.id); validateRoute(o.route);if(o.authorizationRoute)validateRoute(o.authorizationRoute); if(o.route.personId!==o.personId) fail('待发路由无效'); string(o.text,'发送内容',3200); string(o.kind,'发送类型',80); string(o.sourceKey,'来源标识',512); oneOf(o.status,outboxStatuses,'发送状态'); timestamp(o.createdAt); if(o.expiresAt!==null) timestamp(o.expiresAt); string(o.detail,'发送说明',500,true); }
   if(own(s,'ownerCommands')) {
     if(!Array.isArray(s.ownerCommands)) fail('指令记录列表无效');
@@ -79,6 +79,10 @@ function initial() { return {version:1,config:{paused:true,timeZone:'Asia/Shangh
 export function createStore({directory,now = () => new Date().toISOString()} = {}) {
   string(directory,'存储目录',4096); if(typeof now !== 'function') fail('时钟无效'); mkdirSync(directory,{recursive:true,mode:0o700});
   const file = join(directory,'family.json'); let state = existsSync(file) ? JSON.parse(readFileSync(file,'utf8')) : initial(); validateState(state);
+  // A crash between write and rename leaves `.family-*.tmp` files behind. They
+  // are never read, so clear them once at startup instead of letting them
+  // accumulate next to the live store.
+  try { for (const name of readdirSync(directory)) if (/^\.family-[A-Za-z0-9-]+\.tmp$/.test(name)) try { unlinkSync(join(directory,name)); } catch {} } catch {}
   const clock = () => timestamp(now());
   function persist(next) { validateState(next); const temporary = join(directory,`.family-${randomUUID()}.tmp`); let fd; try { fd = openSync(temporary,'wx',0o600); writeFileSync(fd,JSON.stringify(next,null,2)+'\n'); fsyncSync(fd); closeSync(fd); fd=undefined; renameSync(temporary,file); chmodSync(file,0o600); let dirfd; try { dirfd=openSync(directory,'r'); fsyncSync(dirfd); } finally {if(dirfd!==undefined) closeSync(dirfd);} } catch(error) {if(fd!==undefined) closeSync(fd); try {unlinkSync(temporary);}catch{} throw error;} }
   function change(fn) { const next = clone(state); const result = fn(next); persist(next); state=next; return clone(result); }
@@ -124,7 +128,7 @@ export function createStore({directory,now = () => new Date().toISOString()} = {
       });
     },
     ownerCommands:()=>clone(state.ownerCommands??[]),
-    addReminder(input) { object(input,['id','personId','text','dueAt','repeat','time','timeZone']); if(input.id){safeId(input.id);const old=state.reminders.find(r=>r.id===input.id);if(old){if(old.personId!==input.personId||old.text!==input.text)fail('提醒标识属于其他安排');if(!recordMatchesBinding(old,findBinding(state,input.personId)))fail('提醒属于旧微信绑定，不能接管');return clone(old);}} return change(s=>{const p=findPerson(s,input.personId); const repeat=input.repeat??'once'; const timeZone=validTimeZone(input.timeZone??p.timeZone); const dueAt=timestamp(input.dueAt); let time=input.time; if(repeat==='daily'&&!time) { const parts = new Intl.DateTimeFormat('en-GB',{timeZone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(dueAt)); time=parts.find(p=>p.type==='hour').value+':'+parts.find(p=>p.type==='minute').value; } const reminder={id:input.id??randomUUID(),personId:p.id,text:input.text,dueAt,repeat,...(time!==undefined?{time}:{}),timeZone,status:'active',createdAt:clock(),...(findBinding(s,p.id)?{bindingGeneration:findBinding(s,p.id).generation}:{})}; s.reminders.push(reminder); return reminder;}); },
+    addReminder(input) { object(input,['id','personId','text','dueAt','repeat','time','timeZone','purpose']); if(input.id){safeId(input.id);const old=state.reminders.find(r=>r.id===input.id);if(old){if(old.personId!==input.personId||old.text!==input.text||old.purpose!==input.purpose)fail('提醒标识属于其他安排');if(!recordMatchesBinding(old,findBinding(state,input.personId)))fail('提醒属于旧微信绑定，不能接管');return clone(old);}} return change(s=>{const p=findPerson(s,input.personId); const repeat=input.repeat??'once'; const timeZone=validTimeZone(input.timeZone??p.timeZone); const dueAt=timestamp(input.dueAt); let time=input.time; if(repeat==='daily'&&!time) { const parts = new Intl.DateTimeFormat('en-GB',{timeZone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(dueAt)); time=parts.find(p=>p.type==='hour').value+':'+parts.find(p=>p.type==='minute').value; } const reminder={id:input.id??randomUUID(),personId:p.id,text:input.text,...(input.purpose!==undefined?{purpose:input.purpose}:{}),dueAt,repeat,...(time!==undefined?{time}:{}),timeZone,status:'active',createdAt:clock(),...(findBinding(s,p.id)?{bindingGeneration:findBinding(s,p.id).generation}:{})}; s.reminders.push(reminder); return reminder;}); },
     updateReminder(personId,id,patch,{requestId}={}) {
       object(patch,['text','dueAt','repeat','time']);if(!Object.keys(patch).length)fail('没有可修改的提醒内容');string(requestId,'提醒请求标识',512);
       const previous=findReminder(state,id);findPerson(state,personId);if(previous.personId!==personId)fail('不能修改其他成员的提醒');if(!recordMatchesBinding(previous,findBinding(state,personId)))fail('提醒属于旧微信绑定，当前成员不能修改');
@@ -149,6 +153,27 @@ export function createStore({directory,now = () => new Date().toISOString()} = {
     updatePendingText(id,text) { string(text,'发送内容',3200); return change(s=>{const o=findOut(s,id); if(o.status!=='pending') fail('只能更新未发送的内容'); o.text=text; return o;}); },
     transition(id,status,detail='') { oneOf(status,outboxStatuses,'发送状态'); string(detail,'发送说明',500,true); return change(s=>{const o=findOut(s,id); if(o.status===status) return o; const allowed=o.status==='pending'?['dispatching','cancelled','expired','blocked']:o.status==='dispatching'?['api_accepted','failed','uncertain','blocked','cancelled']:[]; if(!allowed.includes(status)) fail('不允许的发送状态变化'); if(status==='dispatching') {const p=findPerson(s,o.personId); if(!currentRoute(s,o)) {o.status='cancelled';o.detail='绑定已更换';return o;} if(o.expiresAt&&Date.parse(o.expiresAt)<=Date.parse(clock())) {o.status='expired';o.detail='内容已过期';return o;} if(s.config.paused) {o.status='blocked';o.detail='家庭助手已暂停';return o;} if(o.kind==='elder_daily'&&!p.dailyEnabled || o.kind==='owner_brief'&&o.sourceKey.startsWith('owner-brief:')&&!s.config.ownerBriefEnabled) {o.status='blocked';o.detail='定时服务已停用';return o;} if(o.sourceKey.startsWith('reminder:')) {const reminderId=o.sourceKey.split(':')[1]; const r=s.reminders.find(r=>r.id===reminderId); if(r?.status==='cancelled') {o.status='cancelled';o.detail='提醒已取消';return o;}} } o.status=status;o.detail=detail; if(status==='api_accepted') s.messages.push({id:`out-${o.id}`,personId:o.personId,dir:'out',text:o.text,kind:o.kind,at:clock(),bindingGeneration:o.route.generation}); return o;}); },
     recoverDispatching() { return change(s=>{const recovered=s.outbox.filter(o=>o.status==='dispatching'); for(const o of recovered) {o.status='uncertain';o.detail='上次发送结果未知，请人工确认';} return recovered;}); },
+    /** Terminal delivery rows are diagnostics only: the sent text already became a
+     * `messages` row when the API accepted it. Keep a recent window per person so
+     * the hot snapshot cannot grow without bound. */
+    prune({outboxKeepDays=30,outboxKeepPerPerson=50,at}={}) {
+      const terminal = new Set(['api_accepted','failed','blocked','uncertain','cancelled','expired']);
+      return change(s => {
+        const cutoff = Date.parse(at ? timestamp(at) : clock()) - Math.max(1,outboxKeepDays) * 24 * 60 * 60 * 1000;
+        const keptPerPerson = new Map();
+        const keep = new Set();
+        for (let index = s.outbox.length - 1; index >= 0; index -= 1) {
+          const row = s.outbox[index];
+          const seen = keptPerPerson.get(row.personId) ?? 0;
+          if (!terminal.has(row.status)) { keep.add(row.id); continue; }
+          const fresh = Number.isFinite(Date.parse(row.createdAt)) && Date.parse(row.createdAt) >= cutoff;
+          if (fresh || seen < Math.max(1,outboxKeepPerPerson)) { keep.add(row.id); keptPerPerson.set(row.personId, seen + 1); }
+        }
+        const dropped = s.outbox.filter(row => !keep.has(row.id)).map(row => row.id);
+        if (dropped.length) s.outbox = s.outbox.filter(row => keep.has(row.id));
+        return { dropped: dropped.length, kept: s.outbox.length };
+      });
+    },
     markReminder(id,patch) { object(patch,['status','dueAt']); return change(s=>{const r=findReminder(s,id); if(own(patch,'status')) oneOf(patch.status,['active','cancelled','completed','expired'],'提醒状态'); if(own(patch,'dueAt')) patch={...patch,dueAt:timestamp(patch.dueAt)}; Object.assign(r,clone(patch)); return r;}); },
   };
 }

@@ -9,6 +9,7 @@ const content=(value,max)=>typeof value==='string'&&value.trim()&&value.length<=
 const canonical=value=>JSON.stringify(value,(_key,item)=>plain(item)?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
 const hash=value=>createHash('sha256').update(canonical(value)).digest('hex');
 const clone=value=>structuredClone(value),hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+const utf8Prefix=(value,max)=>{const bytes=Buffer.from(String(value??''));if(bytes.length<=max)return bytes.toString();let end=max;while(end>0&&(bytes[end]&0xc0)===0x80)end--;return bytes.subarray(0,end).toString('utf8');};
 const fail=(message,code='owner_management_forbidden')=>{throw Object.assign(new Error(message),{code});};
 const routeHash=route=>hash(route??null);
 const escape=value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
@@ -97,14 +98,15 @@ function journalFor(directory){
  return{read,mutate(change){const state=read(),result=change(state);write(state);return result;}};
 }
 
-const operationKeys={status:['action'],preview_brief:['action'],history_page:['action','personId','before','limit','query'],draft_management:['action','text','contextId'],send_message:['action','personId','text'],confirm_management:['action','cardId','revision']};
+const operationKeys={status:['action'],preview_brief:['action'],history_page:['action','personId','before','limit','query'],library_query:['action','personId','before','limit','query','date','kind'],draft_management:['action','text','contextId'],send_message:['action','personId','text'],confirm_management:['action','cardId','revision']};
 function checkArgs(args){
  if(!plain(args)||!Object.hasOwn(operationKeys,args.action)||Object.keys(args).some(key=>!operationKeys[args.action].includes(key)))fail('不支持的操作或参数。','owner_management_invalid');
  if(['draft_management','send_message'].includes(args.action)&&!content(args.text,args.action==='send_message'?2800:6000))fail('请提供完整且长度适当的正文。','owner_management_invalid');
- if(['history_page','send_message'].includes(args.action)&&!string(args.personId,100))fail('请先用 status 核对目标成员。','owner_management_invalid');
+ if(['history_page','library_query','send_message'].includes(args.action)&&!string(args.personId,100))fail('请先用 status 核对目标成员。','owner_management_invalid');
  if(args.contextId!==undefined&&(!string(args.contextId,120)||!/^(?:card|person):[A-Za-z0-9_-]{1,100}$/.test(args.contextId)))fail('草稿对象参数无效。','owner_management_invalid');
  if(args.action==='confirm_management'&&(!string(args.cardId,100)||!Number.isSafeInteger(args.revision)||args.revision<1))fail('确认需要当前草稿标识和精确版本。','owner_management_invalid');
- if(args.limit!==undefined&&(!Number.isSafeInteger(args.limit)||args.limit<1||args.limit>100)||args.query!==undefined&&(typeof args.query!=='string'||args.query.length>200||/[\x00-\x1f\x7f]/u.test(args.query))||args.before!==undefined&&(typeof args.before!=='string'||!/^fh1_[A-Za-z0-9_-]{43}$/.test(args.before)))fail('历史查询参数无效。','owner_management_invalid');
+ if(args.limit!==undefined&&(!Number.isSafeInteger(args.limit)||args.limit<1||args.limit>(args.action==='library_query'?10:100))||args.query!==undefined&&(typeof args.query!=='string'||args.query.length>200||/[\x00-\x1f\x7f]/u.test(args.query))||args.before!==undefined&&(typeof args.before!=='string'||!(args.action==='library_query'?/^entry-[a-f0-9]{48}$/:/^fh1_[A-Za-z0-9_-]{43}$/).test(args.before)))fail('历史查询参数无效。','owner_management_invalid');
+ if(args.date!==undefined&&!string(args.date,40)||args.kind!==undefined&&!['diary','fact','preference','task','file'].includes(args.kind))fail('资料库查询参数无效。','owner_management_invalid');
 }
 const receiptText=status=>['api_accepted','accepted','completed'].includes(status)?'已提交给家人的微信接口；实际收信待本人确认。':['unknown','uncertain','dispatching','pending'].includes(status)?'发送结果尚未确认，没有自动重发。':'这次发送未完成，没有自动重发。';
 function confirmationResult(value,cardId,revision){
@@ -136,6 +138,26 @@ export function createOwnerManagementTool({runtime,directory}={}){
   if(args.action==='history_page'){
    const value=await runtime.action({action:'history_page',personId:args.personId,...(args.before?{before:args.before}:{}),...(args.limit!==undefined?{limit:args.limit}:{}),...(args.query!==undefined?{query:args.query}:{})});await guard();return{...value,text:JSON.stringify(value)};
   }
+  if(args.action==='library_query'){
+   const target=runtime.store.person(args.personId),route=currentRoute(args.personId);
+   if(!target||!route)fail('这位家人的微信尚未连接，未返回资料库内容。');
+   const value=await runtime.action({...args,limit:args.limit??6});await guard();
+   if(routeHash(currentRoute(args.personId))!==routeHash(route))fail('这位家人的微信绑定已经改变，未返回旧资料。');
+   const visible=(value.entries??[]).filter(row=>row.key!=='report-style'),maximum=Math.floor(8500/Math.max(1,visible.length));
+   const entries=visible.map(row=>({id:row.id,kind:row.kind,date:row.date,datePrecision:row.datePrecision,revision:row.revision,status:row.status,text:utf8Prefix(row.text,maximum),...(Buffer.byteLength(String(row.text??''))>maximum?{truncated:true}:{}),...(row.readOnly?{readOnly:true}:{}),...(row.notice?{notice:utf8Prefix(row.notice,300)}:{}),sources:(row.sources??[]).slice(-1).map(({id,at,providedBy})=>({id:utf8Prefix(id,160),at,providedBy}))}));
+   const preference=value.reportPreference;
+   const result={entries,nextBefore:value.nextBefore??null,...(value.date?{date:value.date}:{}),...(value.notice?{notice:value.notice}:{}),reportPreference:preference?{instruction:utf8Prefix(preference.instruction,4000),revision:preference.revision,updatedAt:preference.updatedAt,readOnly:true,source:'本人日报服务的当前生效设置'}:null};
+   let rendered=JSON.stringify(result);
+   while(Buffer.byteLength(JSON.stringify({...result,text:rendered}))>24000){
+    const largest=entries.reduce((selected,row)=>Buffer.byteLength(row.text)>Buffer.byteLength(selected?.text??'')?row:selected,null);
+    if(largest&&largest.text){largest.text=utf8Prefix(largest.text,Math.floor(Buffer.byteLength(largest.text)/2));largest.truncated=true;}
+    else if(result.reportPreference?.instruction){result.reportPreference.instruction=utf8Prefix(result.reportPreference.instruction,Math.floor(Buffer.byteLength(result.reportPreference.instruction)/2));result.reportPreference.truncated=true;}
+    else if(entries.length){entries.pop();result.nextBefore=entries.at(-1)?.id??value.nextBefore??null;}
+    else break;
+    rendered=JSON.stringify(result);
+   }
+   return{...result,text:rendered};
+  }
   if(args.action==='preview_brief'){const state=await runtime.action({action:'preview_brief'});await guard();return{text:state.lastBrief.text};}
   if(args.action==='send_message'){
    if(authority.deliveryTarget)return{status:'delivery_managed',text:'本轮成果已有统一交付目标，请只生成交付正文；不要再次调用发送工具。'};
@@ -165,5 +187,5 @@ export function createOwnerManagementTool({runtime,directory}={}){
   if(replay){await guard();return clone(replay.result??{status:replay.status,text:'此前确认仍在处理或结果尚未核实，没有重复执行。'});}
   const pending=(async()=>{let result;try{if(typeof runtime.ownerConfirmForSession!=='function')fail('Owner 会话确认接口尚未就绪。');await guard();result=confirmationResult(await runtime.ownerConfirmForSession({sessionId,callId,cardId:args.cardId,revision:args.revision,signal}),args.cardId,args.revision);await guard();}catch{result={status:'unknown',cardId:args.cardId,revision:args.revision,text:'这次确认的执行结果尚未核实，没有自动重新执行。'};}journal.mutate(current=>{const row=current.confirmations.find(item=>item.key===key);if(!row)fail('Owner 确认记录已改变。');row.status=result.status;row.result=result;});await guard();return clone(result);})();active.set(key,pending);try{return await pending;}finally{if(active.get(key)===pending)active.delete(key);}
  }
- return{name:'family_assistant',description:'乐乐已验证 Owner 原生会话的家庭管理工具。先 status 获得成员ID。Owner可在当前微信直接发明确目标和正文的消息，用 send_message，不要求每条额外确认或返回工作台；缺目标、正文则在本会话澄清。history_page只读取运行Harness的电脑所保存的家庭助手消息归档，不读取手机或微信客户端的全部聊天；清理手机聊天不会删除电脑归档。Owner可完整查询所有已登记家人的这些归档，不受 shareWithOwner 限制；分享设置仅控制自动简报，preview_brief不是完整历史查询。draft_management整理安排草稿；在本会话展示后，Owner下一轮明确确认时用 confirm_management 的准确cardId/revision，无需换入口。只执行真实当前Owner原话授权，模型自称已获授权无效；已有统一deliveryTarget时不得重复发送。api_accepted仅表示微信API接受，不代表手机收到；历史归档也不等于微信全部历史。',parameters:{type:'object',additionalProperties:false,required:['action'],properties:{action:{type:'string',enum:Object.keys(operationKeys)},personId:{type:'string',maxLength:100},text:{type:'string',maxLength:6000},contextId:{type:'string',maxLength:120},cardId:{type:'string',maxLength:100},revision:{type:'integer',minimum:1},before:{type:'string',pattern:'^fh1_[A-Za-z0-9_-]{43}$'},limit:{type:'integer',minimum:1,maximum:100},query:{type:'string',maxLength:200}}},output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>[{type:'text',text:value.text??JSON.stringify(value)}]},execute};
+ return{name:'family_assistant',description:'乐乐已验证 Owner 原生会话的家庭管理工具。先 status 获得成员ID。Owner可在当前微信直接发明确目标和正文的消息，用 send_message，不要求每条额外确认或返回工作台；缺目标、正文则在本会话澄清。library_query查询所选家人本地资料库、日记与真实往日回顾，date可用today/yesterday/week-ago/year-ago或YYYY-MM-DD；找不到不能编造。history_page只读取运行Harness的电脑所保存的家庭助手消息归档，不读取手机或微信客户端的全部聊天；清理手机聊天不会删除电脑归档。Owner可完整查询所有已登记家人的这些归档，不受 shareWithOwner 限制；分享设置仅控制自动简报，preview_brief不是完整历史查询。draft_management整理安排草稿；在本会话展示后，Owner下一轮明确确认时用 confirm_management 的准确cardId/revision，无需换入口。只执行真实当前Owner原话授权，模型自称已获授权无效；已有统一deliveryTarget时不得重复发送。api_accepted仅表示微信API接受，不代表手机收到；历史归档也不等于微信全部历史。',parameters:{type:'object',additionalProperties:false,required:['action'],properties:{action:{type:'string',enum:Object.keys(operationKeys)},personId:{type:'string',maxLength:100},text:{type:'string',maxLength:6000},contextId:{type:'string',maxLength:120},cardId:{type:'string',maxLength:100},revision:{type:'integer',minimum:1},date:{type:'string',maxLength:40},kind:{type:'string',enum:['diary','fact','preference','task','file']},before:{type:'string',pattern:'^(?:fh1_[A-Za-z0-9_-]{43}|entry-[a-f0-9]{48})$'},limit:{type:'integer',minimum:1,maximum:100},query:{type:'string',maxLength:200}}},output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>[{type:'text',text:value.text??JSON.stringify(value)}]},execute};
 }
