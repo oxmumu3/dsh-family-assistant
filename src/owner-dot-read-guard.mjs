@@ -57,27 +57,47 @@ export function installOwnerDotReadGuard({ctx,getTasks}){
  function refresh(agent){
   if(closed||!agent||typeof agent.id!=='string')return;
   const previous=overlays.get(agent.id);
-  if(previous&&previous.agent!==agent){void previous.dispose();overlays.delete(agent.id);}
+  if(previous&&previous.agent!==agent){void previous.dispose?.();overlays.delete(agent.id);}
   if(!policy.active(agent.id)){
-   const existing=overlays.get(agent.id);if(existing){overlays.delete(agent.id);void existing.dispose();}return;
+   // rc1 executor selections deliberately become unavailable when unloaded.
+   // Keep an already selected native executor for this Owner's scope lifetime;
+   // never restore a cached PTC provider or change the deployment default.
+   const existing=overlays.get(agent.id);if(existing&&!existing.modern){overlays.delete(agent.id);void existing.dispose?.();}return;
   }
-  if(overlays.has(agent.id))return;
-  const scoped=agent.ctx?.get?.('tools');if(!scoped||typeof scoped.presentAs!=='function')throw new Error('owner_native_presentation_unavailable');
-  if(tools.modeFor(agent)==='native')return;
-  const dispose=scoped.presentAs('native');overlays.set(agent.id,{agent,dispose});
-  if(tools.modeFor(agent)!=='native'){overlays.delete(agent.id);void dispose();throw new Error('owner_native_presentation_unavailable');}
+  if(overlays.has(agent.id))return overlays.get(agent.id).ready;
+  const entry={agent,dispose:null,modern:false,ready:null};overlays.set(agent.id,entry);
+  entry.ready=(async()=>{
+   try{
+    const scoped=agent.ctx?.get?.('tools');
+    if(typeof tools.modeFor==='function'&&typeof scoped?.presentAs==='function'){
+     if(tools.modeFor(agent)!=='native')entry.dispose=scoped.presentAs('native');
+     if(tools.modeFor(agent)!=='native')throw new Error('owner_native_presentation_unavailable');
+    }else if(typeof tools.selectExecutor==='function'&&typeof scoped?.setExecutor==='function'){
+     // rc1 ships this built-in. Resolve the Host's official module lazily; do
+     // not bundle an SDK copy or emulate unrestricted program execution.
+     const {NativeToolExecutor}=await import('@deepseek-ai/dsh-tool-executor-native');
+     if(closed||overlays.get(agent.id)!==entry)throw new Error('owner_read_guard_closed');
+     entry.modern=true;
+     let selected;try{selected=tools.selectExecutor(agent);}catch{}
+     if(!(selected instanceof NativeToolExecutor))entry.dispose=scoped.setExecutor(new NativeToolExecutor(agent.ctx));
+     if(!(tools.selectExecutor(agent) instanceof NativeToolExecutor))throw new Error('owner_native_presentation_unavailable');
+    }else throw new Error('owner_native_presentation_unavailable');
+   }catch(error){if(overlays.get(agent.id)===entry)overlays.delete(agent.id);await entry.dispose?.();throw error;}
+  })();
+  return entry.ready;
  }
  const onCreated=ctx.on('agent/created',({agent})=>refresh(agent));
- const onDisposed=ctx.on('agent/disposed',({agent})=>{const current=overlays.get(agent?.id);if(current?.agent===agent)overlays.delete(agent.id);});
- function prepare(sessionId){
+ const onDisposed=ctx.on('agent/disposed',({agent})=>{const current=overlays.get(agent?.id);if(current?.agent===agent){overlays.delete(agent.id);void current.dispose?.();}});
+ async function prepare(sessionId){
   if(closed)throw new Error('owner_read_guard_closed');
   const registry=ctx.get('agents',false);if(!registry||typeof registry.get!=='function'){if(policy.active(sessionId))throw new Error('owner_agent_registry_unavailable');return;}
-  const agent=registry.get(sessionId);if(agent)refresh(agent);
+  const agent=registry.get(sessionId);if(agent)await refresh(agent);
  }
- function refreshSession(sessionId){const registry=ctx.get('agents',false),agent=registry?.get?.(sessionId);if(agent)refresh(agent);}
+ function refreshSession(sessionId){const registry=ctx.get('agents',false),agent=registry?.get?.(sessionId);if(agent)return refresh(agent);}
  async function close(){
   if(closed)return;closed=true;await onCreated();await onDisposed();await unguard();
-  for(const item of overlays.values())await item.dispose();overlays.clear();
+  const entries=[...overlays.values()];overlays.clear();
+  for(const item of entries){await item.ready?.catch(()=>{});await item.dispose?.();}
  }
  return Object.freeze({prepare,refresh,refreshSession,close});
 }

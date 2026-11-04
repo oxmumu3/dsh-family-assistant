@@ -42,7 +42,7 @@ export function apply(ctx,config={}){
   // so adding this gateway does not start sessions or force a service restart.
   let nativeAdapter,nativeWorkspace,nativeSession;
   const native=()=>{const workspaceController=ctx.get('workspaceController'),sessionController=ctx.get('sessionController');
-    if(!nativeAdapter||nativeWorkspace!==workspaceController||nativeSession!==sessionController){nativeWorkspace=workspaceController;nativeSession=sessionController;nativeAdapter=createOwnerAgentHost({workspaceController,sessionController,controlWorkspacePath:storageDir+'-owner-workspace',beforePrompt:async (sessionId,request)=>{if(!ownerReadGuard)throw new Error('owner_read_guard_unavailable');const prepared=ownerReadGuard.prepare(sessionId);try{await ownerPromptScope.prepareRequest(sessionId,request);}catch{}return prepared;}});}return nativeAdapter;};
+    if(!nativeAdapter||nativeWorkspace!==workspaceController||nativeSession!==sessionController){nativeWorkspace=workspaceController;nativeSession=sessionController;nativeAdapter=createOwnerAgentHost({workspaceController,sessionController,controlWorkspacePath:storageDir+'-owner-workspace',beforePrompt:async (sessionId,request)=>{if(!ownerReadGuard)throw new Error('owner_read_guard_unavailable');const prepared=await ownerReadGuard.prepare(sessionId);try{await ownerPromptScope.prepareRequest(sessionId,request);}catch{}return prepared;}});}return nativeAdapter;};
   const ownerAgent=Object.fromEntries(['ensureControlWorkspace','listWorkspaces','start','observe'].map(method=>[method,(...args)=>native()[method](...args)]));
   const weather=createWeatherService();
   const toolExecutors={...createFamilyToolExecutors({ownerAgent,maxBytes:24000}),weather:weather.execute};
@@ -72,7 +72,7 @@ export function apply(ctx,config={}){
     // A Host without the internal tools guard cannot enforce the PTC read
     // policy. Keep the plugin usable instead of failing the whole mount; the
     // Owner bridge and every tool still authenticate by session identity.
-    ownerReadGuard={prepare(){},refreshSession(){},close:async()=>{}};
+    ownerReadGuard={prepare(){throw new Error('owner_read_guard_unavailable');},refreshSession(){},close:async()=>{}};
   }
   try{
     // Host-internal only; Cordis removes the service on plugin unload. Hosts

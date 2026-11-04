@@ -4,7 +4,7 @@
 
 一个 DeepSeek Harness Host，同时服务多位长辈。长辈各自在微信里聊天、设置提醒、接收个性化日报；Owner 在工作台管理，在自己的微信接收每日服务简报。
 
-目标宿主 **0.2.1-rc.2 / 0.2.1-rc.3**。固定发行入口为 [npm 公开包](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant) `@oxmumu3/dsh-family-assistant@latest`；每次发布新版到 npm 时更新 `latest`，分享的包名无需改变。这是社区插件，未上架 Harness 官方插件市场。
+目标宿主 **0.2.1-rc.2 / rc.3 / rc.4 / rc.5 / 0.2.2-rc.1**。固定发行入口为 [npm 公开包](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant) `@oxmumu3/dsh-family-assistant@latest`；每次发布新版到 npm 时更新 `latest`，分享的包名无需改变。这是社区插件，未上架 Harness 官方插件市场。
 
 ## 现在能做什么
 
@@ -44,7 +44,7 @@
 
 ## 在 Harness 中安装
 
-要求 Node.js 22.13+、DeepSeek Harness **0.2.1-rc.2 或 0.2.1-rc.3** 的 Web 或桌面宿主。其他版本需要另行验证。
+支持 DeepSeek Harness **0.2.1-rc.2 / rc.3 / rc.4 / rc.5 / 0.2.2-rc.1** 的 Web 或桌面宿主。0.2.2-rc.1 按官方 SDK 要求使用 Node.js 24.9+；旧宿主沿用 Node.js 22.13+。其他版本需要另行验证，alpha 不自动纳入支持。
 
 当前可用的一句话安装：点击左上角“新建会话”，在新会话页面点“标准模式”下拉，选“创造模式”，然后发送：
 

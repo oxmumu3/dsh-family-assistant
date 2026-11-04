@@ -13,7 +13,9 @@ export async function planSdk(args) {
   const metadata = JSON.parse(await readFile(join(source, 'package.json')));
   const sdk = validateCompatibility(metadata, args[1]);
   const dependencies = { ...metadata.dependencies, ...metadata.devDependencies };
-  dependencies['@deepseek-ai/cordis'] = sdk === '0.2.0-rc.2' ? '4.0.4' : '4.0.5';
+  const rc1=sdk==='0.2.2-rc.1';
+  dependencies['@deepseek-ai/cordis'] = rc1 ? '4.1.0' : sdk === '0.2.0-rc.2' ? '4.0.4' : '4.0.5';
+  if(!rc1)for(const name of ['dsh-agent','dsh-session-projection','dsh-system-prompt','dsh-scope','dsh-tool-executor-native','dsh-tool-executor-ptc'])delete dependencies['@deepseek-ai/'+name];
   for (const name of Object.keys(dependencies)) if (name.startsWith('@deepseek-ai/dsh-')) dependencies[name] = sdk;
   for (const name of Object.keys(metadata.peerDependencies ?? {})) if (name.startsWith('@deepseek-ai/dsh-')) dependencies[name] = sdk;
   for (const name of ['dsh-storage', 'dsh-storage-domain', 'dsh-storage-json', 'dsh-client-connection']) dependencies['@deepseek-ai/' + name] = sdk;
@@ -52,11 +54,12 @@ async function main() {
   const runtime = { ...env, NODE_OPTIONS: '--max-old-space-size=128 --import=' + pathToFileURL(join(stage, 'scripts/ci-network.mjs')).href };
   const network = await verifySandbox({ cwd: stage, env: runtime });
   await writeFile(join(output, 'network-selftest.json'), JSON.stringify(network, null, 2) + '\n');
-  const tests = ["test/plugin.test.mjs", "test/owner-bridge.test.mjs", "test/owner-agent-host.test.mjs", "test/voice-host.test.mjs", "test/http.test.mjs", "test/owner-tool-authority.test.mjs", "test/channels.test.mjs", "test/weixin.test.mjs", "test/weixin-media.test.mjs", "test/owner-send-authority-race.test.mjs", "test/upgrade-persistence.test.mjs", "test/compatibility-contract.test.mjs", "test/ci-sandbox.test.mjs"];
-  const suite = await run(process.execPath, ['--max-old-space-size=128', '--test', '--test-concurrency=1', ...tests], stage, runtime, 'suite.tap', 240000);
+  const tests = ["test/plugin.test.mjs", "test/owner-bridge.test.mjs", "test/owner-agent-host.test.mjs", "test/voice-host.test.mjs", "test/http.test.mjs", "test/owner-tool-authority.test.mjs", "test/channels.test.mjs", "test/weixin.test.mjs", "test/weixin-media.test.mjs", "test/owner-send-authority-race.test.mjs", "test/upgrade-persistence.test.mjs", "test/compatibility-contract.test.mjs", "test/compatibility-official.test.mjs", "test/ci-sandbox.test.mjs"];
+  if(plan.sdk==='0.2.2-rc.1')tests.push('test/rc1-owner-scope.test.mjs');
+  const suite = await run(process.execPath, ['--max-old-space-size=128', '--test', '--test-reporter=tap', '--test-concurrency=1', ...tests], stage, runtime, 'suite.tap', 240000);
   const counts = Object.fromEntries([...suite.stdout.matchAll(/^# (tests|pass|fail|skipped|cancelled) (\d+)$/gm)].map(([,key,value]) => [key, Number(value)]));
   await writeFile(join(output, 'suite-counts.json'), JSON.stringify(counts, null, 2) + '\n');
-  if (!Number.isSafeInteger(counts.tests) || counts.tests < 128 || counts.pass !== counts.tests || counts.fail !== 0 || counts.skipped !== 0 || counts.cancelled !== 0) throw Error('SDK contracts incomplete, skipped or failed: ' + JSON.stringify(counts));
+  if (!Number.isSafeInteger(counts.tests) || counts.tests < (plan.sdk==='0.2.2-rc.1'?144:139) || counts.pass !== counts.tests || counts.fail !== 0 || counts.skipped !== 0 || counts.cancelled !== 0) throw Error('SDK contracts incomplete, skipped or failed: ' + JSON.stringify(counts));
   await run(process.execPath, ['--max-old-space-size=128', 'scripts/ci-host-contract.mjs'], stage, runtime, 'host-contract.log', 45000);
   const summary = { sdk: plan.sdk, passed: true, counts, network, exactSdkDependencies: true, testFiles: tests.length, hooks: false, compatibilityOverride: false, syntheticHome: true, productionProfileUsed: false, realModelCalls: 0, realMessagesSent: 0, runtimeNonLoopbackAllowed: false, maxOldSpaceMb: 128, suiteTimeoutMs: 240000, dependencyAcquisition: 'public npm registry, without hooks', output };
   await writeFile(join(output, 'summary.json'), JSON.stringify(summary, null, 2) + '\n'); console.log(JSON.stringify(summary));
