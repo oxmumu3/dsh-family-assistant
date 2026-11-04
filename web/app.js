@@ -936,7 +936,13 @@
     const validSelection = state.people.some(person => person.id === selectedId);
     if (!validSelection) { selectedId = state.people[0]?.id || null; loadPerson = true; }
     renderPeople(); renderPerson({ load: loadPerson });
-    text('run-status', state.config.paused ? '服务已暂停' : '服务运行中');
+    const health = state.health;
+    const healthText = health && health.totals
+      ? ` · ${health.totals.online}/${health.totals.people} 在线`
+        + (health.totals.pending ? ` · ${health.totals.pending} 待发` : '')
+        + (health.totals.attention ? ` · ${health.totals.attention} 需关注` : '')
+      : '';
+    text('run-status', (state.config.paused ? '服务已暂停' : '服务运行中') + healthText);
     $('run-status').dataset.state = state.config.paused ? 'paused' : 'running';
     text('run-toggle', state.config.paused ? '开始服务' : '暂停服务');
     const owner = state.people.find(person => person.role === 'owner');
