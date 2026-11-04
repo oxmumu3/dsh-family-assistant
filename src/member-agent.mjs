@@ -7,6 +7,11 @@ import {familyModelControls} from './model.mjs';
 const FILE_LIMIT=32768,CONTEXT_LIMIT=98304,LEDGER_LIMIT=8*1024*1024;
 const canonical=value=>JSON.stringify(value,(_key,item)=>plain(item)?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
 const hash=value=>createHash('sha256').update(typeof value==='string'||Buffer.isBuffer(value)?value:canonical(value)).digest('hex');
+/** 旧工作区目录名：成员 + 绑定快照的稳定哈希；迁移盘点与运行时共用同一算法。 */
+export function memberScopeHash({person,route}={}){
+  if(!person||!route)throw new Error('invalid_scope_identity');
+  return hash([person.id,person.createdAt??null,route.accountId,route.peerId,route.generation]);
+}
 const clone=value=>structuredClone(value);
 const plain=value=>value&&typeof value==='object'&&!Array.isArray(value)&&[Object.prototype,null].includes(Object.getPrototypeOf(value));
 const fields=(value,keys,required=keys)=>plain(value)&&Object.keys(value).every(key=>keys.includes(key))&&required.every(key=>Object.hasOwn(value,key));
