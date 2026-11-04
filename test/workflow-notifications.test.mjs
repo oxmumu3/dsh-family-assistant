@@ -48,7 +48,7 @@ test('a new explicit workflow request proactively notifies Owner once and contai
   assert.deepEqual(f.sent.map(row => row.personId), ['owner']);
   assert.doesNotMatch(JSON.stringify(f.sent), /私人聊天|peer-|account-/);
   await f.notify(request); f.restart(); await f.notify(request);
-  assert.equal(f.sent.length, 1); assert.deepEqual(readdirSync(f.directory).sort(), ['family-toolbox.json', 'family.json']);
+  assert.equal(f.sent.length, 1); assert.deepEqual(readdirSync(f.directory).sort(), ['family-toolbox.json', 'family.json', 'messages.log']);
 });
 
 test('an explicit Owner answer returns to the original family member and a member supplement reaches Owner', async t => {

@@ -83,8 +83,48 @@ export function createStore({directory,now = () => new Date().toISOString()} = {
   // are never read, so clear them once at startup instead of letting them
   // accumulate next to the live store.
   try { for (const name of readdirSync(directory)) if (/^\.family-[A-Za-z0-9-]+\.tmp$/.test(name)) try { unlinkSync(join(directory,name)); } catch {} } catch {}
+  // Messages are append-only. family.json keeps a bounded hot window (so older
+  // readers and recovery paths keep working); messages.log holds the full
+  // history and is the source of truth after the window rolls over.
+  const logFile = join(directory,'messages.log');
+  const HOT = 200;
+  const messageKey = row => `${row.personId}|${row.dir}|${row.id}`;
+  const hotWindow = rows => {
+    const byPerson = new Map();
+    for (const row of rows) { const list = byPerson.get(row.personId) ?? []; list.push(row); byPerson.set(row.personId, list); }
+    const kept = new Set();
+    for (const list of byPerson.values()) for (const row of list.slice(-HOT)) kept.add(messageKey(row));
+    return rows.filter(row => kept.has(messageKey(row)));
+  };
+  const logRows = (() => {
+    if (!existsSync(logFile)) return [];
+    const rows = [], seen = new Set();
+    for (const line of readFileSync(logFile,'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try { const row = JSON.parse(line); const key = messageKey(row); if (!seen.has(key)) { seen.add(key); rows.push(row); } } catch {}
+    }
+    return rows;
+  })();
+  function appendLog(rows) {
+    if (!rows.length) return;
+    const fd = openSync(logFile,'a',0o600);
+    try { writeFileSync(fd, rows.map(row => `${JSON.stringify(row)}\n`).join('')); fsyncSync(fd); } finally { closeSync(fd); }
+  }
+  if (logRows.length) {
+    const merged = new Map();
+    for (const row of [...logRows, ...state.messages]) merged.set(messageKey(row), row);
+    state.messages = [...merged.values()].sort((a,b) => (Date.parse(a.at)||0) - (Date.parse(b.at)||0));
+  }
   const clock = () => timestamp(now());
-  function persist(next) { validateState(next); const temporary = join(directory,`.family-${randomUUID()}.tmp`); let fd; try { fd = openSync(temporary,'wx',0o600); writeFileSync(fd,JSON.stringify(next,null,2)+'\n'); fsyncSync(fd); closeSync(fd); fd=undefined; renameSync(temporary,file); chmodSync(file,0o600); let dirfd; try { dirfd=openSync(directory,'r'); fsyncSync(dirfd); } finally {if(dirfd!==undefined) closeSync(dirfd);} } catch(error) {if(fd!==undefined) closeSync(fd); try {unlinkSync(temporary);}catch{} throw error;} }
+  function persist(next) {
+    validateState(next);
+    const known = new Set(state.messages.map(messageKey));
+    const appended = next.messages.filter(row => !known.has(messageKey(row)));
+    const payload = {...next, messages: hotWindow(next.messages)};
+    const temporary = join(directory,`.family-${randomUUID()}.tmp`); let fd;
+    try { fd = openSync(temporary,'wx',0o600); writeFileSync(fd,JSON.stringify(payload,null,2)+'\n'); fsyncSync(fd); closeSync(fd); fd=undefined; renameSync(temporary,file); chmodSync(file,0o600); appendLog(appended); let dirfd; try { dirfd=openSync(directory,'r'); fsyncSync(dirfd); } finally {if(dirfd!==undefined) closeSync(dirfd);} }
+    catch(error) {if(fd!==undefined) closeSync(fd); try {unlinkSync(temporary);}catch{} throw error;}
+  }
   function change(fn) { const next = clone(state); const result = fn(next); persist(next); state=next; return clone(result); }
   const findPerson = (s,id) => s.people.find(p=>p.id===safeId(id)) || fail('找不到成员');
   const findBinding = (s,id) => {findPerson(s,id); return s.bindings.find(b=>b.personId===id) || null;};
@@ -173,6 +213,24 @@ export function createStore({directory,now = () => new Date().toISOString()} = {
         if (dropped.length) s.outbox = s.outbox.filter(row => keep.has(row.id));
         return { dropped: dropped.length, kept: s.outbox.length };
       });
+    },
+    /** Keep the log bounded: retain the newest N rows per person. */
+    compactMessages({keepPerPerson=5000}={}) {
+      const keep = Math.max(1, Math.min(100000, Number(keepPerPerson) || 5000));
+      const byPerson = new Map();
+      for (const row of state.messages) { const list = byPerson.get(row.personId) ?? []; list.push(row); byPerson.set(row.personId, list); }
+      const kept = new Set();
+      for (const list of byPerson.values()) for (const row of list.slice(-keep)) kept.add(messageKey(row));
+      const next = state.messages.filter(row => kept.has(messageKey(row)));
+      const dropped = state.messages.length - next.length;
+      if (dropped > 0) {
+        state.messages = next;
+        const temporary = join(directory,`.messages-${randomUUID()}.tmp`);
+        const fd = openSync(temporary,'wx',0o600);
+        try { writeFileSync(fd, next.map(row => `${JSON.stringify(row)}\n`).join('')); fsyncSync(fd); } finally { closeSync(fd); }
+        renameSync(temporary, logFile); chmodSync(logFile,0o600);
+      }
+      return {kept: next.length, dropped};
     },
     markReminder(id,patch) { object(patch,['status','dueAt']); return change(s=>{const r=findReminder(s,id); if(own(patch,'status')) oneOf(patch.status,['active','cancelled','completed','expired'],'提醒状态'); if(own(patch,'dueAt')) patch={...patch,dueAt:timestamp(patch.dueAt)}; Object.assign(r,clone(patch)); return r;}); },
   };
