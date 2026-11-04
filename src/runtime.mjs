@@ -14,6 +14,7 @@ import {isOwnerCommandCandidate,resolveOwnerTarget,hasExplicitOwnerTime} from '.
 import {createPresentationWorkflow} from './presentation-workflow.mjs';
 import {createConversationHistory} from './conversation-history.mjs';
 import {buildHealth} from './health.mjs';
+import {planMemberMigration} from './member-native-migration.mjs';
 import {buildOwnerTurn} from './owner-prompt.mjs';
 import {createFamilyAccess} from './family-access.mjs';
 import {createHarnessGateway} from './harness-gateway.mjs';
@@ -338,7 +339,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     // This surface is authenticated as Owner. Brief sharing is a separate
     // policy and must not hide the Owner's own saved management records.
     const visible=new Set(state.people.map(p=>p.id));
-    const result={version:1,config:state.config,health:buildHealth({state,channelOf:id=>channels.status(id),now}),people:state.people.map(person=>{
+    const result={version:1,config:state.config,health:buildHealth({state,channelOf:id=>channels.status(id),now}),// 只读影子盘点：报告家人侧迁移是否被未结清请求挡住，不改变任何行为。
+    migration:(()=>{try{return planMemberMigration({directory,people:state.people,bindings:state.bindings});}catch{return null;}})(),people:state.people.map(person=>{
       const persisted=store.binding(person.id);const live=channels.status(person.id)??{};
       return{...person,binding:{...live,generation:persisted?.generation??null,status:live.status??persisted?.status??'disconnected',connected:live.status==='connected',lastError:live.lastError??persisted?.lastError??null}};
     }),reminders:state.reminders.map(row=>visible.has(row.personId)?row:{...row,text:'内容未授权展示'}),outbox:state.outbox.map(({route,authorizationRoute,text,...row})=>row),ownerCommands:store.ownerCommands().map(({requestRoute,...command})=>{
