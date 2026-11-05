@@ -949,7 +949,21 @@
     if (healthBox) {
       const rows = health && Array.isArray(health.people) ? health.people : [];
       healthBox.hidden = rows.length === 0;
-      healthBox.replaceChildren(...rows.map(row => {
+      const migration = state.migration;
+      const migrationText = migration && migration.totals
+        ? (migration.ready
+          ? `迁移就绪：${migration.totals.people} 位家人均无未结清请求`
+          : `迁移待处理：${migration.totals.blocked} 位家人有未结清请求（${migration.totals.pendingRequests} 项）`)
+        : '';
+      const chips = [];
+      if (migrationText) {
+        const note = document.createElement('span');
+        note.dataset.kind = 'migration';
+        note.textContent = migrationText;
+        note.style.color = migration.ready ? 'var(--muted,#66755f)' : 'var(--danger,#934a35)';
+        chips.push(note);
+      }
+      healthBox.replaceChildren(...chips, ...rows.map(row => {
         const chip = document.createElement('span');
         chip.dataset.state = row.state;
         const lastIn = row.lastInboundAt ? new Date(row.lastInboundAt) : null;
