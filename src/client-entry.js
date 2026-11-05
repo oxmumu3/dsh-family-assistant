@@ -60,6 +60,10 @@ window.__ModuleLoader__.load({
         const [html, setHtml] = React.useState('');
         const [error, setError] = React.useState('');
         const [attempt, setAttempt] = React.useState(0);
+        // native-inline-v2: health summary state for the panel header
+        const [health, setHealth] = React.useState(null);
+        const [healthError, setHealthError] = React.useState('');
+        const [view, setView] = React.useState('overview');
         React.useEffect(() => {
           let active = true;
           const previousFetch = window.__FamilyHostFetch;
@@ -129,18 +133,56 @@ window.__ModuleLoader__.load({
             }
           };
         }, [attempt]);
-        if (error) return React.createElement('div', { style: { padding: '24px', lineHeight: 1.7 } },
-          React.createElement('p', { role: 'alert' }, error),
-          React.createElement('button', { type: 'button', onClick: () => setAttempt(value => value + 1) }, '重新载入'));
-        if (!html) return React.createElement('p', { role: 'status', style: { padding: '24px' } }, '正在载入家庭助手…');
-        return React.createElement('iframe', {
-          srcDoc: html,
-          title: '家庭助手工作台',
-          sandbox: 'allow-scripts allow-same-origin allow-forms allow-downloads',
-          // The main slot already owns the available height. Only reserve the
-          // macOS window controls when the Host has collapsed its sidebar.
-          style: { display: 'block', flex: '1 1 0', width: '100%', height: '100%', minHeight: 0, marginTop: 'min(var(--dsh-frame-leading-clearance, 0px), 48px)', border: 0, background: 'transparent', colorScheme: 'normal' },
-        });
+        React.useEffect(() => {
+          let active = true;
+          Promise.resolve().then(() => globalThis.fetch('/api/family/control', { credentials: 'same-origin' }))
+            .then(response => { if (!response.ok) throw new Error('status'); return response.json(); })
+            .then(state => { if (active) setHealth(state && state.health ? state.health : null); })
+            .catch(() => { if (active) setHealthError('暂时读不到家庭状态'); });
+          return () => { active = false; };
+        }, [attempt]);
+        const rows = health && Array.isArray(health.people) ? health.people : [];
+        const summaryText = health
+          ? `在线 ${health.totals.online}/${health.totals.people} · 待发 ${health.totals.pending}`
+          : (healthError || '正在读取家庭状态…');
+        const muted = { opacity: 0.72 };
+        const healthRow = row => {
+          const parts = [
+            React.createElement('span', { key: 'n', style: { minWidth: '4em' } }, row.role === 'owner' ? '我' : row.label),
+            React.createElement('span', { key: 's', style: muted }, row.connected ? '在线' : '离线'),
+          ];
+          if (row.pending) parts.push(React.createElement('span', { key: 'p', style: muted }, `待发 ${row.pending}`));
+          if (row.uncertain24h) parts.push(React.createElement('span', { key: 'u', style: { color: 'var(--dsh-color-warning, #b26a00)' } }, `待核对 ${row.uncertain24h}`));
+          return React.createElement('div', { key: row.personId, style: { display: 'flex', gap: '12px', padding: '8px 0', fontSize: '13px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.15))' } }, parts);
+        };
+        const header = React.createElement('header', {
+          style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 16px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.25))', fontSize: '13px' },
+        },
+          React.createElement('strong', null, '乐乐家庭助手'),
+          React.createElement('span', { style: muted }, summaryText),
+          React.createElement('button', {
+            type: 'button',
+            onClick: () => setView(value => value === 'workbench' ? 'overview' : 'workbench'),
+            style: { marginLeft: 'auto', fontSize: '12px' },
+          }, view === 'workbench' ? '收起完整工作台' : '打开完整工作台'));
+        const overview = React.createElement('div', { style: { display: view === 'overview' ? 'flex' : 'none', flexDirection: 'column', padding: '16px', overflow: 'auto', flex: '1 1 0', minHeight: 0 } },
+          rows.length ? rows.map(healthRow) : React.createElement('p', { style: muted }, health ? '还没有登记家人。' : summaryText),
+          React.createElement('p', { style: { ...muted, marginTop: '16px', fontSize: '12px' } }, '详细设置、日记与工具在完整工作台里。'));
+        const frame = html
+          ? React.createElement('iframe', {
+            srcDoc: html,
+            title: '家庭助手工作台',
+            sandbox: 'allow-scripts allow-same-origin allow-forms allow-downloads',
+            style: { display: 'block', flex: '1 1 0', width: '100%', height: '100%', minHeight: 0, border: 0, background: 'transparent', colorScheme: 'normal' },
+          })
+          : React.createElement('p', { role: 'status', style: { padding: '24px' } }, '正在载入家庭助手…');
+        const workbench = React.createElement('div', { style: { display: view === 'workbench' ? 'flex' : 'none', flexDirection: 'column', flex: '1 1 0', minHeight: 0 } },
+          error
+            ? React.createElement('div', { style: { padding: '24px', lineHeight: 1.7 } },
+              React.createElement('p', { role: 'alert' }, error),
+              React.createElement('button', { type: 'button', onClick: () => setAttempt(value => value + 1) }, '重新载入'))
+            : frame);
+        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, overview, workbench);
       }
       /** Native settings page: read-only family overview inside Harness settings,
        * so the owner can check service and member health without opening the
