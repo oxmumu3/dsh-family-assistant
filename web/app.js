@@ -978,6 +978,10 @@
           lastText,
         ].filter(Boolean).join(' · ');
         if (row.state === 'attention') chip.style.color = 'var(--danger,#934a35)';
+        // family-health-chip-click: jump straight to this member's detail
+        chip.style.cursor = 'pointer';
+        chip.title = '打开这位家人的详情';
+        chip.addEventListener('click', () => { try { openPerson(row.personId); } catch { /* person may be gone */ } });
         return chip;
       }));
     }
