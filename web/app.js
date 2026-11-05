@@ -952,11 +952,16 @@
       healthBox.replaceChildren(...rows.map(row => {
         const chip = document.createElement('span');
         chip.dataset.state = row.state;
+        const lastIn = row.lastInboundAt ? new Date(row.lastInboundAt) : null;
+        const lastText = lastIn && Number.isFinite(lastIn.getTime())
+          ? `最近来信 ${String(lastIn.getHours()).padStart(2, '0')}:${String(lastIn.getMinutes()).padStart(2, '0')}`
+          : '';
         chip.textContent = [
           row.role === 'owner' ? '我' : row.label,
           row.connected ? '在线' : '离线',
           row.pending ? `待发 ${row.pending}` : '',
           row.uncertain24h ? `待核对 ${row.uncertain24h}` : '',
+          lastText,
         ].filter(Boolean).join(' · ');
         if (row.state === 'attention') chip.style.color = 'var(--danger,#934a35)';
         return chip;
