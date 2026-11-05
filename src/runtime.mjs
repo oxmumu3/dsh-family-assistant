@@ -14,6 +14,7 @@ import {isOwnerCommandCandidate,resolveOwnerTarget,hasExplicitOwnerTime} from '.
 import {createPresentationWorkflow} from './presentation-workflow.mjs';
 import {createConversationHistory} from './conversation-history.mjs';
 import {buildHealth} from './health.mjs';
+import {isMemberNative} from './member-native-flags.mjs';
 import {planMemberMigration} from './member-native-migration.mjs';
 import {buildOwnerTurn} from './owner-prompt.mjs';
 import {createFamilyAccess} from './family-access.mjs';
@@ -120,7 +121,7 @@ export function exclusiveLock(directory){
     try{const current=JSON.parse(readFileSync(file,'utf8'));if(current&&current.id===id)unlinkSync(file);}catch{}};
 }
 
-export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
+export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
   if(typeof directory!=='string'||!directory)throw new Error('家庭助手需要独立数据目录。');
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
@@ -215,7 +216,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     }
     let history=memberHistory(person.id,8).map(row=>({...row,text:row.text.slice(0,800)}));while(Buffer.byteLength(JSON.stringify(history))>10000)history.shift();
     const rawLibraryContext=library.context({personId:person.id,route,text}),entries=rawLibraryContext.entries.filter(row=>row.key!=='report-style'),libraryContext={entries,text:entries.map(row=>`[${row.kind} ${row.date??row.recordedDate} ${row.id} v${row.revision}; 来源 ${row.sources.map(source=>source.id+' '+source.at).join(', ')}] ${row.text}`).join('\n')};
-    return memberAgent.run({person:workbench.memberProfile(person.id),route,text,history,libraryContext,diaryContext:diaryTurn(person,route,text,message.id),reports:memberReports(person.id,route),materials,
+    const legacyRun=()=>memberAgent.run({person:workbench.memberProfile(person.id),route,text,history,libraryContext,diaryContext:diaryTurn(person,route,text,message.id),reports:memberReports(person.id,route),materials,
       notes:personal.notes.slice(-10).map(row=>({...row,text:row.text.slice(0,100)})),reminders:personal.reminders.slice(0,10).map(row=>({...row,text:row.text.slice(0,100)})),
       signal,authorize,requestId:sourceRequest(route,message),...(admissionKey?{admissionKey}:{}),reportPreference:memberReportFeedback?.getPreference({personId:person.id,route})?.instruction??null,importantAlertsEnabled:attention.snapshot().enabled,
       ...(memberPublicTools?{publicTools:memberPublicTools({personId:person.id})}:{}),
@@ -236,6 +237,15 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         return receipt;
       }}:{}),
     });
+    // Grayscale switch: only a member whose flag file says so tries the native
+    // link, and any failure falls straight back to the legacy path this turn.
+    if(!isMemberNative(directory,person.id)||typeof memberNativeRuntime?.run!=='function')return legacyRun();
+    try{
+      const native=await memberNativeRuntime.run({personId:person.id,text,history:history.map(row=>({role:row.dir==='in'?'user':'assistant',text:row.text})),signal});
+      if(authorize()&&typeof native?.text==='string'&&native.text.trim())return {text:native.text,state:'succeeded',actions:[],files:[],deliveries:[]};
+      throw new Error('原生链路没有产出可用回复');
+    }catch(error){lastError=safeError(error);}
+    return legacyRun();
   }
   function diaryTurn(person,route,text,messageId){
     if(!currentMember(person,route))return false;
