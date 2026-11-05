@@ -142,9 +142,46 @@ window.__ModuleLoader__.load({
           style: { display: 'block', flex: '1 1 0', width: '100%', height: '100%', minHeight: 0, marginTop: 'min(var(--dsh-frame-leading-clearance, 0px), 48px)', border: 0, background: 'transparent', colorScheme: 'normal' },
         });
       }
+      /** Native settings page: read-only family overview inside Harness settings,
+       * so the owner can check service and member health without opening the
+       * iframe workbench. */
+      function FamilySettingsPanel() {
+        const [state, setState] = React.useState(null);
+        const [error, setError] = React.useState('');
+        React.useEffect(() => {
+          let active = true;
+          Promise.resolve().then(() => globalThis.fetch('/api/family/control', { credentials: 'same-origin' }))
+            .then(response => { if (!response.ok) throw new Error('status'); return response.json(); })
+            .then(body => { if (active) setState(body); })
+            .catch(() => { if (active) setError('暂时读不到家庭状态'); });
+          return () => { active = false; };
+        }, []);
+        const muted = { opacity: 0.72 };
+        const health = state && state.health;
+        const migration = state && state.migration;
+        const rows = health && Array.isArray(health.people) ? health.people : [];
+        return React.createElement('section', { style: { padding: '16px', fontSize: '13px', display: 'grid', gap: '10px' } },
+          React.createElement('h3', { style: { margin: 0, fontSize: '14px' } }, '家庭助手'),
+          state
+            ? React.createElement('p', { style: muted }, (state.config && state.config.paused ? '服务已暂停' : '服务运行中') + (health ? ` · ${health.totals.online}/${health.totals.people} 在线` : ''))
+            : React.createElement('p', { style: muted }, error || '正在读取家庭状态…'),
+          migration
+            ? React.createElement('p', { style: { margin: 0, ...(migration.ready ? muted : { color: 'var(--dsh-color-warning, #b26a00)' }) } },
+              migration.ready ? '家人迁移：就绪（无未结清请求）' : `家人迁移：待处理 ${migration.totals.blocked} 位 / ${migration.totals.pendingRequests} 项`)
+            : null,
+          rows.length
+            ? React.createElement('ul', { style: { margin: 0, paddingLeft: '18px', display: 'grid', gap: '4px' } },
+              rows.map(row => React.createElement('li', { key: row.personId, 'data-state': row.state },
+                `${row.role === 'owner' ? '我' : row.label} · ${row.connected ? '在线' : '离线'}` + (row.pending ? ` · 待发 ${row.pending}` : ''))))
+            : React.createElement('p', { style: muted }, '还没有登记家人。'),
+          React.createElement('p', { style: { ...muted, fontSize: '12px', margin: 0 } }, '详细设置与日记在侧栏「家庭助手」面板里。'));
+      }
       ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({
         name: 'main', key: 'family-assistant',
       }, FamilyAssistant)));
+      ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section', id: 'family-assistant', order: 60, label: '家庭助手',
+      }, FamilySettingsPanel)));
       ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
         name: 'sidebar.panellist', id: 'family-assistant', order: 6, label: '家庭助手',
       }, FamilyIcon)));
