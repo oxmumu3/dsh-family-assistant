@@ -21,6 +21,8 @@ import {createOwnerManagementTool} from './src/owner-management-tool.mjs';
 import {createImportantEventClassifier} from './src/important-event-model.mjs';
 import {installOwnerDotReadGuard} from './src/owner-dot-read-guard.mjs';
 import {createOwnerPromptScope,recordScope} from './src/owner-prompt-scope.mjs';
+import {createNativeMemberRuntime} from './src/member-native-runtime.mjs';
+import {createHostMemberSessionFactory} from './src/member-native-host.mjs';
 import {ownerPromptSection} from './src/owner-prompt.mjs';
 
 export const name='family-assistant';
@@ -53,7 +55,17 @@ export function apply(ctx,config={}){
   const memberReportFeedback=createMemberReportFeedback({directory:storageDir,ctx,readConfig:()=>runtime.store.snapshot().config});
   const classifyImportantEvent=createImportantEventClassifier(ctx,()=>runtime.store.snapshot().config);
   const workspaceCurrentSync=(root,workspaceId)=>{try{const rows=ctx.get('workspaceRegistry',false)?.list?.();if(!Array.isArray(rows))return false;const byId=rows.filter(row=>row?.id===workspaceId),byPath=rows.filter(row=>row?.path===root);return byId.length===1&&byPath.length===1&&byId[0]===byPath[0];}catch{return false;}};
-  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
+  // Native member link is optional: it only exists when the Host exposes the
+  // agent and session controllers. The per-member flag file decides whether any
+  // message actually takes it; otherwise everything stays on the legacy path.
+  let memberNativeRuntime=null;
+  try{
+    const nativeAgents=ctx.get('agents',false),nativeSessions=ctx.get('sessionController',false);
+    if(typeof nativeAgents?.create==='function'&&typeof nativeSessions?.prompt==='function'&&typeof nativeSessions?.page==='function'){
+      memberNativeRuntime=createNativeMemberRuntime({createAgent:createHostMemberSessionFactory({agents:nativeAgents,sessionController:nativeSessions,cwd:storageDir+'-member-workspace'})});
+    }
+  }catch{memberNativeRuntime=null;}
+  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
   let unregister,disposal;
   const dispose=()=>disposal??=(async()=>{
     try{await offAgentCreated?.();await offAgentDisposed?.();}catch{}
