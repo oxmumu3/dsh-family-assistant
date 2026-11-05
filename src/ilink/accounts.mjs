@@ -122,5 +122,27 @@ export function createIlinkAccounts({fetchImpl} = {}) {
     }));
   }
 
-  return Object.freeze({register, unregister, send, poll, scan, confirm, rememberContext, snapshot});
+  /** 面向"一个账号一个客户端"的适配器：方法与 src/weixin.mjs 一致，
+   * 但凭据与联系人都绑定到该账号，调用方不需要再传 token/baseUrl。 */
+  function clientFor(accountId) {
+    slot(accountId);
+    const bound = input => ({
+      token: slot(accountId).settings.token,
+      baseUrl: slot(accountId).settings.baseUrl,
+      ...(slot(accountId).settings.peerId ? {peerId: slot(accountId).settings.peerId} : {}),
+      ...input,
+    });
+    return Object.freeze({
+      send: input => send(accountId, input),
+      poll: input => poll(accountId, input),
+      scan: input => scan(accountId, input),
+      confirm: input => confirm(accountId, input),
+      rememberContext: token => rememberContext(accountId, token),
+      sendFile: input => slot(accountId).api.sendFile(bound(input)),
+      downloadFile: input => slot(accountId).api.downloadFile(input),
+      downloadVoice: input => slot(accountId).api.downloadVoice(input),
+    });
+  }
+
+  return Object.freeze({register, unregister, send, poll, scan, confirm, rememberContext, snapshot, clientFor});
 }
