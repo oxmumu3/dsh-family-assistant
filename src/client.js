@@ -555,6 +555,28 @@ window.__ModuleLoader__.load({
       // Unsent main-chat text from the old workbench box. Both frames share this
       // window's session storage; text is merged, and removed only after the
       // Host composer has accepted it.
+      // 乐乐's avatar is already inlined into the workbench page; reuse it.
+      let avatarCache = { source: null, url: '' };
+      function leleAvatar(source) {
+        if (typeof source !== 'string') return '';
+        if (avatarCache.source !== source) {
+          const match = /<img class="lele-avatar" src="(data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+)"/.exec(source);
+          avatarCache = { source, url: match ? match[1] : '' };
+        }
+        return avatarCache.url;
+      }
+      function openRequestsOf(state) {
+        const rows = Array.isArray(state?.workbench?.requests) ? state.workbench.requests : [];
+        return rows.filter(row => row && row.status === 'open' && typeof row.id === 'string')
+          .map(row => ({ id: row.id, personId: row.personId, text: String(row.text ?? '').slice(0, 80) }));
+      }
+      // Phrases the Owner can start from; each only fills the input box.
+      const STARTERS = [
+        ['家里今天有什么新消息', '家里今天有什么新消息？'],
+        ['给家人带句话', '帮我给家人带句话：'],
+        ['安排一个提醒', '帮我安排一个提醒：'],
+        ['交代的事办得怎么样', '我之前交代的事都办得怎么样了？'],
+      ];
       const HANDOFF_KEY = 'family-native-chat-handoff-v1';
       const WORKBENCH_DRAFTS_KEY = 'family-workbench-drafts-v1';
       function collectNativeHandoff() {
@@ -594,6 +616,8 @@ window.__ModuleLoader__.load({
         const [conversation, setConversation] = React.useState(nativeCapable ? { status: 'opening' } : { status: 'off' });
         const [handoff, setHandoff] = React.useState('');
         const [handoffNote, setHandoffNote] = React.useState('');
+        const [requests, setRequests] = React.useState([]);
+        const [bandNote, setBandNote] = React.useState('');
         React.useEffect(() => {
           let active = true;
           const previousFetch = window.__FamilyHostFetch;
@@ -665,11 +689,19 @@ window.__ModuleLoader__.load({
         }, [attempt]);
         React.useEffect(() => {
           let active = true;
-          Promise.resolve().then(() => globalThis.fetch('/api/family/control', { credentials: 'same-origin' }))
+          const load = () => Promise.resolve().then(() => globalThis.fetch('/api/family/control', { credentials: 'same-origin' }))
             .then(response => { if (!response.ok) throw new Error('status'); return response.json(); })
-            .then(state => { if (active) setHealth(state && state.health ? state.health : null); })
+            .then(state => {
+              if (!active) return;
+              setHealth(state && state.health ? state.health : null);
+              setHealthError('');
+              setRequests(openRequestsOf(state));
+            })
             .catch(() => { if (active) setHealthError('暂时读不到家庭状态'); });
-          return () => { active = false; };
+          load();
+          const timer = setInterval(load, 30000);
+          if (typeof timer?.unref === 'function') timer.unref();
+          return () => { active = false; clearInterval(timer); };
         }, [attempt]);
         // Open (or create once) the Owner's desktop conversation and retain it.
         // Opening never sends a message. Any failure falls back to the iframe chat.
@@ -746,11 +778,9 @@ window.__ModuleLoader__.load({
           if (row.uncertain24h) parts.push(React.createElement('span', { key: 'u', style: { color: 'var(--dsh-color-warning, #b26a00)' } }, `待核对 ${row.uncertain24h}`));
           return React.createElement('div', { key: row.personId, style: { display: 'flex', gap: '12px', padding: '8px 0', fontSize: '13px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.15))' } }, parts);
         };
-        const tabs = [
-          ...(nativeOn ? [['chat', '和乐乐聊']] : []),
-          ['overview', '家人状态'],
-          ['workbench', nativeOn ? '家人与工具' : '完整工作台'],
-        ];
+        const tabs = nativeOn
+          ? [['chat', '和乐乐聊'], ['workbench', '家人与工具']]
+          : [['overview', '家人状态'], ['workbench', '完整工作台']];
         const tab = ([key, label]) => React.createElement('button', {
           key, type: 'button', 'aria-pressed': view === key,
           onClick: () => setView(key),
@@ -768,17 +798,23 @@ window.__ModuleLoader__.load({
           React.createElement('span', { style: muted }, summaryText),
           notice,
           React.createElement('nav', { 'aria-label': '家庭助手视图', style: { display: 'flex', gap: '6px', marginLeft: 'auto' } }, tabs.map(tab)));
-        // Put the old line into the Host composer as a draft; the Owner sends it.
+        // Put text into the Host composer as a draft; the Owner decides to send.
+        // An existing native draft is never cleared.
+        const putInComposer = text => {
+          const reference = conversation?.reference, sessionId = conversation?.sessionId;
+          const binding = reference?.binding;
+          if (!text || !binding || binding.sessionId !== sessionId || (typeof ctx.sessions?.binding === 'function' && ctx.sessions.binding(sessionId) !== binding)) throw new Error('changed');
+          const scope = binding.ctx ?? ctx.sessions?.scope?.(sessionId);
+          const native = scope?.get?.('conversation', false);
+          if (typeof native?.input?.requestDraftInitialization !== 'function') throw new Error('unavailable');
+          const status = native.input.requestDraftInitialization(binding, { prompt: text, clearPreviousDraft: false });
+          if (status === 'applied') { try { native.input.for?.(scope)?.focus?.(); } catch { /* focus is a convenience */ } }
+          return status;
+        };
         const placeHandoff = () => {
           const text = handoff;
           try {
-            const reference = conversation?.reference, sessionId = conversation?.sessionId;
-            const binding = reference?.binding;
-            if (!text || !binding || binding.sessionId !== sessionId || (typeof ctx.sessions?.binding === 'function' && ctx.sessions.binding(sessionId) !== binding)) throw new Error('changed');
-            const scope = binding.ctx ?? ctx.sessions?.scope?.(sessionId);
-            const native = scope?.get?.('conversation', false);
-            if (typeof native?.input?.requestDraftInitialization !== 'function') throw new Error('unavailable');
-            const status = native.input.requestDraftInitialization(binding, { prompt: text, clearPreviousDraft: false });
+            const status = putInComposer(text);
             if (status === 'applied') { clearNativeHandoff(text); setHandoff(''); setHandoffNote('已放进下方输入框，确认后由你发送。'); return; }
             setHandoffNote(status === 'preserved' ? '输入框里已经有一段草稿，没有覆盖它；这段话仍保留在这里。'
               : status === 'blocked' ? '对话正在提交，稍后再放；这段话仍保留在这里。'
@@ -795,6 +831,62 @@ window.__ModuleLoader__.load({
               React.createElement('button', { type: 'button', onClick: placeHandoff, style: { fontSize: '12px', marginRight: '8px' } }, '放进输入框'),
               React.createElement('button', { type: 'button', onClick: () => { clearNativeHandoff(handoff); setHandoff(''); setHandoffNote('已丢弃这段旧草稿。'); }, style: { fontSize: '12px' } }, '不要了')) : null,
             handoffNote ? React.createElement('p', { style: { margin: '4px 0 0', opacity: 0.8 } }, handoffNote) : null)
+          : null;
+        const startWith = prompt => {
+          try {
+            const status = putInComposer(prompt);
+            setBandNote(status === 'applied' ? '已放进下方输入框，补全后按回车发送。'
+              : status === 'preserved' ? '输入框里已经有内容，没有覆盖。' : '对话正在处理，稍后再试。');
+          } catch {
+            setBandNote('输入框暂时不可用，直接在下方输入也可以。');
+          }
+        };
+        // Family chips and requests open the same records in the workbench.
+        const openInWorkbench = action => {
+          setView('workbench');
+          setTimeout(() => { try { action(window.__FamilyWorkbench); } catch { /* the tab is still open */ } }, 0);
+        };
+        const dark = page?.theme?.dark === true;
+        const accent = dark ? '#8fbfa9' : '#2f5d50';
+        const tone = row => !row.connected ? ['离线', 'var(--dsw-alias-state-idle-primary, #9a9a9a)']
+          : row.pending || row.uncertain24h ? ['有待发', 'var(--dsw-alias-state-warn-primary, #c98a1a)']
+            : ['在线', 'var(--dsw-alias-state-success-primary, #2f9e6b)'];
+        const relatives = rows.filter(row => row.role !== 'owner');
+        const nameOf = id => relatives.find(row => row.personId === id)?.label ?? '家人';
+        const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12.5px', padding: '4px 10px', borderRadius: '999px', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,0.25))', background: 'transparent', color: 'inherit', cursor: 'pointer' };
+        const avatar = leleAvatar(page?.source);
+        const band = view === 'chat' && nativeOn
+          ? React.createElement('section', { 'data-family-band': true, 'aria-label': '乐乐和家人', style: { padding: '12px 16px', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,0.2))', background: 'var(--dsw-alias-bg-layer-1, transparent)', display: 'flex', flexDirection: 'column', gap: '10px' } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+              avatar
+                ? React.createElement('img', { src: avatar, alt: '乐乐', width: 40, height: 40, style: { width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover', boxShadow: `0 0 0 2px ${accent}` } })
+                : React.createElement('span', { 'aria-hidden': true, style: { width: '40px', height: '40px', borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: accent, color: dark ? '#14170f' : '#fff', fontWeight: 600 } }, '乐'),
+              React.createElement('div', { style: { minWidth: 0 } },
+                React.createElement('div', { style: { fontFamily: '"Songti SC","STSong","Noto Serif SC",serif', fontSize: '16px', fontWeight: 600 } }, '乐乐'),
+                React.createElement('div', { style: { fontSize: '12.5px', color: 'var(--dsw-alias-label-secondary, inherit)' } }, '家里的事直接跟我说：给家人带话、安排提醒、看家里的新消息、查项目都可以。'))),
+            React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' } },
+              React.createElement('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary, inherit)', marginRight: '2px' } }, '家人'),
+              ...(relatives.length
+                ? relatives.map(row => {
+                  const [label, color] = tone(row);
+                  return React.createElement('button', { key: row.personId, type: 'button', title: `打开${row.label}的对话与资料`, onClick: () => openInWorkbench(api => api?.openPerson?.(row.personId)), style: chipStyle },
+                    row.label,
+                    React.createElement('span', { 'aria-hidden': true, style: { width: '7px', height: '7px', borderRadius: '50%', background: color } }),
+                    React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary, inherit)' } }, label));
+                })
+                : [React.createElement('button', { key: 'add', type: 'button', onClick: () => openInWorkbench(api => api?.addFamily?.()), style: chipStyle }, health ? '还没有家人，去添加' : summaryText)])),
+            requests.length
+              ? React.createElement('div', { role: 'status', style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 10px', borderRadius: '8px', border: `1px solid ${accent}`, fontSize: '13px' } },
+                React.createElement('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  React.createElement('strong', null, `${nameOf(requests.at(-1).personId)}有件事想问你`),
+                  requests.at(-1).text ? `：${requests.at(-1).text}` : '',
+                  requests.length > 1 ? `（共 ${requests.length} 件）` : ''),
+                React.createElement('button', { type: 'button', onClick: () => openInWorkbench(api => api?.openRequest?.(requests.at(-1).id)), style: { ...chipStyle, borderColor: accent, color: accent, fontWeight: 600 } }, '去回应'))
+              : null,
+            React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' } },
+              React.createElement('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary, inherit)', marginRight: '2px' } }, '可以这样开始'),
+              ...STARTERS.map(([label, prompt]) => React.createElement('button', { key: label, type: 'button', disabled: conversation?.status !== 'ready', onClick: () => startWith(prompt), style: { ...chipStyle, opacity: conversation?.status === 'ready' ? 1 : 0.5 } }, label)),
+              bandNote ? React.createElement('span', { role: 'status', style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, inherit)' } }, bandNote) : null))
           : null;
         const chat = view === 'chat' && nativeOn
           ? React.createElement('div', { 'data-family-owner-conversation': conversation.sessionId || '', style: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0 } },
@@ -819,7 +911,7 @@ window.__ModuleLoader__.load({
               React.createElement('p', { role: 'alert' }, error),
               React.createElement('button', { type: 'button', onClick: () => setAttempt(value => value + 1) }, '重新载入'))
             : frame);
-        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, handoffBar, chat, overview, workbench);
+        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, handoffBar, band, chat, overview, workbench);
       }
       /** Fills the session-scoped child slot with the Host's own conversation
        * body and composer; tools, approvals and streaming come from the Host. */

@@ -1136,6 +1136,8 @@
   restoreDrafts(); syncNativeHandoff(); setValue('owner-input',drafts[composerDraftKey()] || '');
   $('brand-home').addEventListener('click',event=>{event.preventDefault();if(nativeChat)showNativeChat();else setTab('chat');});
   if(nativeChat)$('nav-chat').hidden=true;
+  // The Host panel's family band opens the same records here.
+  try{parent.__FamilyWorkbench=Object.freeze({openPerson:id=>{if(state?.people?.some(person=>person.id===id))openPerson(id);},openRequest:id=>{if(workbench().requests?.some(item=>item.id===id))openRequest(id);},addFamily:()=>startAddFamily()});}catch{ /* the panel falls back to opening this tab */ }
   $('skip-main').addEventListener('click',event=>{event.preventDefault();$('workspace').focus();});
   $('owner-input').addEventListener('input',()=>{voiceRevision++;keepDraft();updateButtons();});
   $('owner-input').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229){event.preventDefault();void sendOwnerChat();}});

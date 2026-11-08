@@ -234,7 +234,7 @@ test('opening the desktop conversation creates one clean native session and neve
   assert.equal(JSON.stringify(runtime.status().ownerConversation).includes(workspace.path), false, 'no filesystem path reaches the panel');
 });
 
-async function mountPanel({drafts, handoff, draftStatus}) {
+async function mountPanel({drafts, handoff, draftStatus, family = {}}) {
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8');
   const store = new Map();
   if (drafts) store.set('family-workbench-drafts-v1', JSON.stringify({drafts}));
@@ -254,7 +254,7 @@ async function mountPanel({drafts, handoff, draftStatus}) {
   const fetch = async (url, init = {}) => ({
     ok: true,
     text: async () => '<html><head></head><body></body></html>',
-    json: async () => init.method === 'POST' ? {ownerConversation: {sessionId, policy: 'active'}} : {health: null, ownerConversation: {sessionId, policy: 'active'}},
+    json: async () => init.method === 'POST' ? {ownerConversation: {sessionId, policy: 'active'}} : {health: family.health ?? null, workbench: family.workbench, ownerConversation: {sessionId, policy: 'active'}},
   });
   const window = {__ModuleLoader__: {load: value => { definition = value; }}, sessionStorage, AbortController, setTimeout, clearTimeout, Date};
   let definition;
@@ -302,4 +302,43 @@ test('a native composer that already has a draft keeps it and the old line stays
 test('with nothing pending the native conversation shows no handoff bar', async () => {
   const panel = await mountPanel({drafts: {'': '   '}, draftStatus: 'applied'});
   assert.doesNotMatch(JSON.stringify(panel.render()), /旧对话框里还有一段没发出的话/);
+});
+
+test('the family band shows who is in the family, what needs the Owner, and starter phrases', async () => {
+  const health = {version: 1, totals: {people: 3, online: 2, pending: 1}, people: [
+    {personId: 'me', label: '我', role: 'owner', connected: true, pending: 0},
+    {personId: 'mom', label: '妈妈', role: 'elder', connected: true, pending: 0},
+    {personId: 'dad', label: '爸爸', role: 'elder', connected: false, pending: 0},
+  ]};
+  const workbench = {requests: [
+    {id: 'r-old', personId: 'dad', status: 'resolved', text: '旧事'},
+    {id: 'r-1', personId: 'mom', status: 'open', text: '周末要不要一起吃饭'},
+  ]};
+  const panel = await mountPanel({draftStatus: 'applied', family: {health, workbench}});
+  let tree = panel.render();
+  const text = JSON.stringify(tree);
+  assert.match(text, /乐乐/);
+  assert.match(text, /家里的事直接跟我说/);
+  assert.match(text, /妈妈/);
+  assert.match(text, /爸爸/);
+  assert.match(text, /离线/);
+  const band = JSON.stringify(panel.find(tree, node => node.props?.['data-family-band'])[0]);
+  assert.doesNotMatch(band, /"我"/, 'the Owner is not listed as a family chip');
+  assert.match(text, /妈妈有件事想问你/);
+  assert.match(text, /周末要不要一起吃饭/);
+  assert.doesNotMatch(text, /旧事/, 'resolved requests are not shown');
+  assert.doesNotMatch(text, /家人状态/, 'the band replaces the separate status tab');
+  panel.button(tree, '给家人带句话').props.onClick();
+  assert.equal(panel.initialized.at(-1).options.prompt, '帮我给家人带句话：');
+  assert.equal(panel.initialized.at(-1).options.clearPreviousDraft, false);
+  tree = panel.render();
+  assert.match(JSON.stringify(tree), /已放进下方输入框/);
+});
+
+test('a starter phrase never overwrites a draft the Owner already typed', async () => {
+  const panel = await mountPanel({draftStatus: 'preserved', family: {health: {version: 1, totals: {people: 1, online: 1, pending: 0}, people: [{personId: 'mom', label: '妈妈', role: 'elder', connected: true, pending: 0}]}}});
+  let tree = panel.render();
+  panel.button(tree, '安排一个提醒').props.onClick();
+  tree = panel.render();
+  assert.match(JSON.stringify(tree), /输入框里已经有内容，没有覆盖/);
 });
