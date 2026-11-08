@@ -45,7 +45,7 @@ export function apply(ctx,config={}){
   let nativeAdapter,nativeWorkspace,nativeSession;
   const native=()=>{const workspaceController=ctx.get('workspaceController'),sessionController=ctx.get('sessionController');
     if(!nativeAdapter||nativeWorkspace!==workspaceController||nativeSession!==sessionController){nativeWorkspace=workspaceController;nativeSession=sessionController;nativeAdapter=createOwnerAgentHost({workspaceController,sessionController,controlWorkspacePath:storageDir+'-owner-workspace',beforePrompt:async (sessionId,request)=>{if(!ownerReadGuard)throw new Error('owner_read_guard_unavailable');const prepared=await ownerReadGuard.prepare(sessionId);try{await ownerPromptScope.prepareRequest(sessionId,request);}catch{}return prepared;}});}return nativeAdapter;};
-  const ownerAgent=Object.fromEntries(['ensureControlWorkspace','listWorkspaces','start','observe'].map(method=>[method,(...args)=>native()[method](...args)]));
+  const ownerAgent=Object.fromEntries(['ensureControlWorkspace','listWorkspaces','start','observe','observeActive','ensureSession'].map(method=>[method,(...args)=>native()[method](...args)]));
   const weather=createWeatherService();
   const toolExecutors={...createFamilyToolExecutors({ownerAgent,maxBytes:24000}),weather:weather.execute};
   const familyProjectExecutor=createFamilyProjectExecutor({ownerAgent,ctx,readConfig:()=>runtime.store.snapshot().config});
@@ -65,7 +65,7 @@ export function apply(ctx,config={}){
       memberNativeRuntime=createNativeMemberRuntime({createAgent:createHostMemberSessionFactory({agents:nativeAgents,sessionController:nativeSessions,cwd:storageDir+'-member-workspace'})});
     }
   }catch{memberNativeRuntime=null;}
-  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
+  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
   let unregister,disposal;
   const dispose=()=>disposal??=(async()=>{
     try{await offAgentCreated?.();await offAgentDisposed?.();}catch{}

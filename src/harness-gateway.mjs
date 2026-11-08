@@ -37,7 +37,7 @@ function validTask(task){
  * Source request IDs deduplicate admission; native UUIDs identify one Host turn.
  * A recovered intent is observed, never re-prompted, even after an uncertain start.
  */
-export function createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,now=()=>new Date().toISOString(),onResult=async()=>{},recoverOnCreate=true}={}){
+export function createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,consoleConversation=()=>null,now=()=>new Date().toISOString(),onResult=async()=>{},recoverOnCreate=true}={}){
   if(!text(directory,4096)||!store||typeof store.snapshot!=='function'||typeof now!=='function'||typeof onResult!=='function'||typeof recoverOnCreate!=='boolean')fail('gateway_invalid_argument');
   directory=resolve(directory);
   const stat=path=>{try{return lstatSync(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}};
@@ -88,6 +88,61 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
   const readyResult=task=>task.state==='succeeded'||task.executor==='family_project'&&['needs_input','failed','unknown','cancelled'].includes(task.state)&&Boolean(task.text);
 
   const available=(...methods)=>{if(!ownerAgent||!methods.every(key=>typeof ownerAgent[key]==='function'))fail('owner_agent_unavailable');};
+  // The Owner's desktop conversation is the one native session the plugin
+  // embeds. It is identified by the console turns already persisted here, never
+  // by a session name the client or model supplies.
+  function consoleAnchor(personId){
+    // An explicitly opened desktop conversation wins; otherwise the latest
+    // console conversation the plugin itself started.
+    let explicit=null;try{explicit=consoleConversation();}catch{explicit=null;}
+    if(explicit&&explicit.personId===personId&&uuid(explicit.conversationId)&&explicit.sessionId==='family_owner_'+explicit.conversationId&&text(explicit.workspaceId,240)&&typeof explicit.cwd==='string'&&isAbsolute(explicit.cwd))
+      return{conversationId:explicit.conversationId,sessionId:explicit.sessionId,workspaceId:explicit.workspaceId,cwd:explicit.cwd};
+    const row=tasks.filter(task=>task.personId===personId&&task.origin==='console'&&task.conversationId&&task.executor!=='family_project').at(-1);
+    return row?{conversationId:row.conversationId,sessionId:row.sessionId,workspaceId:row.workspaceId,cwd:row.cwd}:null;
+  }
+  /** Maps a native request id to the identity used by draft journals. */
+  function requestIdentity(requestId){
+    for(const task of tasks){
+      if(task.requestId===requestId)return{sourceRequestId:task.sourceRequestId,text:conversationPrompt(task.prompt)};
+      const turn=(task.turns??[]).find(row=>row.requestId===requestId);
+      if(turn)return{sourceRequestId:turn.sourceRequestId,text:conversationPrompt(turn.prompt??'')};
+    }
+    return null;
+  }
+  // A request typed straight into the embedded native composer has no plugin
+  // task. Its authority is the Host's own record of that human message: a
+  // `user` source in the live turn of the desktop conversation, with the exact
+  // tool call still running. WeChat conversations never take this path.
+  async function nativeConsoleContext({personId,sessionId,callId,signal,forbidden}){
+    const anchor=consoleAnchor(personId);
+    if(!anchor||anchor.sessionId!==sessionId||typeof ownerAgent?.observe!=='function'||typeof ownerAgent?.observeActive!=='function')forbidden();
+    const base={workspaceId:anchor.workspaceId,cwd:anchor.cwd,sessionId,conversationId:anchor.conversationId};
+    const stillOwner=()=>{try{return !closed&&!signal.aborted&&person(personId).role==='owner'&&consoleAnchor(personId)?.sessionId===sessionId;}catch{return false;}};
+    const look=async(read,requestId)=>{
+      let value;try{value=await read({...base,requestId},{signal});}catch{signal.throwIfAborted();forbidden();}
+      signal.throwIfAborted();
+      if(!stillOwner()||!value||value.workspaceId!==base.workspaceId||value.sessionId!==sessionId||value.cwd!==base.cwd)forbidden();
+      return value;
+    };
+    // A fresh id matches no request, so this read only reveals the live turn.
+    const probe=await look(ownerAgent.observeActive,randomUUID());
+    if(!Number.isSafeInteger(probe.activeTurn)||probe.activeTurn<0||!Array.isArray(probe.activeRequestIds)||probe.activeRequestIds.length!==1)forbidden();
+    const nativeId=probe.activeRequestIds[0];
+    // Plugin-submitted requests keep their own durable task authority.
+    if(!uuid(nativeId)||tasks.some(task=>task.requestId===nativeId||(task.turns??[]).some(turn=>turn.requestId===nativeId)))forbidden();
+    const observed=await look(ownerAgent.observe,nativeId);
+    if(observed.state!=='running'||observed.requestSeen!==true||observed.queued!==false||observed.foreign!==false||observed.requestSourceKind!=='user'||!text(observed.requestText,64000)
+      ||!Number.isSafeInteger(observed.turn)||observed.turn!==probe.activeTurn||observed.activeTurn!==observed.turn||!Array.isArray(observed.activeRequestIds)||observed.activeRequestIds.length!==1||observed.activeRequestIds[0]!==nativeId
+      ||!Array.isArray(observed.events)||observed.events.length>10000||!observed.events.some(event=>['tool/call','tool/ptc-dispatch-start'].includes(event?.type)&&event.turn===observed.turn&&event.callId===callId&&event.status==='running'))forbidden();
+    if(!stillOwner())forbidden();
+    // The previous human turn, whether typed natively or submitted by the
+    // plugin, so a draft shown last turn can be confirmed in this one.
+    const prior=observed.previousHumanRequest;
+    const known=prior&&uuid(prior.requestId)?requestIdentity(prior.requestId):null;
+    const previousSourceRequestId=known?known.sourceRequestId:prior&&uuid(prior.requestId)?'native-console:'+prior.requestId:null;
+    const previousUserText=known?known.text:prior&&typeof prior.text==='string'?prior.text:null;
+    return{taskId:'native-console:'+nativeId,requestId:nativeId,sourceRequestId:'native-console:'+nativeId,previousSourceRequestId,previousUserText,personId,origin:'console',route:null,userText:observed.requestText,nativeConsole:true,authorize:stillOwner};
+  }
   function requireConversation(input,workspace){
     if(input.conversationId===undefined)return;
     const sessionId='family_owner_'+input.conversationId;
@@ -153,6 +208,13 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
         return tasks.some(task=>task.personId===personId&&task.sessionId===sessionId&&task.conversationId&&task.origin==='wechat'&&task.executor!=='family_project'&&sameRoute(task.route,route));
       }catch{return false;}
     },
+    /** The embeddable desktop conversation for this Owner, without its path. */
+    consoleConversation({personId}={}){
+      if(closed||!id(personId))return null;
+      try{if(person(personId).role!=='owner')return null;}catch{return null;}
+      const anchor=consoleAnchor(personId);
+      return anchor?{sessionId:anchor.sessionId,conversationId:anchor.conversationId,workspaceId:anchor.workspaceId}:null;
+    },
     async listProjects({personId}={}){
       open();person(personId);const rows=await registry(),who=person(personId);
       if(who.role==='owner')return rows.map(row=>({workspaceId:row.workspaceId,title:row.title,path:row.path}));
@@ -165,7 +227,8 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
       // Session names are not credentials. The native request and its active
       // tool call must both be observed from a persisted Owner conversation.
       const candidates=tasks.filter(task=>task.personId===personId&&task.sessionId===sessionId&&task.conversationId&&task.executor!=='family_project'&&!terminal(task.state)&&eligible(task)).map(clone);
-      if(!candidates.length||typeof ownerAgent?.observe!=='function')forbidden();
+      if(!candidates.length)return nativeConsoleContext({personId,sessionId,callId,signal,forbidden});
+      if(typeof ownerAgent?.observe!=='function')forbidden();
       const current=captured=>{const task=tasks.find(row=>row.id===captured.id);return !closed&&!signal.aborted&&task?.requestId===captured.requestId&&task.personId===personId&&task.sessionId===sessionId&&task.conversationId===captured.conversationId&&!terminal(task.state)&&eligible(task);};
       const read=async task=>{
         if(!current(task))forbidden();let observed;

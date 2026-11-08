@@ -308,7 +308,9 @@ function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
       if (record?.type !== 'event' || !d) continue;
       if (!Number.isSafeInteger(e.seq) || e.seq < 0) throw fail('owner_agent_observation_invalid');
       if (e.type === 'turn/start' || e.type === 'turn/end') events.push({ type: e.type, seq: e.seq, turn: d.turn, ...(e.type === 'turn/end' ? { reason: d.reason?.kind ?? 'unknown' } : {}) });
-      if (e.type === 'user/message') events.push({ type: e.type, seq: e.seq, requestId: d.source?.rpcId ?? null, sourceKind: d.source?.kind ?? 'unknown', callId: d.source?.callId });
+      if (e.type === 'user/message') events.push({ type: e.type, seq: e.seq, requestId: d.source?.rpcId ?? null, sourceKind: d.source?.kind ?? 'unknown', callId: d.source?.callId,
+        // Only the human request text is kept, bounded; Host context messages never become authority.
+        text: Array.isArray(d.content) ? d.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n').slice(0, 64_000) : '' });
       if (e.type === 'assistant/message') events.push({ type: e.type, seq: e.seq, turn: d.turn, text: (Array.isArray(d.message?.content) ? d.message.content : []).filter(part => part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n'), interrupted: d.interrupted === true });
       if (e.type === 'approval/asked' || e.type === 'approval/decided') events.push({ type: e.type, seq: e.seq, id: d.id });
       if (e.type === 'tool/call' || e.type === 'tool/ptc-dispatch-start' || e.type === 'tool/ptc-dispatch') {
@@ -349,6 +351,11 @@ function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
       if (e.type === 'turn/end' && e.turn === activeTurn) { activeTurn = null; currentTurn = null; }
     }
     const foreign = [...ownedTurns].some(turn => [...(requests.get(turn) ?? [])].some(id => id !== intent.requestId));
+    // The exact human message that carried this request id, when it is one.
+    const requestMessage = events.filter(e => e.type === 'user/message' && e.requestId === intent.requestId && ['user', 'owner'].includes(e.sourceKind)).at(-1);
+    // The human request immediately before it in this window, if any; used to
+    // continue a draft shown in the previous turn. Absent when outside the window.
+    const previousHuman = requestMessage ? events.filter(e => e.type === 'user/message' && e.seq < requestMessage.seq && ['user', 'owner'].includes(e.sourceKind) && typeof e.requestId === 'string' && e.requestId !== intent.requestId).at(-1) : undefined;
     const approvals = new Set();
     if (targetTurn !== null) for (const e of events) {
       if (e.type === 'turn/end' && e.turn === targetTurn) ending = e.reason;
@@ -388,6 +395,8 @@ function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     return { workspaceId: intent.workspaceId, sessionId: intent.sessionId, requestId: intent.requestId, cwd: intent.cwd, state, events: ownedEvents, messages,
       text, ...(reviewViewToken?{reviewViewToken}:{}), queued, requestSeen: events.some(e => e.type === 'user/message' && e.requestId === intent.requestId),
       turn: targetTurn, terminalReason: ending, pendingApprovals: approvals.size, questions, foreign,
+      requestSourceKind: requestMessage?.sourceKind ?? null, requestText: requestMessage?.text ?? '',
+      previousHumanRequest: previousHuman ? { requestId: previousHuman.requestId, text: previousHuman.text } : null,
       activeTurn, activeRequestIds: activeTurn === null ? [] : [...(requests.get(activeTurn) ?? [])], pendingInput: inbox.length > 0 };
   }
   async function readObservation(intent, { signal } = {}, admission = false) {
@@ -415,6 +424,9 @@ function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     }, signal);
   }
   const observe = (intent, options) => readObservation(intent, options);
+  // Reads only the newest window: enough to see the live turn and its request
+  // ids, without paging old history for a request that may not exist there.
+  const observeActive = (intent, options) => readObservation(intent, options, true);
   function start(intent, { signal } = {}) {
     try {
       validateIntent(intent);
@@ -464,13 +476,22 @@ function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     if (accepted?.accepted !== true) throw fail('owner_agent_unknown');
     return { ...before, state: 'queued', queued: true, accepted: true };
   }
+  /** Creates the Owner's desktop conversation without sending anything. */
+  async function ensureSession(intent, { signal } = {}) {
+    if (!intent || typeof intent.workspaceId !== 'string' || !intent.workspaceId || !absolute(intent.cwd) || typeof intent.sessionId !== 'string' || !intent.sessionId.startsWith('family_owner_') || !uuid.test(intent.sessionId.slice(13))) throw fail('owner_agent_invalid_intent');
+    const workspace = await requireWorkspace(intent, signal, false);
+    if (workspace.sessionIds.includes(intent.sessionId)) return { sessionId: intent.sessionId, created: false };
+    const created = unwrap(await bounded(() => method('session', 'create')({ workspaceId: intent.workspaceId, sessionId: intent.sessionId }), signal));
+    if (created?.sessionId !== intent.sessionId) throw fail('owner_agent_identity_mismatch');
+    return { sessionId: intent.sessionId, created: true };
+  }
   async function cancel(intent, { signal } = {}) {
     await observe(intent, { signal });
     // Official cancel accepts only sessionId, so a new native turn can start
     // after this observation. Never represent that operation as request-owned.
     return { requiresNativeSession: true };
   }
-  return { listWorkspaces, addWorkspace, pickWorkspace, start, observe, cancel };
+  return { listWorkspaces, addWorkspace, pickWorkspace, start, observe, observeActive, ensureSession, cancel };
 }
 
 /* Web and desktop global workbench delegates authenticated requests through the parent host. */
@@ -478,7 +499,7 @@ window.__ModuleLoader__.load({
   id: '@oxmumu3/dsh-family-assistant',
   factory: require => {
     const React = require('react');
-    const inject = ['slots', 'layout', 'uiWorkspace', 'remote', 'remote.session', 'remote.workspace'];
+    const inject = ['slots', 'layout', 'uiWorkspace', 'sessions', 'remote', 'remote.session', 'remote.workspace'];
     function apply(ctx) {
       function FamilyIcon() {
         return React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, focusable: false },
@@ -515,7 +536,7 @@ window.__ModuleLoader__.load({
           return { dark: false, tokens: [], fontSize: 16, fontFamily: '', canvas: '#faf9f5' };
         }
       }
-      function applyHostTheme(source, theme) {
+      function applyHostTheme(source, theme, options = {}) {
         const declarations = [
           `color-scheme:${theme.dark ? 'dark' : 'light'}`,
           `--host-canvas:${theme.canvas}`,
@@ -529,16 +550,19 @@ window.__ModuleLoader__.load({
         const themed = source.includes('</head>')
           ? source.replace(/<\/head>/i, `${style}</head>`)
           : style + source;
-        return themed.replace(/<html(\s[^>]*)?>/i, (_m, rest) => `<html${rest ?? ''} data-host-theme="${theme.dark ? 'dark' : 'light'}">`);
+        return themed.replace(/<html(\s[^>]*)?>/i, (_m, rest) => `<html${rest ?? ''} data-host-theme="${theme.dark ? 'dark' : 'light'}"${options.nativeChat ? ' data-native-chat="1"' : ''}>`);
       }
-      function FamilyAssistant() {
-        const [html, setHtml] = React.useState('');
+      function FamilyAssistant(props = {}) {
+        const [page, setPage] = React.useState(null);
         const [error, setError] = React.useState('');
         const [attempt, setAttempt] = React.useState(0);
-        // native-inline-v2: health summary state for the panel header
         const [health, setHealth] = React.useState(null);
         const [healthError, setHealthError] = React.useState('');
-        const [view, setView] = React.useState('overview');
+        // The Owner's main conversation is the Host's own session, embedded
+        // through the main slot's SessionProvider. Older Hosts keep the iframe chat.
+        const nativeCapable = typeof props.SessionProvider === 'function' && typeof props.renderSlot === 'function' && typeof ctx.sessions?.retain === 'function';
+        const [view, setView] = React.useState(nativeCapable ? 'chat' : 'overview');
+        const [conversation, setConversation] = React.useState(nativeCapable ? { status: 'opening' } : { status: 'off' });
         React.useEffect(() => {
           let active = true;
           const previousFetch = window.__FamilyHostFetch;
@@ -588,7 +612,7 @@ window.__ModuleLoader__.load({
           setError('');
           Promise.resolve().then(() => globalThis.fetch('/api/family/workbench', { credentials: 'same-origin' }))
             .then(response => { if (!response.ok) throw new Error('unavailable'); return response.text(); })
-            .then(source => { if (active) setHtml(applyHostTheme(source, readHostTheme())); })
+            .then(source => { if (active) setPage({ source, theme: readHostTheme() }); })
             .catch(() => { if (active) setError('家庭助手暂时无法载入，请确认插件已启用后重试。'); });
           return () => {
             active = false;
@@ -616,6 +640,59 @@ window.__ModuleLoader__.load({
             .catch(() => { if (active) setHealthError('暂时读不到家庭状态'); });
           return () => { active = false; };
         }, [attempt]);
+        // Open (or create once) the Owner's desktop conversation and retain it.
+        // Opening never sends a message. Any failure falls back to the iframe chat.
+        React.useEffect(() => {
+          if (!nativeCapable) return undefined;
+          let live = true, reference = null;
+          const previousShow = window.__FamilyShowNativeChat;
+          const show = () => { if (live) setView('chat'); };
+          window.__FamilyShowNativeChat = show;
+          const release = () => { const held = reference; reference = null; try { held?.release?.(); } catch { /* already released */ } };
+          const fallBack = status => { release(); if (!live) return; setConversation({ status }); setView(value => value === 'chat' ? 'workbench' : value); };
+          const readPolicy = async sessionId => {
+            const response = await globalThis.fetch('/api/family/control', { credentials: 'same-origin' });
+            if (!response.ok) return 'unknown';
+            const state = await response.json();
+            return state?.ownerConversation?.sessionId === sessionId ? state.ownerConversation.policy : 'unknown';
+          };
+          setConversation({ status: 'opening' });
+          (async () => {
+            const response = await globalThis.fetch('/api/family/control', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'X-Family-Action': '1' },
+              body: JSON.stringify({ action: 'owner_conversation_open' }),
+            });
+            const body = await response.json().catch(() => null);
+            const target = body?.ownerConversation;
+            if (!response.ok || !target || typeof target.sessionId !== 'string' || !target.sessionId.startsWith('family_owner_')) throw new Error('owner_conversation_unavailable');
+            if (!live) return;
+            reference = ctx.sessions.retain(target.sessionId, { source: 'controllerOperation' });
+            await reference.ready;
+            if (!live) return;
+            if (reference.binding?.sessionId !== target.sessionId) throw new Error('owner_conversation_mismatch');
+            setConversation({ status: 'ready', sessionId: target.sessionId, reference, policy: target.policy });
+            // The family role section is attached when the Host creates the
+            // agent. Without it the native thread would not be 乐乐, so a failed
+            // attachment hands the main thread back to the iframe chat.
+            for (let round = 0; round < 8 && live; round++) {
+              const policy = target.policy === 'active' && round === 0 ? 'active' : await readPolicy(target.sessionId).catch(() => 'unknown');
+              if (!live) return;
+              if (policy === 'inactive') { fallBack('inactive'); return; }
+              if (policy === 'active') { setConversation(value => value.sessionId === target.sessionId ? { ...value, policy } : value); return; }
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          })().catch(() => fallBack('failed'));
+          return () => {
+            live = false; release();
+            if (window.__FamilyShowNativeChat === show) {
+              if (previousShow === undefined) delete window.__FamilyShowNativeChat;
+              else window.__FamilyShowNativeChat = previousShow;
+            }
+          };
+        }, [attempt]);
+        const nativeOn = ['opening', 'ready'].includes(conversation?.status);
+        const html = page ? applyHostTheme(page.source, page.theme, { nativeChat: nativeOn }) : '';
         const rows = health && Array.isArray(health.people) ? health.people : [];
         const summaryText = health
           ? `在线 ${health.totals.online}/${health.totals.people} · 待发 ${health.totals.pending}`
@@ -630,19 +707,37 @@ window.__ModuleLoader__.load({
           if (row.uncertain24h) parts.push(React.createElement('span', { key: 'u', style: { color: 'var(--dsh-color-warning, #b26a00)' } }, `待核对 ${row.uncertain24h}`));
           return React.createElement('div', { key: row.personId, style: { display: 'flex', gap: '12px', padding: '8px 0', fontSize: '13px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.15))' } }, parts);
         };
+        const tabs = [
+          ...(nativeOn ? [['chat', '和乐乐聊']] : []),
+          ['overview', '家人状态'],
+          ['workbench', nativeOn ? '家人与工具' : '完整工作台'],
+        ];
+        const tab = ([key, label]) => React.createElement('button', {
+          key, type: 'button', 'aria-pressed': view === key,
+          onClick: () => setView(key),
+          style: { fontSize: '12px', padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--dsh-color-border, rgba(127,127,127,0.3))', background: view === key ? 'var(--dsh-color-surface-selected, rgba(127,127,127,0.14))' : 'transparent', fontWeight: view === key ? 600 : 400, cursor: 'pointer' },
+        }, label);
+        const notice = ['failed', 'inactive'].includes(conversation?.status)
+          ? React.createElement('span', { role: 'status', style: { color: 'var(--dsh-color-warning, #b26a00)' } },
+            conversation.status === 'inactive' ? '乐乐的家庭规则没加载进原生对话，先用工作台里的对话。' : '原生对话暂时打不开，先用工作台里的对话。',
+            React.createElement('button', { type: 'button', onClick: () => setAttempt(value => value + 1), style: { marginLeft: '8px', fontSize: '12px' } }, '重试'))
+          : null;
         const header = React.createElement('header', {
-          style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 16px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.25))', fontSize: '13px' },
+          style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '12px', padding: '10px 16px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.25))', fontSize: '13px' },
         },
           React.createElement('strong', null, '乐乐家庭助手'),
           React.createElement('span', { style: muted }, summaryText),
-          React.createElement('button', {
-            type: 'button',
-            onClick: () => setView(value => value === 'workbench' ? 'overview' : 'workbench'),
-            style: { marginLeft: 'auto', fontSize: '12px' },
-          }, view === 'workbench' ? '收起完整工作台' : '打开完整工作台'));
+          notice,
+          React.createElement('nav', { 'aria-label': '家庭助手视图', style: { display: 'flex', gap: '6px', marginLeft: 'auto' } }, tabs.map(tab)));
+        const chat = view === 'chat' && nativeOn
+          ? React.createElement('div', { 'data-family-owner-conversation': conversation.sessionId || '', style: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0 } },
+            conversation.status === 'ready' && conversation.reference
+              ? React.createElement(props.SessionProvider, { session: conversation.reference }, props.renderSlot('family.owner.conversation', {}))
+              : React.createElement('p', { role: 'status', style: { padding: '24px' } }, '正在打开和乐乐的对话…'))
+          : null;
         const overview = React.createElement('div', { style: { display: view === 'overview' ? 'flex' : 'none', flexDirection: 'column', padding: '16px', overflow: 'auto', flex: '1 1 0', minHeight: 0 } },
           rows.length ? rows.map(healthRow) : React.createElement('p', { style: muted }, health ? '还没有登记家人。' : summaryText),
-          React.createElement('p', { style: { ...muted, marginTop: '16px', fontSize: '12px' } }, '详细设置、日记与工具在完整工作台里。'));
+          React.createElement('p', { style: { ...muted, marginTop: '16px', fontSize: '12px' } }, '详细设置、日记与工具在「' + (nativeOn ? '家人与工具' : '完整工作台') + '」里。'));
         const frame = html
           ? React.createElement('iframe', {
             srcDoc: html,
@@ -657,7 +752,14 @@ window.__ModuleLoader__.load({
               React.createElement('p', { role: 'alert' }, error),
               React.createElement('button', { type: 'button', onClick: () => setAttempt(value => value + 1) }, '重新载入'))
             : frame);
-        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, overview, workbench);
+        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, chat, overview, workbench);
+      }
+      /** Fills the session-scoped child slot with the Host's own conversation
+       * body and composer; tools, approvals and streaming come from the Host. */
+      function FamilyOwnerConversation({ renderFactorySlot } = {}) {
+        return typeof renderFactorySlot === 'function'
+          ? renderFactorySlot('conversation.content', { variant: 'embedded', phase: 'active', hero: false })
+          : null;
       }
       /** Native settings page: read-only family overview inside Harness settings,
        * so the owner can check service and member health without opening the
@@ -693,9 +795,15 @@ window.__ModuleLoader__.load({
             : React.createElement('p', { style: muted }, '还没有登记家人。'),
           React.createElement('p', { style: { ...muted, fontSize: '12px', margin: 0 } }, '详细设置与日记在侧栏「家庭助手」面板里。'));
       }
+      // The main panel declares one session-scoped child: the Owner's native
+      // conversation, rendered inside the SessionProvider the panel binds.
       ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({
         name: 'main', key: 'family-assistant',
+        children: { 'family.owner.conversation': { kind: 'single', scope: 'session' } },
       }, FamilyAssistant)));
+      ctx.effect(() => ctx.slots.inject('family.owner.conversation', () => ctx.slots.register({
+        name: 'family.owner.conversation',
+      }, FamilyOwnerConversation)));
       ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section', id: 'family-assistant', order: 60, label: '家庭助手',
       }, FamilySettingsPanel)));

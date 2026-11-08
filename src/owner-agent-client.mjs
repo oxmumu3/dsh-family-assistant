@@ -76,7 +76,9 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
       if (record?.type !== 'event' || !d) continue;
       if (!Number.isSafeInteger(e.seq) || e.seq < 0) throw fail('owner_agent_observation_invalid');
       if (e.type === 'turn/start' || e.type === 'turn/end') events.push({ type: e.type, seq: e.seq, turn: d.turn, ...(e.type === 'turn/end' ? { reason: d.reason?.kind ?? 'unknown' } : {}) });
-      if (e.type === 'user/message') events.push({ type: e.type, seq: e.seq, requestId: d.source?.rpcId ?? null, sourceKind: d.source?.kind ?? 'unknown', callId: d.source?.callId });
+      if (e.type === 'user/message') events.push({ type: e.type, seq: e.seq, requestId: d.source?.rpcId ?? null, sourceKind: d.source?.kind ?? 'unknown', callId: d.source?.callId,
+        // Only the human request text is kept, bounded; Host context messages never become authority.
+        text: Array.isArray(d.content) ? d.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n').slice(0, 64_000) : '' });
       if (e.type === 'assistant/message') events.push({ type: e.type, seq: e.seq, turn: d.turn, text: (Array.isArray(d.message?.content) ? d.message.content : []).filter(part => part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n'), interrupted: d.interrupted === true });
       if (e.type === 'approval/asked' || e.type === 'approval/decided') events.push({ type: e.type, seq: e.seq, id: d.id });
       if (e.type === 'tool/call' || e.type === 'tool/ptc-dispatch-start' || e.type === 'tool/ptc-dispatch') {
@@ -117,6 +119,11 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
       if (e.type === 'turn/end' && e.turn === activeTurn) { activeTurn = null; currentTurn = null; }
     }
     const foreign = [...ownedTurns].some(turn => [...(requests.get(turn) ?? [])].some(id => id !== intent.requestId));
+    // The exact human message that carried this request id, when it is one.
+    const requestMessage = events.filter(e => e.type === 'user/message' && e.requestId === intent.requestId && ['user', 'owner'].includes(e.sourceKind)).at(-1);
+    // The human request immediately before it in this window, if any; used to
+    // continue a draft shown in the previous turn. Absent when outside the window.
+    const previousHuman = requestMessage ? events.filter(e => e.type === 'user/message' && e.seq < requestMessage.seq && ['user', 'owner'].includes(e.sourceKind) && typeof e.requestId === 'string' && e.requestId !== intent.requestId).at(-1) : undefined;
     const approvals = new Set();
     if (targetTurn !== null) for (const e of events) {
       if (e.type === 'turn/end' && e.turn === targetTurn) ending = e.reason;
@@ -156,6 +163,8 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     return { workspaceId: intent.workspaceId, sessionId: intent.sessionId, requestId: intent.requestId, cwd: intent.cwd, state, events: ownedEvents, messages,
       text, ...(reviewViewToken?{reviewViewToken}:{}), queued, requestSeen: events.some(e => e.type === 'user/message' && e.requestId === intent.requestId),
       turn: targetTurn, terminalReason: ending, pendingApprovals: approvals.size, questions, foreign,
+      requestSourceKind: requestMessage?.sourceKind ?? null, requestText: requestMessage?.text ?? '',
+      previousHumanRequest: previousHuman ? { requestId: previousHuman.requestId, text: previousHuman.text } : null,
       activeTurn, activeRequestIds: activeTurn === null ? [] : [...(requests.get(activeTurn) ?? [])], pendingInput: inbox.length > 0 };
   }
   async function readObservation(intent, { signal } = {}, admission = false) {
@@ -183,6 +192,9 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     }, signal);
   }
   const observe = (intent, options) => readObservation(intent, options);
+  // Reads only the newest window: enough to see the live turn and its request
+  // ids, without paging old history for a request that may not exist there.
+  const observeActive = (intent, options) => readObservation(intent, options, true);
   function start(intent, { signal } = {}) {
     try {
       validateIntent(intent);
@@ -232,11 +244,20 @@ export function createOwnerAgentClient({ remote, timeoutMs = 30_000 } = {}) {
     if (accepted?.accepted !== true) throw fail('owner_agent_unknown');
     return { ...before, state: 'queued', queued: true, accepted: true };
   }
+  /** Creates the Owner's desktop conversation without sending anything. */
+  async function ensureSession(intent, { signal } = {}) {
+    if (!intent || typeof intent.workspaceId !== 'string' || !intent.workspaceId || !absolute(intent.cwd) || typeof intent.sessionId !== 'string' || !intent.sessionId.startsWith('family_owner_') || !uuid.test(intent.sessionId.slice(13))) throw fail('owner_agent_invalid_intent');
+    const workspace = await requireWorkspace(intent, signal, false);
+    if (workspace.sessionIds.includes(intent.sessionId)) return { sessionId: intent.sessionId, created: false };
+    const created = unwrap(await bounded(() => method('session', 'create')({ workspaceId: intent.workspaceId, sessionId: intent.sessionId }), signal));
+    if (created?.sessionId !== intent.sessionId) throw fail('owner_agent_identity_mismatch');
+    return { sessionId: intent.sessionId, created: true };
+  }
   async function cancel(intent, { signal } = {}) {
     await observe(intent, { signal });
     // Official cancel accepts only sessionId, so a new native turn can start
     // after this observation. Never represent that operation as request-owned.
     return { requiresNativeSession: true };
   }
-  return { listWorkspaces, addWorkspace, pickWorkspace, start, observe, cancel };
+  return { listWorkspaces, addWorkspace, pickWorkspace, start, observe, observeActive, ensureSession, cancel };
 }

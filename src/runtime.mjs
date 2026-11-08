@@ -16,6 +16,7 @@ import {createConversationHistory} from './conversation-history.mjs';
 import {buildHealth} from './health.mjs';
 import {isMemberNative} from './member-native-flags.mjs';
 import {planMemberMigration} from './member-native-migration.mjs';
+import {createConsoleConversationStore} from './owner-console-conversation.mjs';
 import {buildOwnerTurn} from './owner-prompt.mjs';
 import {createFamilyAccess} from './family-access.mjs';
 import {createHarnessGateway} from './harness-gateway.mjs';
@@ -83,6 +84,7 @@ const inputKeys={
   owner_send_message:['personId','text','requestId','bindingGeneration'],
   defer_member_notice:['personId','text','requestId','bindingGeneration'],deferred_member_notices:[],
   attention_configure:['enabled'],attention_update:['incidentId','status'],
+  owner_conversation_open:[],
 };
 
 /** Kernel-reported start time of one process; used to tell a live owner from a
@@ -121,7 +123,7 @@ export function exclusiveLock(directory){
     try{const current=JSON.parse(readFileSync(file,'utf8'));if(current&&current.id===id)unlinkSync(file);}catch{}};
 }
 
-export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
+export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,ownerPromptStatus,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
   if(typeof directory!=='string'||!directory)throw new Error('家庭助手需要独立数据目录。');
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
@@ -146,7 +148,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     onStatus:(id,patch)=>{if(!closed&&store.person(id)){store.setConnection(id,patch);if(runtimeReady&&patch.status==='connected')void resumeMemberAdmissions(id).catch(error=>{lastError=safeError(error);});}},
     onMessage:(id,message)=>receive(id,message),
   });
-  let workbench,presentations,history,access,gateway,toolbox,organizer,serviceSetup,digestDelivery,workflowNotifications,attention,library;
+  let workbench,presentations,history,access,gateway,toolbox,organizer,serviceSetup,digestDelivery,workflowNotifications,attention,library,consoleConversations,openingConversation=null;
   try{
     history=createConversationHistory({store});access=createFamilyAccess({directory,store,now});
     const presentationExecutor=Boolean(generatePresentation&&extractMaterial&&typeof channels.downloadFile==='function'&&typeof channels.sendFile==='function')?async({personId,input,signal})=>{
@@ -156,7 +158,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       return{text:result.reply??'已进入 PPT 制作流程，请查看同一会话的文件或补充材料要求。'};
     }:undefined;
     toolbox=createFamilyToolbox({directory,store,now,executors:{...toolExecutors,...(presentationExecutor?{presentation:presentationExecutor}:{})}});
-    gateway=createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,now,recoverOnCreate:false,onResult:deliverHarnessResult});
+    consoleConversations=createConsoleConversationStore({directory,now});
+    gateway=createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,consoleConversation:()=>consoleConversations.read(),now,recoverOnCreate:false,onResult:deliverHarnessResult});
     presentations=createPresentationWorkflow({directory,store,now,generate:generatePresentation,extract:extractMaterial,defaultEnabled:Boolean(memberAgent&&generatePresentation&&extractMaterial&&typeof channels.sendFile==='function'&&typeof channels.downloadFile==='function'),
     download:typeof channels.downloadFile==='function'?(...args)=>channels.downloadFile(...args):undefined,
     send:typeof channels.sendFile==='function'?(...args)=>channels.sendFile(...args):undefined,
@@ -358,6 +361,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const reminder=command.action==='remind'?state.reminders.find(row=>row.id===command.resultId):null;
       return{...command,...(reminder?.status==='cancelled'?{status:'cancelled',detail:'操作已取消'}:reminder?.status==='expired'?{status:'failed',detail:'执行未完成'}:{}),...(deliveries.length?{deliveryStatus:deliveries.at(-1).status}:{} )};
     }),lastBrief,lastError,attention:attention.snapshot(),runtimeWork:{attention:attention.snapshot().active,responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size,ownerObservers:ownerObservers.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
+    result.ownerConversation=ownerConversationView();
     if(personId){const person=store.person(personId);if(!person)throw new Error('没有找到这位家人。');result.selectedPersonId=personId;result.messages=store.messages(personId,{limit:100});}
     return result;
   }
@@ -701,6 +705,36 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const state=await workbench.chat({text,requestId,draftOnly:true,messageDraftOrigin:origin,authorityRoute:route??undefined,authorize});
     return{handled:true,management:true,reply:state.messages.filter(row=>row.role==='assistant'&&row.requestId===requestId).at(-1)?.text??'还没有形成可确认的草稿，没有发送。'};
   }
+  // The desktop panel embeds one native Owner conversation. This opens it,
+  // creating a clean session once; creating it never sends a message.
+  function openOwnerConversation(){
+    alive();
+    if(openingConversation)return openingConversation;
+    openingConversation=(async()=>{
+      const personId=ownerId();
+      if(typeof ownerAgent?.ensureControlWorkspace!=='function'||typeof ownerAgent?.ensureSession!=='function')throw Object.assign(new Error('owner_agent_unavailable'),{code:'owner_agent_unavailable'});
+      const signal=managementLifecycle.signal;
+      const workspace=await ownerAgent.ensureControlWorkspace({signal});
+      let anchor=consoleConversations.read();
+      const fresh=!anchor||anchor.personId!==personId||anchor.workspaceId!==workspace.workspaceId||anchor.cwd!==workspace.path;
+      if(fresh)anchor=consoleConversations.create({personId,workspaceId:workspace.workspaceId,cwd:workspace.path});
+      await ownerAgent.ensureSession({workspaceId:anchor.workspaceId,cwd:anchor.cwd,sessionId:anchor.sessionId},{signal});
+      if(fresh)consoleConversations.write(anchor);
+      if(store.person(personId)?.role!=='owner')throw new Error('Owner 身份已改变。');
+      return{ownerConversation:ownerConversationView()};
+    })().finally(()=>{openingConversation=null;});
+    return openingConversation;
+  }
+  function ownerConversationView(){
+    let personId;try{personId=ownerId();}catch{return null;}
+    const anchor=gateway.consoleConversation({personId});
+    if(!anchor)return null;
+    let policy='unknown';
+    // A check still in flight is unknown, not a failure; only a settled
+    // negative result hands the main thread back to the workbench chat.
+    try{const row=typeof ownerPromptStatus==='function'?ownerPromptStatus(anchor.sessionId):null;if(row)policy=row.verified===true?'active':!row.reason||row.reason==='pending'?'unknown':'inactive';}catch{policy='unknown';}
+    return{sessionId:anchor.sessionId,explicit:consoleConversations.read()?.sessionId===anchor.sessionId,policy};
+  }
   async function ownerProjectsForSession({sessionId,signal}={}){
     alive();signal?.throwIfAborted();
     const personId=ownerId();
@@ -708,7 +742,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     // be visible before user/message, briefly making progress unknown. The
     // persisted Owner/session relation and current route still authenticate
     // this call; snapshot rechecks them without trusting a session-id prefix.
-    const permitted=()=>!closed&&typeof sessionId==='string'&&gateway.snapshot({personId}).some(task=>task.sessionId===sessionId&&task.conversationId);
+    const permitted=()=>!closed&&typeof sessionId==='string'&&(gateway.snapshot({personId}).some(task=>task.sessionId===sessionId&&task.conversationId)||gateway.consoleConversation({personId})?.sessionId===sessionId);
     if(!permitted())throw new Error('项目目录工具仅供当前 Owner 原生会话使用。');
     const rows=await gateway.listProjects({personId});signal?.throwIfAborted();
     if(!permitted())throw new Error('Owner 会话权限已改变，没有返回项目目录。');
@@ -956,9 +990,12 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const signal=origin==='console'?managementLifecycle.signal:lifecycle.signal;
     const workspace=await ownerAgent.ensureControlWorkspace({signal});
     if(!authorized())throw new Error('Owner 身份或微信绑定已改变，没有开始原生处理。');
+    // The desktop panel embeds one native conversation. Console requests from
+    // the legacy chat join it, so there are never two parallel desktop threads.
+    const anchored=origin==='console'?gateway.consoleConversation({personId:person.id}):null;
     const previousConversation=gateway.snapshot({personId:person.id}).filter(task=>task.conversationId&&(task.origin??'wechat')===origin&&task.workspaceId===workspace.workspaceId).at(-1);
-    const conversationId=previousConversation?.conversationId??randomUUID();
-    const legacyHistory=previousConversation?[]:(origin==='console'?workbench.snapshot().messages.slice(-12).map(row=>({role:row.role,text:row.text.slice(0,500)})):memberHistory(person.id,12).map(row=>({role:row.dir==='in'?'user':'assistant',text:row.text.slice(0,500)})));
+    const conversationId=anchored&&anchored.workspaceId===workspace.workspaceId?anchored.conversationId:previousConversation?.conversationId??randomUUID();
+    const legacyHistory=previousConversation||anchored?[]:(origin==='console'?workbench.snapshot().messages.slice(-12).map(row=>({role:row.role,text:row.text.slice(0,500)})):memberHistory(person.id,12).map(row=>({role:row.dir==='in'?'user':'assistant',text:row.text.slice(0,500)})));
     const prompt=buildOwnerTurn({text,legacyHistory});
     const candidateRecipient=ownerArtifactIntent(text)?recipientIn(text):undefined,recipientPersonId=candidateRecipient===person.id?undefined:candidateRecipient;
     const task=await gateway.submit({personId:person.id,route,origin,workspaceId:workspace.workspaceId,conversationId,prompt,requestId:sourceRequest(route,message),...(recipientPersonId?{deliveryTarget:captureDeliveryTarget(recipientPersonId)}:{})});
@@ -1293,6 +1330,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   async function action(input){
     alive();if(!input||typeof input!=='object'||Array.isArray(input)||!Object.hasOwn(inputKeys,input.action)||Object.keys(input).some(k=>k!=='action'&&!inputKeys[input.action].includes(k)))throw new Error('不支持的操作或参数。');
     const{action:op,...args}=input;
+    if(op==='owner_conversation_open')return openOwnerConversation();
     if(op==='attention_configure'){attention.configure(args.enabled);return status();}
     if(op==='attention_update'){attention.mark(args.incidentId,args.status);return status();}
     if(op==='resume_owner_native_message')return resumeOwnerNativeMessage(args.messageId);

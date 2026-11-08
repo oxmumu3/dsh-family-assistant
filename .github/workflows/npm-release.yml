@@ -66,7 +66,7 @@ jobs:
         run: |-
           node scripts/build-client.mjs
           node scripts/build-client.mjs --check
-          node --test test/owner-bridge.test.mjs test/owner-agent-client.test.mjs test/voice-capture.test.mjs test/plugin.test.mjs test/lock.test.mjs test/store-retention.test.mjs test/owner-prompt.test.mjs test/owner-prompt-probe.test.mjs test/owner-prompt-scope.test.mjs test/workbench-bundle.test.mjs test/health.test.mjs test/member-native-migration.test.mjs test/member-native.test.mjs test/member-native-host.test.mjs test/member-native-dispatch.test.mjs
+          node --test test/owner-bridge.test.mjs test/owner-agent-client.test.mjs test/voice-capture.test.mjs test/plugin.test.mjs test/lock.test.mjs test/store-retention.test.mjs test/owner-prompt.test.mjs test/owner-prompt-probe.test.mjs test/owner-prompt-scope.test.mjs test/workbench-bundle.test.mjs test/health.test.mjs test/member-native-migration.test.mjs test/member-native.test.mjs test/owner-native-console.test.mjs test/owner-tool-authority.test.mjs test/member-native-host.test.mjs test/member-native-dispatch.test.mjs
       - name: Recheck official latest immediately before packing
         run: node scripts/compatibility.mjs --latest
       - name: Stage the public whitelist, pack and hash the exact archives

@@ -65,5 +65,5 @@ export function createOwnerAgentHost({ workspaceController, sessionController, c
     } catch { throw fail('owner_agent_control_workspace_invalid'); }
     return workspace;
   }
-  return Object.freeze({ ensureControlWorkspace, listWorkspaces: client.listWorkspaces, start: client.start, observe: client.observe });
+  return Object.freeze({ ensureControlWorkspace, listWorkspaces: client.listWorkspaces, start: client.start, observe: client.observe, observeActive: client.observeActive, ensureSession: client.ensureSession });
 }

@@ -365,7 +365,11 @@
   const requestStates = {open:'待你回应',waiting:'等待后续',resolved:'已结束跟进'};
   const storageKey = 'family-workbench-drafts-v1';
   let drafts = Object.create(null), attempts = Object.create(null), replyDrafts = Object.create(null), replyAttempts = Object.create(null);
-  let activeTab = 'chat', activeContext = '', activeRequestId = '', drawerKind = '', lastFocus = null, workbenchSignature = '';
+  // When the Host panel embeds the native Owner conversation, that conversation
+  // is the only editable main thread; this page keeps family, tools and cards.
+  const nativeChat = document.documentElement?.dataset?.nativeChat === '1';
+  const showNativeChat = () => { try { parent.__FamilyShowNativeChat?.(); } catch { /* host bridge gone */ } };
+  let activeTab = nativeChat ? 'family' : 'chat', activeContext = '', activeRequestId = '', drawerKind = '', lastFocus = null, workbenchSignature = '';
   const emptyFamilyIntake=()=>({cardId:'',personId:'',draft:'',response:'',attempt:null});
   let familyIntake=emptyFamilyIntake();
   function restoreDrafts() {
@@ -756,6 +760,11 @@
     const section=node('section',null,'empty-state');section.append(node('h2',title),node('p',description));return section;
   }
   function renderChat(space) {
+    if(nativeChat&&!activeContext&&!ownerProject.active){
+      const note=node('section',null,'native-chat-handoff');
+      note.append(node('h2','和乐乐的主对话在上方'),node('p','主对话已换成 Harness 原生会话：工具、审批和进度都在那里直接看到。这里继续管理家人、工具和安排。','hint'),actionButton('回到主对话',showNativeChat,'primary'));
+      space.append(note);return;
+    }
     const data=workbench(), messages=data.messages || [], cards=data.cards || [], lastReference=new Map();
     const requests=(data.requests||[]).filter(item=>item.status!=='resolved');
     if(requests.length&&!activeContext&&!ownerProject.active){const latest=requests.at(-1),who=state.people.find(person=>person.id===latest.personId),row=actionButton('',()=>openRequest(latest.id),'attention-row'),copy=node('span');copy.append(node('strong',(who?.label||'家人')+'有件事想问你'),node('small',latest.text));row.append(node('span',who?.label?.slice(0,1)||'家','avatar'),copy,node('span',requests.length+' 件跟进事项'));space.append(row);}
@@ -827,7 +836,7 @@
     show('owner-setup',!owner);show('nav-count',data.requests.some(item=>item.status==='open'));text('nav-count',data.requests.filter(item=>item.status==='open').length);
     for(const tab of Object.keys(tabTitles)) {if(activeTab===tab)$('nav-'+tab).setAttribute('aria-current','page');else $('nav-'+tab).removeAttribute('aria-current');}
     $('app-shell').dataset.tab=activeTab;
-    document.querySelector?.('.composer-area')?.toggleAttribute?.('hidden',activeTab!=='chat');
+    document.querySelector?.('.composer-area')?.toggleAttribute?.('hidden',activeTab!=='chat'||nativeChat&&!activeContext&&!ownerProject.active);
     capabilities?.setView(activeTab);capabilities?.onState();
     text('chat-title',tabTitles[activeTab][0]);text('chat-subtitle',tabTitles[activeTab][1]);renderContext();
     const signature=JSON.stringify([activeTab,activeContext,data,state.people,state.reminders,state.outbox,state.presentations,state.harness,state.serviceSetup,state.attention,ownerProject]);
@@ -1104,7 +1113,8 @@
   text('reminder-due-label', '首次时间（' + Intl.DateTimeFormat().resolvedOptions().timeZone + '）');
 
   restoreDrafts(); setValue('owner-input',drafts[composerDraftKey()] || '');
-  $('brand-home').addEventListener('click',event=>{event.preventDefault();setTab('chat');});
+  $('brand-home').addEventListener('click',event=>{event.preventDefault();if(nativeChat)showNativeChat();else setTab('chat');});
+  if(nativeChat)$('nav-chat').hidden=true;
   $('skip-main').addEventListener('click',event=>{event.preventDefault();$('workspace').focus();});
   $('owner-input').addEventListener('input',()=>{voiceRevision++;keepDraft();updateButtons();});
   $('owner-input').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229){event.preventDefault();void sendOwnerChat();}});
