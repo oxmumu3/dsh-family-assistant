@@ -1112,7 +1112,28 @@
   for (const id of forms) $(id).dataset.dirty = '';
   text('reminder-due-label', '首次时间（' + Intl.DateTimeFormat().resolvedOptions().timeZone + '）');
 
-  restoreDrafts(); setValue('owner-input',drafts[composerDraftKey()] || '');
+  // One editable main thread: with the native conversation on, an unsent line
+  // from the old chat box moves to a handoff the Host panel shows above it.
+  // In fallback mode it comes back to this box. Text is merged, never dropped.
+  function syncNativeHandoff(){
+    const handoffKey='family-native-chat-handoff-v1';
+    try{
+      const stored=JSON.parse(window.sessionStorage.getItem(handoffKey)||'null');
+      const held=typeof stored?.text==='string'?stored.text.slice(0,4000):'';
+      const pending=(drafts['']||'').trim();
+      if(nativeChat){
+        if(!pending)return;
+        const text=!held?pending:held.includes(pending)?held:(held+'\n\n'+pending).slice(0,4000);
+        window.sessionStorage.setItem(handoffKey,JSON.stringify({text}));
+        drafts['']='';persistDrafts();
+        try{parent.__FamilyHandoffChanged?.();}catch{ /* the panel reads it on open */ }
+      }else if(held){
+        drafts['']=!pending?held:pending.includes(held)?pending:(pending+'\n\n'+held).slice(0,4000);
+        window.sessionStorage.removeItem(handoffKey);persistDrafts();
+      }
+    }catch{ /* storage is optional; nothing is removed unless it was written first */ }
+  }
+  restoreDrafts(); syncNativeHandoff(); setValue('owner-input',drafts[composerDraftKey()] || '');
   $('brand-home').addEventListener('click',event=>{event.preventDefault();if(nativeChat)showNativeChat();else setTab('chat');});
   if(nativeChat)$('nav-chat').hidden=true;
   $('skip-main').addEventListener('click',event=>{event.preventDefault();$('workspace').focus();});

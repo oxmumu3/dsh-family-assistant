@@ -56,6 +56,35 @@ window.__ModuleLoader__.load({
           : style + source;
         return themed.replace(/<html(\s[^>]*)?>/i, (_m, rest) => `<html${rest ?? ''} data-host-theme="${theme.dark ? 'dark' : 'light'}"${options.nativeChat ? ' data-native-chat="1"' : ''}>`);
       }
+      // Unsent main-chat text from the old workbench box. Both frames share this
+      // window's session storage; text is merged, and removed only after the
+      // Host composer has accepted it.
+      const HANDOFF_KEY = 'family-native-chat-handoff-v1';
+      const WORKBENCH_DRAFTS_KEY = 'family-workbench-drafts-v1';
+      function collectNativeHandoff() {
+        try {
+          const storage = window.sessionStorage;
+          const stored = JSON.parse(storage.getItem(HANDOFF_KEY) || 'null');
+          let held = typeof stored?.text === 'string' ? stored.text.slice(0, 4000) : '';
+          const drafts = JSON.parse(storage.getItem(WORKBENCH_DRAFTS_KEY) || 'null');
+          const pending = typeof drafts?.drafts?.[''] === 'string' ? drafts.drafts[''].trim() : '';
+          if (pending) {
+            held = !held ? pending : held.includes(pending) ? held : (held + '\n\n' + pending).slice(0, 4000);
+            storage.setItem(HANDOFF_KEY, JSON.stringify({ text: held }));
+            drafts.drafts[''] = '';
+            storage.setItem(WORKBENCH_DRAFTS_KEY, JSON.stringify(drafts));
+          }
+          return held.trim();
+        } catch {
+          return '';
+        }
+      }
+      function clearNativeHandoff(text) {
+        try {
+          const stored = JSON.parse(window.sessionStorage.getItem(HANDOFF_KEY) || 'null');
+          if (stored?.text === text) window.sessionStorage.removeItem(HANDOFF_KEY);
+        } catch { /* nothing to clear */ }
+      }
       function FamilyAssistant(props = {}) {
         const [page, setPage] = React.useState(null);
         const [error, setError] = React.useState('');
@@ -67,6 +96,8 @@ window.__ModuleLoader__.load({
         const nativeCapable = typeof props.SessionProvider === 'function' && typeof props.renderSlot === 'function' && typeof ctx.sessions?.retain === 'function';
         const [view, setView] = React.useState(nativeCapable ? 'chat' : 'overview');
         const [conversation, setConversation] = React.useState(nativeCapable ? { status: 'opening' } : { status: 'off' });
+        const [handoff, setHandoff] = React.useState('');
+        const [handoffNote, setHandoffNote] = React.useState('');
         React.useEffect(() => {
           let active = true;
           const previousFetch = window.__FamilyHostFetch;
@@ -152,6 +183,9 @@ window.__ModuleLoader__.load({
           const previousShow = window.__FamilyShowNativeChat;
           const show = () => { if (live) setView('chat'); };
           window.__FamilyShowNativeChat = show;
+          const previousHandoff = window.__FamilyHandoffChanged;
+          const syncHandoff = () => { if (live) setHandoff(collectNativeHandoff()); };
+          window.__FamilyHandoffChanged = syncHandoff;
           const release = () => { const held = reference; reference = null; try { held?.release?.(); } catch { /* already released */ } };
           const fallBack = status => { release(); if (!live) return; setConversation({ status }); setView(value => value === 'chat' ? 'workbench' : value); };
           const readPolicy = async sessionId => {
@@ -176,6 +210,7 @@ window.__ModuleLoader__.load({
             if (!live) return;
             if (reference.binding?.sessionId !== target.sessionId) throw new Error('owner_conversation_mismatch');
             setConversation({ status: 'ready', sessionId: target.sessionId, reference, policy: target.policy });
+            syncHandoff();
             // The family role section is attached when the Host creates the
             // agent. Without it the native thread would not be 乐乐, so a failed
             // attachment hands the main thread back to the iframe chat.
@@ -192,6 +227,10 @@ window.__ModuleLoader__.load({
             if (window.__FamilyShowNativeChat === show) {
               if (previousShow === undefined) delete window.__FamilyShowNativeChat;
               else window.__FamilyShowNativeChat = previousShow;
+            }
+            if (window.__FamilyHandoffChanged === syncHandoff) {
+              if (previousHandoff === undefined) delete window.__FamilyHandoffChanged;
+              else window.__FamilyHandoffChanged = previousHandoff;
             }
           };
         }, [attempt]);
@@ -233,6 +272,34 @@ window.__ModuleLoader__.load({
           React.createElement('span', { style: muted }, summaryText),
           notice,
           React.createElement('nav', { 'aria-label': '家庭助手视图', style: { display: 'flex', gap: '6px', marginLeft: 'auto' } }, tabs.map(tab)));
+        // Put the old line into the Host composer as a draft; the Owner sends it.
+        const placeHandoff = () => {
+          const text = handoff;
+          try {
+            const reference = conversation?.reference, sessionId = conversation?.sessionId;
+            const binding = reference?.binding;
+            if (!text || !binding || binding.sessionId !== sessionId || (typeof ctx.sessions?.binding === 'function' && ctx.sessions.binding(sessionId) !== binding)) throw new Error('changed');
+            const scope = binding.ctx ?? ctx.sessions?.scope?.(sessionId);
+            const native = scope?.get?.('conversation', false);
+            if (typeof native?.input?.requestDraftInitialization !== 'function') throw new Error('unavailable');
+            const status = native.input.requestDraftInitialization(binding, { prompt: text, clearPreviousDraft: false });
+            if (status === 'applied') { clearNativeHandoff(text); setHandoff(''); setHandoffNote('已放进下方输入框，确认后由你发送。'); return; }
+            setHandoffNote(status === 'preserved' ? '输入框里已经有一段草稿，没有覆盖它；这段话仍保留在这里。'
+              : status === 'blocked' ? '对话正在提交，稍后再放；这段话仍保留在这里。'
+                : '没能确认是否放进输入框，这段话仍保留在这里。');
+          } catch {
+            setHandoffNote('原生输入框暂时收不下这段话，原文仍保留在这里。');
+          }
+        };
+        const handoffBar = view === 'chat' && conversation?.status === 'ready' && (handoff || handoffNote)
+          ? React.createElement('div', { role: 'status', 'data-family-handoff': true, style: { padding: '8px 16px', borderBottom: '1px solid var(--dsh-color-border, rgba(127,127,127,0.2))', fontSize: '13px', lineHeight: 1.6 } },
+            handoff ? React.createElement('div', null,
+              React.createElement('strong', null, '旧对话框里还有一段没发出的话'),
+              React.createElement('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '6.5em', overflow: 'auto', margin: '4px 0', opacity: 0.8 } }, handoff),
+              React.createElement('button', { type: 'button', onClick: placeHandoff, style: { fontSize: '12px', marginRight: '8px' } }, '放进输入框'),
+              React.createElement('button', { type: 'button', onClick: () => { clearNativeHandoff(handoff); setHandoff(''); setHandoffNote('已丢弃这段旧草稿。'); }, style: { fontSize: '12px' } }, '不要了')) : null,
+            handoffNote ? React.createElement('p', { style: { margin: '4px 0 0', opacity: 0.8 } }, handoffNote) : null)
+          : null;
         const chat = view === 'chat' && nativeOn
           ? React.createElement('div', { 'data-family-owner-conversation': conversation.sessionId || '', style: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0 } },
             conversation.status === 'ready' && conversation.reference
@@ -256,7 +323,7 @@ window.__ModuleLoader__.load({
               React.createElement('p', { role: 'alert' }, error),
               React.createElement('button', { type: 'button', onClick: () => setAttempt(value => value + 1) }, '重新载入'))
             : frame);
-        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, chat, overview, workbench);
+        return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } }, header, handoffBar, chat, overview, workbench);
       }
       /** Fills the session-scoped child slot with the Host's own conversation
        * body and composer; tools, approvals and streaming come from the Host. */

@@ -233,3 +233,73 @@ test('opening the desktop conversation creates one clean native session and neve
   assert.equal(runtime.status().ownerConversation.policy, 'inactive');
   assert.equal(JSON.stringify(runtime.status().ownerConversation).includes(workspace.path), false, 'no filesystem path reaches the panel');
 });
+
+async function mountPanel({drafts, handoff, draftStatus}) {
+  const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8');
+  const store = new Map();
+  if (drafts) store.set('family-workbench-drafts-v1', JSON.stringify({drafts}));
+  if (handoff) store.set('family-native-chat-handoff-v1', JSON.stringify({text: handoff}));
+  const sessionStorage = {getItem: key => store.has(key) ? store.get(key) : null, setItem: (key, value) => store.set(key, String(value)), removeItem: key => store.delete(key)};
+  const sessionId = 'family_owner_ee000000-0000-4000-8000-000000000001';
+  const initialized = [];
+  const binding = {sessionId, ctx: {get: name => name === 'conversation' ? {input: {requestDraftInitialization: (target, options) => { initialized.push({target, options}); return draftStatus; }}} : undefined}};
+  const reference = {ready: Promise.resolve(), binding, release() {}};
+  const states = [], effects = [];
+  let index = 0, first = true;
+  const React = {
+    createElement: (type, props, ...children) => ({type, props: props || {}, children}),
+    useState: initial => { const i = index++; if (!(i in states)) states[i] = initial; return [states[i], value => { states[i] = typeof value === 'function' ? value(states[i]) : value; }]; },
+    useEffect: fn => { if (first) effects.push(fn); },
+  };
+  const fetch = async (url, init = {}) => ({
+    ok: true,
+    text: async () => '<html><head></head><body></body></html>',
+    json: async () => init.method === 'POST' ? {ownerConversation: {sessionId, policy: 'active'}} : {health: null, ownerConversation: {sessionId, policy: 'active'}},
+  });
+  const window = {__ModuleLoader__: {load: value => { definition = value; }}, sessionStorage, AbortController, setTimeout, clearTimeout, Date};
+  let definition;
+  runInNewContext(source, {window, document: new EventTarget(), AbortController, Date, btoa, setTimeout, clearTimeout, setInterval, clearInterval, fetch});
+  const plugin = definition.factory(() => React), slots = [];
+  plugin.apply({effect: fn => fn(), sessions: {retain: () => reference, binding: () => binding}, slots: {inject: (_key, fn) => fn(), register: (metadata, component) => slots.push({metadata, component})}});
+  const Panel = slots.find(row => row.metadata.key === 'family-assistant').component;
+  const props = {SessionProvider: () => null, renderSlot: () => null};
+  const render = () => { index = 0; const tree = Panel(props); first = false; return tree; };
+  render();
+  for (const effect of effects) effect();
+  for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+  const find = (node, predicate, out = []) => { if (!node || typeof node !== 'object') return out; if (predicate(node)) out.push(node); for (const child of node.children ?? []) find(child, predicate, out); return out; };
+  const button = (tree, label) => find(tree, node => node.type === 'button' && JSON.stringify(node.children) === JSON.stringify([label]))[0];
+  return {store, initialized, render, button, find};
+}
+
+test('an unsent line from the old chat box is handed into the native composer, not dropped', async () => {
+  const panel = await mountPanel({drafts: {'': '帮我问问妈妈周末回不回家', 'card:1': '别的卡片草稿'}, draftStatus: 'applied'});
+  let tree = panel.render();
+  assert.match(JSON.stringify(tree), /旧对话框里还有一段没发出的话/);
+  assert.match(JSON.stringify(tree), /帮我问问妈妈周末回不回家/);
+  assert.equal(JSON.parse(panel.store.get('family-workbench-drafts-v1')).drafts[''], '', 'moved out of the old box so only one surface owns it');
+  assert.equal(JSON.parse(panel.store.get('family-workbench-drafts-v1')).drafts['card:1'], '别的卡片草稿', 'other drafts are untouched');
+  panel.button(tree, '放进输入框').props.onClick();
+  assert.equal(panel.initialized.length, 1);
+  assert.equal(panel.initialized[0].options.prompt, '帮我问问妈妈周末回不回家');
+  assert.equal(panel.initialized[0].options.clearPreviousDraft, false, 'an existing native draft is never cleared');
+  assert.equal(panel.store.has('family-native-chat-handoff-v1'), false, 'cleared only after the Host accepted it');
+  tree = panel.render();
+  assert.match(JSON.stringify(tree), /已放进下方输入框，确认后由你发送/);
+  assert.doesNotMatch(JSON.stringify(tree), /帮我问问妈妈周末回不回家/);
+});
+
+test('a native composer that already has a draft keeps it and the old line stays available', async () => {
+  const panel = await mountPanel({handoff: '先保留的旧话', draftStatus: 'preserved'});
+  let tree = panel.render();
+  panel.button(tree, '放进输入框').props.onClick();
+  assert.equal(panel.store.has('family-native-chat-handoff-v1'), true);
+  tree = panel.render();
+  assert.match(JSON.stringify(tree), /没有覆盖它/);
+  assert.match(JSON.stringify(tree), /先保留的旧话/);
+});
+
+test('with nothing pending the native conversation shows no handoff bar', async () => {
+  const panel = await mountPanel({drafts: {'': '   '}, draftStatus: 'applied'});
+  assert.doesNotMatch(JSON.stringify(panel.render()), /旧对话框里还有一段没发出的话/);
+});
