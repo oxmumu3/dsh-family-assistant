@@ -68,7 +68,8 @@ function fixture({ exists = true, records = [], timeoutMs = 1000 } = {}) {
 
 test('backend exposes only registered-project Owner operations and closes baseline streams', async () => {
   const f = fixture();
-  assert.deepEqual(Object.keys(f.client).sort(), ['ensureControlWorkspace', 'listWorkspaces', 'observe', 'start']);
+  // observeActive is a bounded read; ensureSession creates the desktop conversation without sending.
+  assert.deepEqual(Object.keys(f.client).sort(), ['ensureControlWorkspace', 'ensureSession', 'listWorkspaces', 'observe', 'observeActive', 'start']);
   assert.deepEqual(await f.client.listWorkspaces(), [{ workspaceId: 'workspace', path: intent.cwd, title: '日报', sessionIds: [SESSION] }]);
   assert.equal(f.closed, 1);
   assert.ok(f.signals.every(signal => signal.aborted));
