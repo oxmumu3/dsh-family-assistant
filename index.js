@@ -1,3 +1,4 @@
+import {installOwnerMobileControl} from './src/owner-mobile-control.mjs';
 import {homedir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createRuntime} from './src/runtime.mjs';
@@ -33,7 +34,7 @@ export function apply(ctx,config={}){
   const storageDir=resolve(config.storageDir??join(homedir(),'.local','share','dsh-family-assistant'));
   const voice=createHostVoice(ctx);
   const transcribeVoice=createWeixinVoiceTranscriber({voice});
-  let runtime,ownerReadGuard;
+  let runtime,ownerReadGuard,mobileControl;
   const ownerPromptScope=createOwnerPromptScope({section:ownerPromptSection(),onStateChange:change=>{try{recordScope(storageDir,change);}catch{}}});
   const respond=createHostResponder(ctx,()=>runtime.store.snapshot().config);
   const planOwner=createHostOwnerPlanner(ctx,()=>runtime.store.snapshot().config);
@@ -65,14 +66,16 @@ export function apply(ctx,config={}){
       memberNativeRuntime=createNativeMemberRuntime({createAgent:createHostMemberSessionFactory({agents:nativeAgents,sessionController:nativeSessions,cwd:storageDir+'-member-workspace'})});
     }
   }catch{memberNativeRuntime=null;}
-  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
+  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,ownerMobileControl:{handle:args=>mobileControl?.handle(args),hasPendingTask:id=>mobileControl?.hasPendingTask(id)},toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
+  mobileControl=installOwnerMobileControl({ctx,resolveTask:runtime.resolveOwnerMobileTask,sendNotice:runtime.sendOwnerMobileNotice});
   let unregister,disposal;
   const dispose=()=>disposal??=(async()=>{
     try{await offAgentCreated?.();await offAgentDisposed?.();}catch{}
     for(const agent of [...ownerScopes.keys()])releaseOwnerTools({id:agent});
     voice.dispose();
     try{await unregister?.();}
-    finally{try{await runtime.close();}finally{try{await ownerPromptScope.close();}finally{await ownerReadGuard?.close();}}}
+    finally{try{await mobileControl?.close();}catch{}
+    try{await runtime.close();}finally{try{await ownerPromptScope.close();}finally{await ownerReadGuard?.close();}}}
   })();
   // Cordis constructs ordinary exported functions; own cleanup explicitly.
   ctx.effect(()=>dispose,'family-assistant: runtime');

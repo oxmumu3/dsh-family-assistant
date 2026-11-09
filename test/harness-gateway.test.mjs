@@ -158,3 +158,10 @@ test('deferred recovery still durably marks interrupted callback delivery as unk
  const restarted=createHarnessGateway({...f,ownerAgent:f.adapter,now,recoverOnCreate:false});await restarted.settled();assert.equal(JSON.parse(readFileSync(file)).tasks[0].delivery.state,'unknown');assert.equal(f.deliveries.length,1);assert.equal(f.observes.length,0);
  await restarted.tick();await restarted.settled();assert.equal(f.deliveries.length,1);assert.equal(f.observes.length,0);await restarted.close();
 });
+
+test('mobile task scope fails closed when no live wechat task matches',async()=>{
+ const f=fixture();const task=await f.gateway.submit(f.request());
+ assert.equal(f.gateway.mobileTaskScope({sessionId:task.sessionId,requestId:task.requestId}),null);
+ assert.equal(f.gateway.mobileTaskScope({sessionId:'missing',requestId:'missing'}),null);
+ assert.equal(f.gateway.mobileTaskScope(),null);
+});

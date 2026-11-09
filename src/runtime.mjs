@@ -125,7 +125,7 @@ export function exclusiveLock(directory){
     try{const current=JSON.parse(readFileSync(file,'utf8'));if(current&&current.id===id)unlinkSync(file);}catch{}};
 }
 
-export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,ownerPromptStatus,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
+export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,ownerMobileControl,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,ownerPromptStatus,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
   if(typeof directory!=='string'||!directory)throw new Error('家庭助手需要独立数据目录。');
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
@@ -839,7 +839,12 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   const dotSourceKey=(sessionId,requestId)=>'family-dot:'+createHash('sha256').update(JSON.stringify([sessionId,requestId])).digest('hex');
   const dotReceipt=row=>!row?'absent':row.status==='api_accepted'?'accepted':['failed','cancelled','expired','blocked'].includes(row.status)?'failed':'uncertain';
   const dotDelivery=row=>{const diagnostic=readWeixinSendFailureDetail(row?.detail);return{status:dotReceipt(row),...(diagnostic?{diagnostic}:{})};};
+  const mobileProviders=new Set();
   const familyDotBridge={
+    registerMobileTasks(resolve){
+      if(closed||typeof resolve!=='function')throw new Error('Mobile task provider unavailable');
+      mobileProviders.add(resolve);return()=>mobileProviders.delete(resolve);
+    },
     async resolveOwnerCall({sessionId,callId,signal}={}){
       try{
         const authority=await ownerAuthorityForSession({sessionId,callId,signal});
@@ -1003,11 +1008,39 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     if(authority.deliveryTarget)throw new Error('这轮成果由原任务统一投递，不能重复确认发送。');
     return workbench.confirm({cardId,revision,authorityRoute:authority.route??undefined,authorize:authority.authorize});
   }
+  function resolveOwnerMobileTask(sessionId,requestId){
+    const captured=gateway.mobileTaskScope({sessionId,requestId});
+    if(captured){
+      const authorize=()=>{try{const actual=gateway.mobileTaskScope({sessionId,requestId});return !closed&&actual?.taskId===captured.taskId&&sameRoute(actual.route,captured.route)&&current(captured.route);}catch{return false;}};
+      return authorize()?{...captured,authorize}:null;
+    }
+    const matches=[];
+    for(const provider of mobileProviders){
+      try{const value=provider(sessionId,requestId),origin=value?.origin,owner=origin&&dotOwnerScope(origin.sessionId);
+        if(!value||!owner||owner.bindingRevision!==origin.bindingRevision||!value.authorize?.()||!familyDotBridge.isOwnerProjectResultCurrent(origin))continue;
+        const authorize=()=>{try{return !closed&&mobileProviders.has(provider)&&value.authorize()===true&&sameRoute(dotOwnerScope(origin.sessionId)?.route,owner.route)&&familyDotBridge.isOwnerProjectResultCurrent(origin)===true;}catch{return false;}};
+        matches.push({personId:owner.personId,route:owner.route,sessionId,requestId,taskId:value.jobId,label:value.label,kind:'project',originSessionId:origin.sessionId,authorize,questionState:value.questionState});
+      }catch{}
+    }
+    return matches.length===1?matches[0]:null;
+  }
+  async function sendOwnerMobileNotice({scope,code,text,authorize}={}){
+    const permitted=()=>typeof authorize==='function'&&authorize()===true&&scope?.authorize?.()===true;
+    if(!permitted()||typeof text!=='string'||text.length>3200)return{status:'failed'};
+    const key='mobile-question:'+scope.taskId+':'+code;
+    if(store.snapshot().outbox.some(row=>row.sourceKey===key))return{status:'uncertain'};
+    const row=store.enqueue({personId:scope.personId,text,kind:'harness_notice',sourceKey:key,authorizationRoute:scope.route,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});
+    outboxAuthorities.set(row.id,permitted);
+    await flush(scope.personId,{onlyId:row.id,authorize:permitted});
+    const actual=store.snapshot().outbox.find(item=>item.id===row.id);
+    return{status:actual?.status??'uncertain'};
+  }
   async function notifyOwnerTaskStatus(){
     if(closed||store.snapshot().config.paused)return;
     for(const task of gateway.nativeNoticeTasks().filter(task=>task.delivery.state==='none')){
       let currentTask;try{currentTask=gateway.snapshot({personId:task.personId}).find(row=>row.id===task.id&&row.requestId===task.requestId);}catch{continue;}
       if(!currentTask||task.state==='succeeded')continue;
+      if(ownerMobileControl?.hasPendingTask?.(task.id))continue;
       const waiting=['queued','running'].includes(task.state);
       if(waiting&&Date.parse(now())-Date.parse(task.createdAt)<12000)continue;
       const text=waiting?ownerWaitingText(task.prompt):({unknown:'这次处理的结果尚未确认，可能中途被打断了。我没有自动重新执行；你可以让我核对这件事的状态。',failed:'这件事未能完成，已有记录已保留。你可以告诉我接下来想怎样处理。',cancelled:'这件事已停止，已经保存或发出的内容会保留。',needs_approval:'这一步需要你在电脑上授权，尚未完成。你可以先让我处理不需要这项权限的部分。',needs_input:'这件事还需要你补充信息。请在这里告诉我具体要求，我会接着核对。'}[task.state]);
@@ -1081,6 +1114,20 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   }
   async function harnessCommand(person,route,message,text,{origin='wechat',directReminderAdmitted=false}={}){
     const value=text.trim(),requestId=sourceRequest(route,message),commandCurrent=()=>origin==='console'?!closed&&store.person(person.id)?.role==='owner':current(route);
+    if(origin==='wechat'&&person.role==='owner'&&current(route)&&ownerMobileControl){
+      const control=await ownerMobileControl.handle({personId:person.id,route,text:value});
+      if(control){
+        if(control.taskId){const task=gateway.snapshot({personId:person.id}).find(row=>row.id===control.taskId);if(task)observeOwnerTask(task);}
+        return{reply:control.reply,replyKind:'harness_notice'};
+      }
+      if(/^(?:现在到哪了|任务状态|当前任务状态|处理到哪了|进度呢)[。！？!?]*$/.test(value)){
+        const task=gateway.snapshot({personId:person.id}).filter(row=>row.conversationId&&row.origin==='wechat').at(-1);
+        const names={queued:'已接收，等待电脑处理',running:'电脑正在处理',needs_input:'等你补充信息',needs_approval:'等你确认权限',unknown:'执行状态尚未确认，没有自动重跑',succeeded:'这一轮已结束，结果与投递状态请看原任务记录',failed:'这一轮未完成',cancelled:'这一轮已停止',cancelling:'正在停止'};
+        return{reply:task?`当前任务：${task.prompt.slice(0,100)}\n${names[task.state]??'状态未知'}。`:'当前没有已记录的微信任务。可以直接告诉我要继续哪个项目、做什么。',replyKind:'harness_notice'};
+      }
+      if(/^(?:请|帮我)?(?:停止(?:当前任务|这项任务)?|停一下|停下|别做了)[。！!]*$/.test(value))return{reply:'当前没有可确认归属的运行任务，没有取消其他会话。已保存或发出的内容会保留。',replyKind:'harness_notice'};
+    }
+
     // This narrow, explicit single-message Owner reminder is decided from the
     // bound WeChat ingress before any native agent can choose a Host schedule.
     // Never infer the provider's timestamp from the local receipt or the model.
@@ -1526,5 +1573,5 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       await delay(20);
     }
   }
-  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,familyDotBridge,ownerTasksForToolGuard:()=>gateway.snapshotForOwner()};
+  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge,ownerTasksForToolGuard:()=>gateway.snapshotForOwner()};
 }

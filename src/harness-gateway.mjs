@@ -198,6 +198,14 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
   // those channels are connected. Dispatch uncertainty above is always durable.
   if(recoverOnCreate)for(const task of tasks)if(task.executor!=='family_project'&&!terminal(task.state)||readyResult(task)&&task.delivery.state==='none')schedule(task.id,readyResult(task)?'deliver':'observe');
   const api={
+    // Internal only: exact persisted RPC + current Owner ingress are authority.
+    mobileTaskScope({sessionId,requestId}={}){
+      if(closed)return null;
+      const matches=tasks.filter(task=>task.sessionId===sessionId&&task.requestId===requestId&&task.conversationId&&task.origin==='wechat'&&task.executor!=='family_project'&&!terminal(task.state)&&eligible(task));
+      if(matches.length!==1)return null;
+      const task=matches[0];
+      return{personId:task.personId,route:clone(task.route),sessionId,requestId,taskId:task.id,label:conversationPrompt(task.prompt).replace(/\s+/g,' ').slice(0,100)};
+    },
     // This is a local identity check, not an authorization to read or send.
     // Unlike snapshot(), it intentionally does not infer a changed identity
     // from a transient transport status. Callers must separately check online.
