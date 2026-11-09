@@ -16,7 +16,12 @@ const sensitive=text=>{
  if(/^(?:请|帮我|麻烦)?\s*第[一二两三四五六七八九1-9](?:条|项)(?:已处理|不再提醒|延后(?:\d{1,3}|[一二两三四五六七八九十]{1,3})(?:小时|天))[。！!\s]*$/u.test(text.trim()))return true;
  return /(?:\bdot\b|flomo|笔记|日历|日程|calendar|gmail|邮箱|邮件|drive|云盘|文档|表格|滴答|ticktick|个人资料|个人回顾|个人复盘|资讯兴趣|资讯日报|AI\s*日报(?:关注|主要关注|状态)|context|项目|project|dsh-project-companion)/iu.test(text);
 };
-export function createOwnerDotReadPolicy(getTasks){
+// The scope is chosen by *who wrote the message*, never by which channel or
+// session prefix it arrived on. A session the bound Owner wrote in keeps the
+// normal Host toolset; the read-only scope only applies when the session is
+// not the Owner's own. `isOwnerSession` is supplied by the runtime from the
+// persisted Owner binding, so a shared bot cannot restrict its Owner.
+export function createOwnerDotReadPolicy(getTasks,{isOwnerSession}={}){
  if(typeof getTasks!=='function')throw new TypeError('A Family task snapshot is required');
  function active(sessionId){
   if(typeof sessionId!=='string'||!sessionId.startsWith('family_owner_'))return false;
@@ -41,6 +46,8 @@ export function createOwnerDotReadPolicy(getTasks){
  }
  const guard=execution=>{
   const id=String(execution?.agent?.id??'');if(!active(id)||allowed.has(execution?.name))return;
+  let mine=false;try{mine=typeof isOwnerSession==='function'&&isOwnerSession(id)===true;}catch{mine=false;}
+  if(mine)return;
   return '本轮仅允许受控项目助理和资料只读工具；不能运行代码、扫描文件或访问其他服务。';
  };
  return Object.freeze({active,guard});
@@ -49,10 +56,10 @@ export function createOwnerDotReadPolicy(getTasks){
 // Cordis publishes agent/created before its loop starts. Existing agents are
 // checked immediately before session.prompt; cold agents are checked in the
 // serial creation listener. A denied PTC transport is the fail-closed fallback.
-export function installOwnerDotReadGuard({ctx,getTasks}){
+export function installOwnerDotReadGuard({ctx,getTasks,isOwnerSession}){
  const tools=ctx?.get?.('tools');
  if(typeof tools?.guard!=='function'||typeof ctx?.on!=='function')throw new Error('owner_read_guard_unavailable');
- const policy=createOwnerDotReadPolicy(getTasks),overlays=new Map();let closed=false;
+ const policy=createOwnerDotReadPolicy(getTasks,{isOwnerSession}),overlays=new Map();let closed=false;
  const unguard=tools.guard(policy.guard);
  function refresh(agent){
   if(closed||!agent||typeof agent.id!=='string')return;

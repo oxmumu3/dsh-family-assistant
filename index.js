@@ -82,7 +82,7 @@ export function apply(ctx,config={}){
   let cachedCatalog=null,catalogAt=0;
   const catalog=async()=>{if(!cachedCatalog||Date.now()-catalogAt>60000){cachedCatalog=await modelCatalog(ctx);catalogAt=Date.now();}return cachedCatalog;};
   try{
-    ownerReadGuard=installOwnerDotReadGuard({ctx,getTasks:()=>runtime.ownerTasksForToolGuard()});
+    ownerReadGuard=installOwnerDotReadGuard({ctx,getTasks:()=>runtime.ownerTasksForToolGuard(),isOwnerSession:sessionId=>runtime.isOwnerSessionForToolGuard(sessionId)});
   }catch(error){
     // A Host without the internal tools guard cannot enforce the PTC read
     // policy. Keep the plugin usable instead of failing the whole mount; the

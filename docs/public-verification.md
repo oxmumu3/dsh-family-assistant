@@ -1,3 +1,11 @@
+## 0.2.0-preview.45 工具范围按「谁在说」而不是「走哪条通道」
+
+- 主人自己的微信会话不再被压成只读：`src/owner-dot-read-guard.mjs` 的 `guard` 先问 `isOwnerSession`，主人写进来的那一轮保留宿主正常工具集（含看板、文件、命令），家人会话保持原来的只读范围。
+- 依据由绑定关系决定：`src/runtime.mjs` 新增 `isOwnerSessionForToolGuard`，只有 `family_owner_` 会话、且该会话上的任务都属于已登记主人时才判为主人会话；出现任何属于别人的任务就判否，宁可收紧也不误放宽。
+- 原生执行器展示逻辑（`refresh` / `presentAs` / `NativeToolExecutor`）一行未改，只改了允许范围这一处判断。
+- 默认不传 `isOwnerSession` 时行为与旧版一致（收紧），所以旧调用方不会被动放大权限。
+- 测试：`test/owner-tool-scope.test.mjs` 4 项，已加入 CI 清单；全量 217 项通过。
+
 ## 0.2.0-preview.43 送不到就变成「你转一下」卡片 · 防诈骗固定清单
 
 - 家人那条超过 24 小时窗口没送到的消息，不再只是过期：给本人排一张可直接复制的卡片，面板里「复制这句话」后转给家人，转完点「已经转过了」。后端 `status()` 输出 `relay` 队列，新增 `dismiss_relay` 动作。

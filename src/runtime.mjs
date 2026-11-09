@@ -1573,5 +1573,16 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       await delay(20);
     }
   }
-  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge,ownerTasksForToolGuard:()=>gateway.snapshotForOwner()};
+  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge,ownerTasksForToolGuard:()=>gateway.snapshotForOwner(),
+    // Tool scope follows the writer, not the channel. family_owner_ sessions
+    // are created only from the Owner's own persisted conversation; if any
+    // task on such a session names another person we refuse to treat it as the
+    // Owner's, so a shared deployment can never widen a family member's scope.
+    isOwnerSessionForToolGuard:sessionId=>{
+      if(typeof sessionId!=='string'||!sessionId.startsWith('family_owner_'))return false;
+      const owner=store.snapshot().people.find(person=>person.role==='owner');
+      if(!owner)return false;
+      const related=gateway.snapshotForOwner().filter(task=>task?.sessionId===sessionId);
+      return related.every(task=>task?.personId===owner.id);
+    }};
 }
