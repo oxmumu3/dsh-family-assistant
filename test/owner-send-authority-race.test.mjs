@@ -20,7 +20,7 @@ test('a previously queued ordinary flush cannot send a native Owner message afte
   sent.push({personId:route.personId,text});return{status:'api_accepted'};
  }})});
  t.after(async()=>{releaseBlocker.resolve();await Promise.allSettled(pending);await runtime.close();rmSync(directory,{recursive:true,force:true});});
- for(const[id,role,label]of[['owner','owner','我'],['k','elder','K']]){runtime.store.addPerson({id,role,label,shareWithOwner:'none'});runtime.store.bindPerson(id,{accountId:'account-'+id,peerId:'peer-'+id});}
+ for(const[id,role,label]of[['owner','owner','我'],['k','elder','K']]){runtime.store.addPerson({id,role,label,shareWithOwner:'none'});runtime.store.bindPerson(id,{accountId:'account-'+id,peerId:'peer-'+id});runtime.store.setConnection(id,{lastInboundAt:instant});}
  await runtime.start();await runtime.receive('owner',{id:'current-owner-request',peerId:'peer-owner',text:'给K发一条消息：SYNTHETIC_AUTHORIZED_BODY'});await runtime.settled();assert.equal(intents.length,1);
 
  // Hold one flush inside transport, then queue an ordinary flush before the
