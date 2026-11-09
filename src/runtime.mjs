@@ -464,6 +464,18 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     }
     return latest;
   };
+  // A reminder the family member never received is the owner's problem to fix,
+  // so say it plainly instead of leaving a silent failed row in the ledger.
+  const tellOwnerUndelivered=(row,reason)=>{
+    const owner=store.snapshot().people.find(person=>person.role==='owner');
+    if(!owner||owner.id===row.personId)return;
+    const label=store.person(row.personId)?.label??'家人';
+    const body=row.text.replace(/^提醒：/,'').slice(0,160);
+    try{
+      store.enqueue({personId:owner.id,kind:'undeliverable_notice',sourceKey:`undeliverable:${row.id}`,
+        text:`给${label}的提醒没有送到：${body}\n原因：${reason}，已经过了还能补发的时间。\n你可以现在发一句；她下次来信时我也可以帮你补这一条。`});
+    }catch(error){lastError=safeError(error);}
+  };
   const reachOf=personId=>{
     const person=store.person(personId),live=channels.status(personId)??{};
     return reachFor({role:person?.role,connected:live.status==='connected',lastInboundAt:lastInboundOf(personId),now:now()});
@@ -512,6 +524,10 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         if(['important_event','important_clarify'].includes(row.kind)&&channels.status(personId)?.status!=='connected')continue;
         if(extraAuthorize&&extraAuthorize()!==true){store.transition(row.id,'cancelled','当前指令授权已改变，没有发送。');continue;}
         if(cancelUnauthorized(row))continue;
+        // Anything whose own window closed while waiting must not arrive late.
+        // Checked before the reach gate: a row held for a closed reach window
+        // would otherwise never reach its own expiry and linger forever.
+        if(row.expiresAt&&Date.parse(row.expiresAt)<=Date.parse(now())){syncCommand(store.transition(row.id,'expired','等待期间内容已过期，没有发送'));if(row.kind==='reminder')tellOwnerUndelivered(row,'等待期间对方一直没有来信');continue;}
         // Never attempt what the carrier will refuse: past the window the row
         // waits for their next message instead of failing (and being retried).
         const reach=reachOf(personId);
@@ -520,8 +536,6 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           if(row.kind==='diary_invitation')syncCommand(store.transition(row.id,'expired',reach.state==='offline'?'对方不在线，这次邀请没有发出':'对方超过一天没来信，这次邀请没有发出'));
           continue;
         }
-        // Anything whose own window closed while waiting must not arrive late.
-        if(row.expiresAt&&Date.parse(row.expiresAt)<=Date.parse(now())){syncCommand(store.transition(row.id,'expired','等待期间内容已过期，没有发送'));continue;}
         if(row.kind==='owner_brief'&&row.sourceKey.startsWith('owner-brief:')&&respond&&typeof store.updatePendingText==='function'){
           try{const brief=await preview({date:row.sourceKey.slice(-10)});const fresh=store.snapshot().outbox.find(x=>x.id===row.id);if(fresh?.status==='pending'&&current(row.route))store.updatePendingText(row.id,brief.text);}catch(error){lastError=safeError(error);}
         }

@@ -102,3 +102,35 @@ test('the window is measured from the durable message log, not only the binding 
   await runtime.action({action: 'send_message', personId: 'mom', text: '记得吃降压药'});
   assert.equal(sent.filter(row => row.personId === 'mom').length >= 1, true, 'and the message is actually sent');
 });
+
+test('a reminder that never reached the family member is reported to the owner', async t => {
+  const {createRuntime} = await import('../src/runtime.mjs');
+  const {mkdtempSync, rmSync} = await import('node:fs');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const directory = mkdtempSync(join(tmpdir(), 'reach-reminder-'));
+  const sent = [];
+  const runtime = createRuntime({directory, intervalMs: 600000,
+    channelFactory: () => ({status: () => ({status: 'connected'}), connect: async () => {}, disconnect: async () => {}, close: async () => {},
+      send: async (route, text) => { sent.push({personId: route.personId, text}); return {status: 'api_accepted'}; }})});
+  t.after(async () => { await runtime.close(); rmSync(directory, {recursive: true, force: true}); });
+  for (const [id, role, label] of [['owner', 'owner', '我'], ['mom', 'elder', '妈妈']]) {
+    runtime.store.addPerson({id, role, label});
+    runtime.store.bindPerson(id, {accountId: `bot-${id}`, peerId: `wx-${id}`});
+  }
+  runtime.store.configure({paused: false});
+  runtime.store.recordInbound('owner', {id: 'owner-now', peerId: 'wx-owner', text: '在吗', at: new Date().toISOString()});
+  // Mom has not written for three days: the carrier would refuse a proactive send.
+  runtime.store.recordInbound('mom', {id: 'mom-old', peerId: 'wx-mom', text: '都好', at: new Date(Date.now() - 3 * 86400000).toISOString()});
+  const row = runtime.store.enqueue({personId: 'mom', kind: 'reminder', sourceKey: 'reminder:r1:2026-11-08T09:00:00.000Z', text: '提醒：量血压', expiresAt: new Date(Date.now() - 60000).toISOString()});
+  await runtime.tick(); await runtime.settled(); await runtime.tick(); await runtime.settled();
+  const expired = runtime.store.snapshot().outbox.find(item => item.id === row.id);
+  assert.equal(expired.status, 'expired', 'it must not be delivered late');
+  assert.equal(sent.some(item => item.personId === 'mom'), false, 'nothing reached mom');
+  const notice = runtime.store.snapshot().outbox.find(item => item.kind === 'undeliverable_notice');
+  assert.ok(notice, 'the owner gets a row explaining the failure');
+  await runtime.tick(); await runtime.settled();
+  const told = sent.find(item => item.personId === 'owner' && item.text.includes('量血压'));
+  assert.ok(told, 'and the owner is actually told');
+  assert.match(told.text, /没有送到/);
+});
