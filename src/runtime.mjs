@@ -68,7 +68,7 @@ const inputKeys={
   update_person:['personId','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
   configure:['paused','ownerBriefEnabled','ownerBriefTime','timeZone','provider','model'],
   login:['personId'],verify_login:['personId','code'],connect:['personId'],disconnect:['personId'],
-  add_reminder:['id','personId','text','dueAt','repeat','time','timeZone','purpose'],cancel_reminder:['personId','reminderId'],
+  add_reminder:['id','personId','text','dueAt','repeat','time','timeZone','purpose'],cancel_reminder:['personId','reminderId'],dismiss_relay:['relayId'],
   preview_brief:[],send_brief:[],send_message:['personId','text'],start:[],pause:[],
   owner_chat:['text','contextId','requestId','profileIntake','profileEdit','draftOnly','workspaceId','taskId'],confirm_card:['cardId','revision'],cancel_card:['cardId','actionId'],
   retry_action:['cardId','actionId'],check_action:['cardId','actionId'],undo_profile:['cardId'],
@@ -365,7 +365,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const deliveries=command.action==='send_daily'?state.outbox.filter(row=>row.id===command.resultId):state.outbox.filter(row=>row.sourceKey.startsWith(`reminder:${command.resultId}:`));
       const reminder=command.action==='remind'?state.reminders.find(row=>row.id===command.resultId):null;
       return{...command,...(reminder?.status==='cancelled'?{status:'cancelled',detail:'操作已取消'}:reminder?.status==='expired'?{status:'failed',detail:'执行未完成'}:{}),...(deliveries.length?{deliveryStatus:deliveries.at(-1).status}:{} )};
-    }),lastBrief,lastError,attention:attention.snapshot(),runtimeWork:{attention:attention.snapshot().active,responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size,ownerObservers:ownerObservers.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
+    }),relay:(()=>{const rows=state.outbox.filter(row=>row.kind==='undeliverable_notice'&&row.status==='pending'&&row.personId===state.people.find(p=>p.role==='owner')?.id);
+      return rows.map(row=>{const source=state.outbox.find(item=>row.sourceKey===`undeliverable:${item.id}`);return{id:row.id,at:row.createdAt,text:row.text,personId:source?.personId??null,personLabel:source?.personId?store.person(source.personId)?.label??null:null};});})(),lastBrief,lastError,attention:attention.snapshot(),runtimeWork:{attention:attention.snapshot().active,responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size,ownerObservers:ownerObservers.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
     result.ownerConversation=ownerConversationView();
     if(personId){const person=store.person(personId);if(!person)throw new Error('没有找到这位家人。');result.selectedPersonId=personId;result.messages=store.messages(personId,{limit:100});}
     return result;
@@ -470,10 +471,11 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const owner=store.snapshot().people.find(person=>person.role==='owner');
     if(!owner||owner.id===row.personId)return;
     const label=store.person(row.personId)?.label??'家人';
-    const body=row.text.replace(/^提醒：/,'').slice(0,160);
+    const body=row.text.replace(/^提醒：/,'').replace(/^家庭助手代[^\n]*?转告：\s*/,'').trim().slice(0,180);
+    const what=row.kind==='reminder'?'提醒':'这句话';
     try{
       store.enqueue({personId:owner.id,kind:'undeliverable_notice',sourceKey:`undeliverable:${row.id}`,
-        text:`给${label}的提醒没有送到：${body}\n原因：${reason}，已经过了还能补发的时间。\n你可以现在发一句；她下次来信时我也可以帮你补这一条。`});
+        text:`给${label}的${what}没送到（${reason}）：\n「${body}」\n把引号里这句直接转给她就行。`});
     }catch(error){lastError=safeError(error);}
   };
   const reachOf=personId=>{
@@ -527,7 +529,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         // Anything whose own window closed while waiting must not arrive late.
         // Checked before the reach gate: a row held for a closed reach window
         // would otherwise never reach its own expiry and linger forever.
-        if(row.expiresAt&&Date.parse(row.expiresAt)<=Date.parse(now())){syncCommand(store.transition(row.id,'expired','等待期间内容已过期，没有发送'));if(row.kind==='reminder')tellOwnerUndelivered(row,'等待期间对方一直没有来信');continue;}
+        if(row.expiresAt&&Date.parse(row.expiresAt)<=Date.parse(now())){syncCommand(store.transition(row.id,'expired','等待期间内容已过期，没有发送'));if(row.kind!=='diary_invitation')tellOwnerUndelivered(row,'等待期间对方一直没有来信');continue;}
         // Never attempt what the carrier will refuse: past the window the row
         // waits for their next message instead of failing (and being retried).
         const reach=reachOf(personId);
@@ -1466,6 +1468,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       case'disconnect':await channels.disconnect(args.personId);break;
       case'add_reminder':store.addReminder(args);break;
       case'cancel_reminder':store.cancelReminder(args.personId,args.reminderId);break;
+      case'dismiss_relay':{const row=store.snapshot().outbox.find(item=>item.id===args.relayId);if(!row||row.kind!=='undeliverable_notice')throw new Error('这条已经不在待转告里了。');if(row.status==='pending')store.transition(row.id,'cancelled','本人已处理');return status();}
       case'preview_brief':await preview();break;
       case'send_brief':{if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)throw new Error('请先添加简报接收人。');const route=store.route(owner.id);const brief=await preview();if(!current(route))throw new Error('简报接收人的绑定已改变或服务已暂停，未发送。');store.enqueue({personId:brief.personId,text:brief.text,kind:'owner_brief',sourceKey:`manual-brief:${randomUUID()}`});await flush(brief.personId);break;}
       case'send_message':if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');store.enqueue({personId:args.personId,text:args.text,kind:'manual',sourceKey:`manual:${randomUUID()}`});await flush(args.personId);break;

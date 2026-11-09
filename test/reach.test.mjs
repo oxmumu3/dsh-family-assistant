@@ -132,5 +132,37 @@ test('a reminder that never reached the family member is reported to the owner',
   await runtime.tick(); await runtime.settled();
   const told = sent.find(item => item.personId === 'owner' && item.text.includes('量血压'));
   assert.ok(told, 'and the owner is actually told');
-  assert.match(told.text, /没有送到/);
+  assert.match(told.text, /没送到/);
+  assert.match(told.text, /把引号里这句直接转给她就行/);
+});
+
+test('an undelivered message becomes a copy-ready card the owner can forward', async t => {
+  const {createRuntime} = await import('../src/runtime.mjs');
+  const {mkdtempSync, rmSync} = await import('node:fs');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const directory = mkdtempSync(join(tmpdir(), 'reach-relay-'));
+  const sent = [];
+  const runtime = createRuntime({directory, intervalMs: 600000,
+    channelFactory: () => ({status: () => ({status: 'connected'}), connect: async () => {}, disconnect: async () => {}, close: async () => {},
+      send: async (route, text) => { sent.push({personId: route.personId, text}); return {status: 'api_accepted'}; }})});
+  t.after(async () => { await runtime.close(); rmSync(directory, {recursive: true, force: true}); });
+  for (const [id, role, label] of [['owner', 'owner', '我'], ['mom', 'elder', '妈妈']]) {
+    runtime.store.addPerson({id, role, label});
+    runtime.store.bindPerson(id, {accountId: `bot-${id}`, peerId: `wx-${id}`});
+  }
+  runtime.store.configure({paused: false});
+  runtime.store.recordInbound('owner', {id: 'owner-now', peerId: 'wx-owner', text: '在吗', at: new Date().toISOString()});
+  runtime.store.recordInbound('mom', {id: 'mom-old', peerId: 'wx-mom', text: '都好', at: new Date(Date.now() - 5 * 86400000).toISOString()});
+  const row = runtime.store.enqueue({personId: 'mom', kind: 'owner_message', sourceKey: 'owner-msg-relay-1', text: '家庭助手代我转告：\n明天降温，记得加衣服', expiresAt: new Date(Date.now() - 60000).toISOString()});
+  await runtime.tick(); await runtime.settled();
+  assert.equal(runtime.store.snapshot().outbox.find(item => item.id === row.id).status, 'expired');
+  const relay = runtime.status().relay;
+  assert.equal(relay.length, 1, 'the owner sees one card to forward');
+  assert.match(relay[0].text, /明天降温，记得加衣服/, 'the card carries the original words');
+  assert.match(relay[0].text, /直接转给她/, 'and says what to do with it');
+  assert.equal(relay[0].personLabel, '妈妈');
+  await runtime.action({action: 'dismiss_relay', relayId: relay[0].id});
+  assert.equal(runtime.status().relay.length, 0, 'and it can be cleared once handled');
+  assert.equal(sent.some(item => item.personId === 'mom'), false, 'mom still received nothing');
 });

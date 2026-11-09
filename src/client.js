@@ -617,6 +617,8 @@ window.__ModuleLoader__.load({
         const [handoff, setHandoff] = React.useState('');
         const [handoffNote, setHandoffNote] = React.useState('');
         const [requests, setRequests] = React.useState([]);
+        const [relay, setRelay] = React.useState([]);
+        const [relayNote, setRelayNote] = React.useState('');
         const [bandNote, setBandNote] = React.useState('');
         React.useEffect(() => {
           let active = true;
@@ -696,6 +698,7 @@ window.__ModuleLoader__.load({
               setHealth(state && state.health ? state.health : null);
               setHealthError('');
               setRequests(openRequestsOf(state));
+              setRelay(Array.isArray(state?.relay) ? state.relay : []);
             })
             .catch(() => { if (active) setHealthError('暂时读不到家庭状态'); });
           load();
@@ -890,6 +893,33 @@ window.__ModuleLoader__.load({
                   requests.at(-1).text ? `：${requests.at(-1).text}` : '',
                   requests.length > 1 ? `（共 ${requests.length} 件）` : ''),
                 React.createElement('button', { type: 'button', onClick: () => openInWorkbench(api => api?.openRequest?.(requests.at(-1).id)), style: { ...chipStyle, borderColor: accent, color: accent, fontWeight: 600 } }, '去回应'))
+              : null,
+            relay.length
+              ? React.createElement('div', { 'data-family-relay': true, role: 'status', style: { display: 'grid', gap: '8px' } },
+                React.createElement('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary, inherit)' } }, '这些没送到，你直接转一下就行'),
+                ...relay.slice(0, 3).map(item => {
+                  const quote = (/「([\s\S]*?)」/.exec(item.text) || [null, item.text])[1];
+                  return React.createElement('div', { key: item.id, style: { display: 'grid', gap: '6px', padding: '10px 12px 10px 14px', borderRadius: '10px', borderLeft: `3px solid ${accent}`, background: 'var(--dsw-alias-bg-l1, rgba(127,127,127,0.06))' } },
+                    React.createElement('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, inherit)' } }, (item.personLabel ?? '家人') + ' · 没送到，你转一下'),
+                    React.createElement('div', { style: { fontFamily: '"Songti SC","STSong","Noto Serif SC",serif', fontSize: '15px', lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, quote),
+                    React.createElement('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+                      React.createElement('button', { type: 'button', style: chipStyle, onClick: () => {
+                        const done = () => setRelayNote('已复制这句话，粘贴到微信发给她就行。');
+                        try {
+                          if (navigator.clipboard?.writeText) navigator.clipboard.writeText(quote).then(done, () => setRelayNote('复制没成功，可以手动选中这句话。'));
+                          else setRelayNote('这台设备不让自动复制，可以手动选中这句话。');
+                        } catch { setRelayNote('复制没成功，可以手动选中这句话。'); }
+                      } }, '复制这句话'),
+                      React.createElement('button', { type: 'button', style: chipStyle, onClick: () => {
+                        setRelay(rows => rows.filter(row => row.id !== item.id));
+                        Promise.resolve().then(() => globalThis.fetch('/api/family/control', {
+                          method: 'POST', credentials: 'same-origin',
+                          headers: { 'Content-Type': 'application/json', 'X-Family-Action': '1' },
+                          body: JSON.stringify({ action: 'dismiss_relay', relayId: item.id }),
+                        })).catch(() => setBandNote('没能同步这次处理，刷新后会再出现。'));
+                      } }, '已经转过了')));
+                }),
+                relayNote ? React.createElement('div', { role: 'status', style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, inherit)' } }, relayNote) : null)
               : null,
             React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' } },
               React.createElement('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary, inherit)', marginRight: '2px' } }, '可以这样开始'),
