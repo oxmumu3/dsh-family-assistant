@@ -848,9 +848,17 @@ window.__ModuleLoader__.load({
         };
         const dark = page?.theme?.dark === true;
         const accent = dark ? '#8fbfa9' : '#2f5d50';
-        const tone = row => !row.connected ? ['离线', 'var(--dsw-alias-state-idle-primary, #9a9a9a)']
-          : row.pending || row.uncertain24h ? ['有待发', 'var(--dsw-alias-state-warn-primary, #c98a1a)']
-            : ['在线', 'var(--dsw-alias-state-success-primary, #2f9e6b)'];
+        // "Connected" is not "reachable": the carrier only delivers within 24h
+        // of that person's own last message, so the chip says which it is.
+        const hoursLeft = ms => Math.max(1, Math.floor(ms / 3600000));
+        const tone = row => {
+          const reach = row.reach ?? null;
+          if (!row.connected || reach?.state === 'offline') return ['离线，暂时收不到', 'var(--dsw-alias-state-idle-primary, #9a9a9a)'];
+          if (reach?.state === 'closed') return ['要等对方先说一句', 'var(--dsw-alias-state-warn-primary, #c98a1a)'];
+          if (reach?.state === 'open') return [`现在能收到·还剩 ${hoursLeft(reach.remainingMs)} 小时`, 'var(--dsw-alias-state-success-primary, #2f9e6b)'];
+          if (row.pending || row.uncertain24h) return ['有待发', 'var(--dsw-alias-state-warn-primary, #c98a1a)'];
+          return ['在线', 'var(--dsw-alias-state-success-primary, #2f9e6b)'];
+        };
         const relatives = rows.filter(row => row.role !== 'owner');
         const nameOf = id => relatives.find(row => row.personId === id)?.label ?? '家人';
         const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12.5px', padding: '4px 10px', borderRadius: '999px', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,0.25))', background: 'transparent', color: 'inherit', cursor: 'pointer' };

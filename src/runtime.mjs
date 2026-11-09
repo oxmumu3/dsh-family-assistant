@@ -17,6 +17,7 @@ import {buildHealth} from './health.mjs';
 import {isMemberNative} from './member-native-flags.mjs';
 import {planMemberMigration} from './member-native-migration.mjs';
 import {createConsoleConversationStore} from './owner-console-conversation.mjs';
+import {reachFor,reachLabel,canSendNow} from './reach.mjs';
 import {buildOwnerTurn} from './owner-prompt.mjs';
 import {createFamilyAccess} from './family-access.mjs';
 import {createHarnessGateway} from './harness-gateway.mjs';
@@ -352,10 +353,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     // This surface is authenticated as Owner. Brief sharing is a separate
     // policy and must not hide the Owner's own saved management records.
     const visible=new Set(state.people.map(p=>p.id));
-    const result={version:1,config:state.config,health:buildHealth({state,channelOf:id=>channels.status(id),now}),// 只读影子盘点：报告家人侧迁移是否被未结清请求挡住，不改变任何行为。
+    const health=buildHealth({state,channelOf:id=>channels.status(id),now});
+    // The panel asks "can I still reach them", not "is the socket up".
+    health.people=health.people.map(row=>({...row,reach:reachOf(row.personId)}));
+    const result={version:1,config:state.config,health,// 只读影子盘点：报告家人侧迁移是否被未结清请求挡住，不改变任何行为。
     migration:(()=>{try{return planMemberMigration({directory,people:state.people,bindings:state.bindings});}catch{return null;}})(),people:state.people.map(person=>{
       const persisted=store.binding(person.id);const live=channels.status(person.id)??{};
-      return{...person,binding:{...live,generation:persisted?.generation??null,status:live.status??persisted?.status??'disconnected',connected:live.status==='connected',lastError:live.lastError??persisted?.lastError??null}};
+      const reach=reachOf(person.id);
+      return{...person,reach:{state:reach.state,remainingMs:reach.remainingMs,label:reachLabel(reach)},binding:{...live,generation:persisted?.generation??null,status:live.status??persisted?.status??'disconnected',connected:live.status==='connected',lastError:live.lastError??persisted?.lastError??null}};
     }),reminders:state.reminders.map(row=>visible.has(row.personId)?row:{...row,text:'内容未授权展示'}),outbox:state.outbox.map(({route,authorizationRoute,text,...row})=>row),ownerCommands:store.ownerCommands().map(({requestRoute,...command})=>{
       const deliveries=command.action==='send_daily'?state.outbox.filter(row=>row.id===command.resultId):state.outbox.filter(row=>row.sourceKey.startsWith(`reminder:${command.resultId}:`));
       const reminder=command.action==='remind'?state.reminders.find(row=>row.id===command.resultId):null;
@@ -443,6 +448,12 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const reminder=store.snapshot().reminders.find(r=>row.sourceKey.startsWith('reminder:'+r.id+':'));if(!reminder||reminder.personId!==row.personId||!['active','completed'].includes(reminder.status)||reminder.purpose!=='diary_invitation'||!recordMatchesBinding(reminder,store.binding(row.personId)))return false;
     const occurrence=row.sourceKey.slice(('reminder:'+reminder.id+':').length),date=localDate(occurrence,reminder.timeZone);return date===localDate(now(),reminder.timeZone)&&!hasDiary(row.personId,date);
   }
+  // Whether this person can still be reached right now. The carrier only
+  // delivers within 24 hours of that person's own last message.
+  const reachOf=personId=>{
+    const person=store.person(personId),binding=store.binding(personId),live=channels.status(personId)??{};
+    return reachFor({role:person?.role,connected:live.status==='connected',lastInboundAt:binding?.lastInboundAt??null,now:now()});
+  };
   const authorized=row=>{
     if(outboxAuthorities.has(row.id)&&outboxAuthorities.get(row.id)()!==true||row.sourceKey.includes(':native-owner-')&&!outboxAuthorities.has(row.id))return false;
     if(row.sourceKey.startsWith('family-dot:')&&!outboxAuthorities.has(row.id))return false;
@@ -487,6 +498,16 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         if(['important_event','important_clarify'].includes(row.kind)&&channels.status(personId)?.status!=='connected')continue;
         if(extraAuthorize&&extraAuthorize()!==true){store.transition(row.id,'cancelled','当前指令授权已改变，没有发送。');continue;}
         if(cancelUnauthorized(row))continue;
+        // Never attempt what the carrier will refuse: past the window the row
+        // waits for their next message instead of failing (and being retried).
+        const reach=reachOf(personId);
+        if(!canSendNow(reach)){
+          // A dated invitation is worthless once its day has gone.
+          if(row.kind==='diary_invitation')syncCommand(store.transition(row.id,'expired',reach.state==='offline'?'对方不在线，这次邀请没有发出':'对方超过一天没来信，这次邀请没有发出'));
+          continue;
+        }
+        // Anything whose own window closed while waiting must not arrive late.
+        if(row.expiresAt&&Date.parse(row.expiresAt)<=Date.parse(now())){syncCommand(store.transition(row.id,'expired','等待期间内容已过期，没有发送'));continue;}
         if(row.kind==='owner_brief'&&row.sourceKey.startsWith('owner-brief:')&&respond&&typeof store.updatePendingText==='function'){
           try{const brief=await preview({date:row.sourceKey.slice(-10)});const fresh=store.snapshot().outbox.find(x=>x.id===row.id);if(fresh?.status==='pending'&&current(row.route))store.updatePendingText(row.id,brief.text);}catch(error){lastError=safeError(error);}
         }

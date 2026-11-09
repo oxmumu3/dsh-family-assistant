@@ -981,7 +981,11 @@
           : '';
         chip.textContent = [
           row.role === 'owner' ? '我' : row.label,
-          row.connected ? '在线' : '离线',
+          // Connected is not reachable: after 24h without their own message the
+          // carrier refuses, so say which of the two it is.
+          row.reach?.state === 'open' ? `现在能收到·还剩 ${Math.max(1, Math.floor((row.reach.remainingMs || 0) / 3600000))} 小时`
+            : row.reach?.state === 'closed' ? '要等对方先说一句'
+              : row.connected ? '在线' : '离线，暂时收不到',
           row.pending ? `待发 ${row.pending}` : '',
           row.uncertain24h ? `待核对 ${row.uncertain24h}` : '',
           lastText,

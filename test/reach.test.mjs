@@ -1,0 +1,77 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {REACH_WINDOW_MS, reachFor, reachLabel, canSendNow} from '../src/reach.mjs';
+
+const now = '2026-11-09T04:00:00.000Z';
+const ago = ms => new Date(Date.parse(now) - ms).toISOString();
+
+test('the Owner has no window of their own on this panel', () => {
+  const reach = reachFor({role: 'owner', connected: true, lastInboundAt: ago(10 * 24 * 60 * 60 * 1000), now});
+  assert.equal(reach.state, 'self');
+  assert.equal(canSendNow(reach), true);
+});
+
+test('a family member who wrote recently can still receive', () => {
+  const reach = reachFor({role: 'elder', connected: true, lastInboundAt: ago(3 * 60 * 60 * 1000), now});
+  assert.equal(reach.state, 'open');
+  assert.equal(canSendNow(reach), true);
+  assert.match(reachLabel(reach), /现在能收到（还剩 21 小时）/);
+});
+
+test('the window closes exactly 24 hours after their last message', () => {
+  const inside = reachFor({role: 'elder', connected: true, lastInboundAt: ago(REACH_WINDOW_MS - 60_000), now});
+  const past = reachFor({role: 'elder', connected: true, lastInboundAt: ago(REACH_WINDOW_MS + 60_000), now});
+  assert.equal(inside.state, 'open');
+  assert.equal(past.state, 'closed');
+  assert.equal(canSendNow(past), false);
+  assert.equal(reachLabel(past), '要等对方先说一句');
+});
+
+test('a disconnected member is never claimed as reachable', () => {
+  for (const lastInboundAt of [ago(60_000), ago(30 * 24 * 60 * 60 * 1000), null]) {
+    const reach = reachFor({role: 'elder', connected: false, lastInboundAt, now});
+    assert.equal(reach.state, 'offline');
+    assert.equal(canSendNow(reach), false);
+  }
+});
+
+test('an unknown timestamp or clock is treated as closed, never as open', () => {
+  assert.equal(reachFor({role: 'elder', connected: true, lastInboundAt: null, now}).state, 'closed');
+  assert.equal(reachFor({role: 'elder', connected: true, lastInboundAt: 'not-a-date', now}).state, 'closed');
+  assert.equal(reachFor({role: 'elder', connected: true, lastInboundAt: ago(60_000), now: 'not-a-date'}).state, 'closed');
+  assert.equal(canSendNow(undefined), false);
+  assert.equal(reachLabel(null), '未知');
+});
+
+test('the runtime holds a message instead of sending outside the window', async t => {
+  const {createRuntime} = await import('../src/runtime.mjs');
+  const {mkdtempSync, rmSync} = await import('node:fs');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const directory = mkdtempSync(join(tmpdir(), 'reach-runtime-'));
+  const sent = [];
+  const runtime = createRuntime({directory, intervalMs: 600000,
+    channelFactory: () => ({status: () => ({status: 'connected'}), connect: async () => {}, disconnect: async () => {}, close: async () => {},
+      send: async (route, text) => { sent.push({personId: route.personId, text}); return {status: 'api_accepted'}; }})});
+  t.after(async () => { await runtime.close(); rmSync(directory, {recursive: true, force: true}); });
+  for (const [id, role] of [['owner', 'owner'], ['mom', 'elder']]) {
+    runtime.store.addPerson({id, role, label: id});
+    runtime.store.bindPerson(id, {accountId: `bot-${id}`, peerId: `wx-${id}`});
+  }
+  runtime.store.configure({paused: false});
+  // Mom last wrote three days ago: past the window the carrier accepts.
+  runtime.store.setConnection('mom', {lastInboundAt: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString()});
+  await runtime.action({action: 'send_message', personId: 'mom', text: '记得吃降压药'});
+  const held = runtime.store.snapshot().outbox.filter(row => row.personId === 'mom').at(-1);
+  assert.equal(held.status, 'pending', 'the message waits instead of failing');
+  assert.equal(sent.length, 0, 'nothing was handed to the carrier');
+  const reach = runtime.status().health.people.find(row => row.personId === 'mom').reach;
+  assert.equal(reach.state, 'closed');
+  assert.equal(reachLabel(reach), '要等对方先说一句');
+  // The Owner can always be reached through this panel.
+  assert.equal(runtime.status().people.find(row => row.id === 'owner').reach.state, 'self');
+  // As soon as she writes, the held message goes out.
+  runtime.store.setConnection('mom', {lastInboundAt: new Date().toISOString()});
+  await runtime.action({action: 'send_message', personId: 'mom', text: '第二条'});
+  assert.ok(sent.length >= 1, 'delivery resumes inside the window');
+});

@@ -20,6 +20,8 @@ async function fixture(t,respond=async({person,text})=>({reply:`${person.label}�
   for(const [id,role,label] of [['owner','owner','我'],['dad','elder','爸爸'],['mom','elder','妈妈']]){
     runtime.store.addPerson({id,role,label,shareWithOwner:'full'});
     runtime.store.bindPerson(id,{accountId:`bot-${id}`,peerId:`wx-${id}`});
+    // A live binding that just received a message: inside the 24h window.
+    runtime.store.setConnection(id,{lastInboundAt:new Date().toISOString()});
   }
   await runtime.start();return{runtime,sent,directory};
 }
