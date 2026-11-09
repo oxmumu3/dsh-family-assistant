@@ -18,6 +18,7 @@ import {isMemberNative} from './member-native-flags.mjs';
 import {planMemberMigration} from './member-native-migration.mjs';
 import {createConsoleConversationStore} from './owner-console-conversation.mjs';
 import {reachFor,reachLabel,canSendNow} from './reach.mjs';
+import {safetyCard} from './safety.mjs';
 import {buildOwnerTurn} from './owner-prompt.mjs';
 import {createFamilyAccess} from './family-access.mjs';
 import {createHarnessGateway} from './harness-gateway.mjs';
@@ -641,6 +642,10 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     ticking=(async()=>{if(store.snapshot().config.paused)return;
       for(const person of store.snapshot().people.filter(person=>person.role==='elder')){
         const welcome=onboarding.admit(person.id);
+        // The welcome is proactive, so it can only go out while their own last
+        // message is still fresh. Otherwise it waits for their first sentence
+        // instead of failing twice and never arriving.
+        if(welcome&&current(welcome.route)&&!canSendNow(reachOf(person.id)))continue;
         if(welcome&&current(welcome.route)){
           const {route,...payload}=welcome;
           const row=store.enqueue({...payload,expiresAt:new Date(Date.parse(now())+24*3600000).toISOString()});
@@ -1273,6 +1278,15 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
       if(importantAdmission?.id)void attention.run(importantAdmission.id);
       if(accepted.accepted)await deliverDeferredNotice(personId,route,message);
+      if(accepted.accepted&&person.role==='elder'){
+        const safety=safetyCard(text);
+        if(safety){
+          if(!current(route))return{accepted:true,archived:true};
+          store.enqueue({personId,text:safety.reply,kind:'safety_card',sourceKey:'safety:'+sourceRequest(route,message)});
+          await flush(personId);
+          return{accepted:true,safety:safety.category};
+        }
+      }
       if(diaryOptOut.length){
         if(!current(route))return{accepted:true,archived:true};
         for(const row of diaryOptOut)if(store.reminders(personId).some(value=>value.id===row.id&&value.status==='active'&&recordMatchesBinding(value,store.binding(personId))))store.cancelReminder(personId,row.id);
