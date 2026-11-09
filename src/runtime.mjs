@@ -355,7 +355,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const visible=new Set(state.people.map(p=>p.id));
     const health=buildHealth({state,channelOf:id=>channels.status(id),now});
     // The panel asks "can I still reach them", not "is the socket up".
-    health.people=health.people.map(row=>({...row,reach:reachOf(row.personId)}));
+    health.people=health.people.map(row=>({...row,lastInboundAt:lastInboundOf(row.personId)??row.lastInboundAt??null,reach:reachOf(row.personId)}));
     const result={version:1,config:state.config,health,// 只读影子盘点：报告家人侧迁移是否被未结清请求挡住，不改变任何行为。
     migration:(()=>{try{return planMemberMigration({directory,people:state.people,bindings:state.bindings});}catch{return null;}})(),people:state.people.map(person=>{
       const persisted=store.binding(person.id);const live=channels.status(person.id)??{};
@@ -450,9 +450,23 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   }
   // Whether this person can still be reached right now. The carrier only
   // delivers within 24 hours of that person's own last message.
+  // The binding's own field is not written on inbound in this build, so the
+  // durable message log is the source of truth for "when did they last write".
+  const lastInboundOf=personId=>{
+    const binding=store.binding(personId);
+    if(!binding)return null;
+    let latest=binding.lastInboundAt??null;
+    for(const message of store.messages(personId)){
+      if(message.dir!=='in'||!recordMatchesBinding(message,binding))continue;
+      const at=Date.parse(message.at??'');
+      if(!Number.isFinite(at))continue;
+      if(!latest||at>Date.parse(latest))latest=message.at;
+    }
+    return latest;
+  };
   const reachOf=personId=>{
-    const person=store.person(personId),binding=store.binding(personId),live=channels.status(personId)??{};
-    return reachFor({role:person?.role,connected:live.status==='connected',lastInboundAt:binding?.lastInboundAt??null,now:now()});
+    const person=store.person(personId),live=channels.status(personId)??{};
+    return reachFor({role:person?.role,connected:live.status==='connected',lastInboundAt:lastInboundOf(personId),now:now()});
   };
   const authorized=row=>{
     if(outboxAuthorities.has(row.id)&&outboxAuthorities.get(row.id)()!==true||row.sourceKey.includes(':native-owner-')&&!outboxAuthorities.has(row.id))return false;

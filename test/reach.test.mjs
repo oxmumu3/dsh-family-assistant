@@ -75,3 +75,30 @@ test('the runtime holds a message instead of sending outside the window', async 
   await runtime.action({action: 'send_message', personId: 'mom', text: '第二条'});
   assert.ok(sent.length >= 1, 'delivery resumes inside the window');
 });
+
+test('the window is measured from the durable message log, not only the binding field', async t => {
+  const {createRuntime} = await import('../src/runtime.mjs');
+  const {mkdtempSync, rmSync} = await import('node:fs');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const directory = mkdtempSync(join(tmpdir(), 'reach-log-'));
+  const sent = [];
+  const runtime = createRuntime({directory, intervalMs: 600000,
+    channelFactory: () => ({status: () => ({status: 'connected'}), connect: async () => {}, disconnect: async () => {}, close: async () => {},
+      send: async (route, text) => { sent.push({personId: route.personId, text}); return {status: 'api_accepted'}; }})});
+  t.after(async () => { await runtime.close(); rmSync(directory, {recursive: true, force: true}); });
+  for (const [id, role] of [['owner', 'owner'], ['mom', 'elder']]) {
+    runtime.store.addPerson({id, role, label: id});
+    runtime.store.bindPerson(id, {accountId: `bot-${id}`, peerId: `wx-${id}`});
+  }
+  runtime.store.configure({paused: false});
+  // The binding carries no lastInboundAt here: only the message log knows.
+  const binding = runtime.store.binding('mom');
+  assert.equal(binding.lastInboundAt, undefined);
+  runtime.store.recordInbound('mom', {id: 'wrote-just-now', peerId: binding.peerId, text: '今天挺好的', at: new Date().toISOString()});
+  await runtime.start();
+  const health = runtime.status().health.people.find(row => row.personId === 'mom');
+  assert.equal(health.reach.state, 'open', 'a recent message in the log opens the window even without the binding field');
+  await runtime.action({action: 'send_message', personId: 'mom', text: '记得吃降压药'});
+  assert.equal(sent.filter(row => row.personId === 'mom').length >= 1, true, 'and the message is actually sent');
+});
