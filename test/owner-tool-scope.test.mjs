@@ -1,44 +1,71 @@
+// The Owner's own sessions are ordinary Host sessions. This plugin used to
+// install a tools guard that reduced a family_owner_ session to a short
+// allowlist and forced the native tool presentation; both are gone. Family
+// members never run in a family_owner_ session (see family-project-executor
+// and owner-agent-host tests), so nothing here loosens them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, rmSync} from 'node:fs';
+import {existsSync, mkdtempSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
-import {createOwnerDotReadPolicy} from '../src/owner-dot-read-guard.mjs';
-import {createRuntime} from '../src/runtime.mjs';
+import {dirname, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 
-const sensitiveTask = sessionId => ({sessionId, origin: 'wechat', state: 'running', prompt: '帮我看一下这个项目的代码'});
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('the bound Owner keeps the normal toolset on a sensitive project turn', () => {
-  const tasks = [sensitiveTask('family_owner_abc')];
-  const policy = createOwnerDotReadPolicy(() => tasks, {isOwnerSession: id => id === 'family_owner_abc'});
-  assert.equal(policy.active('family_owner_abc'), true, 'the turn is still scoped for native presentation');
-  for (const name of ['taskboard_create', 'taskboard_list', 'read', 'bash', 'family_assistant']) {
-    assert.equal(policy.guard({agent: {id: 'family_owner_abc'}, name}), undefined, `${name} must stay available for the Owner`);
+function host() {
+  const calls = {guard: 0, registered: [], presentAs: 0, setExecutor: 0};
+  const listeners = new Map();
+  const services = {
+    connection: {fetch: {register() { return async () => {}; }}},
+    tools: {register(tool) { calls.registered.push('global:' + tool.name); return () => {}; }, guard() { calls.guard++; return () => {}; }},
+    llm: {listProviders: () => []},
+    agents: {list: () => [], get: () => undefined},
+  };
+  const ctx = {
+    get: name => services[name], tools: services.tools, effect: execute => execute(),
+    on(name, listener) { listeners.set(name, [...(listeners.get(name) ?? []), listener]); return () => {}; },
+  };
+  const emit = (name, event) => { for (const listener of listeners.get(name) ?? []) listener(event); };
+  const agent = id => ({id, ctx: {get: name => name === 'tools' ? {
+    register(tool) { calls.registered.push(id + ':' + tool.name); return () => {}; },
+    presentAs() { calls.presentAs++; return () => {}; },
+    setExecutor() { calls.setExecutor++; return () => {}; },
+  } : undefined}});
+  return {ctx, emit, agent, calls};
+}
+
+test('the plugin installs no tool guard and leaves an Owner session on the Host default executor', async t => {
+  const {apply} = await import('../index.js');
+  const directory = mkdtempSync(join(tmpdir(), 'family-owner-full-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const {ctx, emit, agent, calls} = host();
+  const dispose = await apply(ctx, {storageDir: directory}); t.after(dispose);
+  emit('agent/created', {agent: agent('family_owner_abc')});
+  emit('agent/created', {agent: agent('unrelated_session')});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.guard, 0, 'no tools.guard may be installed for any session');
+  assert.equal(calls.presentAs, 0, 'the Owner session keeps the Host tool presentation');
+  assert.equal(calls.setExecutor, 0, 'the Owner session keeps the Host tool executor');
+  assert.deepEqual(calls.registered, ['family_owner_abc:family_assistant', 'family_owner_abc:family_owner_projects'], 'family tools are added to the Owner session only');
+});
+
+test('the plugin still mounts on a Host that offers no tools.guard', async t => {
+  const {apply} = await import('../index.js');
+  const directory = mkdtempSync(join(tmpdir(), 'family-owner-noguard-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const {ctx, emit, agent, calls} = host();
+  delete ctx.get('tools').guard;
+  const dispose = await apply(ctx, {storageDir: directory}); t.after(dispose);
+  emit('agent/created', {agent: agent('family_owner_abc')});
+  assert.deepEqual(calls.registered, ['family_owner_abc:family_assistant', 'family_owner_abc:family_owner_projects']);
+});
+
+test('the removed guard cannot return unnoticed', () => {
+  assert.equal(existsSync(join(root, 'src/owner-dot-read-guard.mjs')), false);
+  const entry = readFileSync(join(root, 'index.js'), 'utf8');
+  for (const trace of ['tools.guard', 'owner_read_guard', 'presentAs', 'setExecutor', '本轮仅允许']) {
+    assert.equal(entry.includes(trace), false, `index.js must not contain ${trace}`);
   }
-});
-
-test('a session that is not the bound Owner keeps the read-only scope', () => {
-  const tasks = [sensitiveTask('family_owner_abc')];
-  const policy = createOwnerDotReadPolicy(() => tasks, {isOwnerSession: () => false});
-  assert.match(policy.guard({agent: {id: 'family_owner_abc'}, name: 'taskboard_create'}), /只读/);
-  assert.equal(policy.guard({agent: {id: 'family_owner_abc'}, name: 'project_companion'}), undefined);
-});
-
-test('without a resolver the scope stays closed by default', () => {
-  const policy = createOwnerDotReadPolicy(() => [sensitiveTask('family_owner_abc')]);
-  assert.match(policy.guard({agent: {id: 'family_owner_abc'}, name: 'bash'}), /只读/);
-});
-
-test('the runtime marks only the Owner conversation as owner-bound', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'scope-'));
-  const runtime = createRuntime({directory, intervalMs: 600000,
-    channelFactory: () => ({status: () => ({status: 'connected'}), connect: async () => {}, disconnect: async () => {}, close: async () => {}, send: async () => ({status: 'api_accepted'})})});
-  t.after(async () => { await runtime.close(); rmSync(directory, {recursive: true, force: true}); });
-  assert.equal(runtime.isOwnerSessionForToolGuard('family_owner_x'), false, 'no owner registered yet');
-  runtime.store.addPerson({id: 'owner', role: 'owner', label: '我'});
-  runtime.store.addPerson({id: 'mom', role: 'elder', label: '妈妈'});
-  runtime.store.bindPerson('owner', {accountId: 'bot-owner', peerId: 'wx-owner'});
-  runtime.store.bindPerson('mom', {accountId: 'bot-mom', peerId: 'wx-mom'});
-  assert.equal(runtime.isOwnerSessionForToolGuard('family_owner_abc'), true);
-  assert.equal(runtime.isOwnerSessionForToolGuard('family_member_abc'), false, 'family sessions are never owner-bound');
+  // An Owner prompt has no precondition other than the optional prompt scope.
+  assert.match(entry, /beforePrompt:async \(sessionId,request\)=>\{try\{await ownerPromptScope\.prepareRequest\(sessionId,request\);\}catch\{\}\}/);
 });

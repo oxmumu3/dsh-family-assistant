@@ -1,3 +1,13 @@
+## 0.2.0-preview.46 主人的会话就是普通会话，不再装工具守卫
+
+- 删掉 `src/owner-dot-read-guard.mjs` 和它在 `index.js` 的接线。插件不再调用宿主的 `tools.guard`，不再把 `family_owner_` 会话的工具执行器换成原生展示，主人的微信任务结束时也不再刷新这层设置。
+- 主人发消息前不再有「守卫必须可用」这个前提：以前宿主没有 `tools.guard` 时，`beforePrompt` 会抛 `owner_read_guard_unavailable`，主人的每一轮都发不出去。现在 `beforePrompt` 只做可选的政策前缀裁剪。
+- `src/runtime.mjs` 去掉只为守卫服务的 `ownerTasksForToolGuard`、`isOwnerSessionForToolGuard` 和 `onOwnerTaskSettled`。
+- 家人一侧没有变化。这层守卫只看 `family_owner_` 开头的会话，家人从不在这类会话里运行：家人的项目任务走 `family_project` 执行器，不带原生会话（`test/family-project-executor.test.mjs`），主人适配器拒绝 `family_member_` 会话（`test/owner-agent-host.test.mjs`）。preview.45 说明里「家人会话保持原来的只读范围」一句不准确，那条范围从未作用在家人会话上。
+- 仍然存在、这次没动的：主人微信消息进原生会话之前的那串固定短语分流，以及拼在每条主人消息前的政策文字。它们不拦工具，但会抢答或改写主人的话，留给后续版本处理。
+- 测试：`test/owner-tool-scope.test.mjs` 改写为 3 项（挂载后 `tools.guard` 调用 0 次、主人会话的 `presentAs` / `setExecutor` 调用 0 次、宿主没有 `tools.guard` 也能挂载、守卫痕迹不得回到 `index.js`）；`test/rc1-owner-scope.test.mjs` 的 3 项守卫测试换成 3 项「主人会话保持宿主执行器、能跑清单外的普通工具」，总数仍是 5 项。发版流水线那组测试 216 项通过（原 217，少的 1 项是被删函数的测试）。
+- 没验证：没有进真实宿主，没有用真实微信发过消息。`test/rc1-owner-scope.test.mjs` 在本机缺 `@deepseek-ai/dsh-client-connection`，是用同等的连接替身跑过的，原文件要在 CI 的 0.2.2-rc.1 档确认。
+
 ## 0.2.0-preview.45 工具范围按「谁在说」而不是「走哪条通道」
 
 - 主人自己的微信会话不再被压成只读：`src/owner-dot-read-guard.mjs` 的 `guard` 先问 `isOwnerSession`，主人写进来的那一轮保留宿主正常工具集（含看板、文件、命令），家人会话保持原来的只读范围。

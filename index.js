@@ -20,7 +20,6 @@ import {createMemberReportFeedback} from './src/member-report-feedback.mjs';
 import {createMemberPublicTools} from './src/member-public-tools.mjs';
 import {createOwnerManagementTool} from './src/owner-management-tool.mjs';
 import {createImportantEventClassifier} from './src/important-event-model.mjs';
-import {installOwnerDotReadGuard} from './src/owner-dot-read-guard.mjs';
 import {createOwnerPromptScope,recordScope} from './src/owner-prompt-scope.mjs';
 import {createNativeMemberRuntime} from './src/member-native-runtime.mjs';
 import {createHostMemberSessionFactory} from './src/member-native-host.mjs';
@@ -34,7 +33,7 @@ export function apply(ctx,config={}){
   const storageDir=resolve(config.storageDir??join(homedir(),'.local','share','dsh-family-assistant'));
   const voice=createHostVoice(ctx);
   const transcribeVoice=createWeixinVoiceTranscriber({voice});
-  let runtime,ownerReadGuard,mobileControl;
+  let runtime,mobileControl;
   const ownerPromptScope=createOwnerPromptScope({section:ownerPromptSection(),onStateChange:change=>{try{recordScope(storageDir,change);}catch{}}});
   const respond=createHostResponder(ctx,()=>runtime.store.snapshot().config);
   const planOwner=createHostOwnerPlanner(ctx,()=>runtime.store.snapshot().config);
@@ -45,7 +44,7 @@ export function apply(ctx,config={}){
   // so adding this gateway does not start sessions or force a service restart.
   let nativeAdapter,nativeWorkspace,nativeSession;
   const native=()=>{const workspaceController=ctx.get('workspaceController'),sessionController=ctx.get('sessionController');
-    if(!nativeAdapter||nativeWorkspace!==workspaceController||nativeSession!==sessionController){nativeWorkspace=workspaceController;nativeSession=sessionController;nativeAdapter=createOwnerAgentHost({workspaceController,sessionController,controlWorkspacePath:storageDir+'-owner-workspace',beforePrompt:async (sessionId,request)=>{if(!ownerReadGuard)throw new Error('owner_read_guard_unavailable');const prepared=await ownerReadGuard.prepare(sessionId);try{await ownerPromptScope.prepareRequest(sessionId,request);}catch{}return prepared;}});}return nativeAdapter;};
+    if(!nativeAdapter||nativeWorkspace!==workspaceController||nativeSession!==sessionController){nativeWorkspace=workspaceController;nativeSession=sessionController;nativeAdapter=createOwnerAgentHost({workspaceController,sessionController,controlWorkspacePath:storageDir+'-owner-workspace',beforePrompt:async (sessionId,request)=>{try{await ownerPromptScope.prepareRequest(sessionId,request);}catch{}}});}return nativeAdapter;};
   const ownerAgent=Object.fromEntries(['ensureControlWorkspace','listWorkspaces','start','observe','observeActive','ensureSession'].map(method=>[method,(...args)=>native()[method](...args)]));
   const weather=createWeatherService();
   const toolExecutors={...createFamilyToolExecutors({ownerAgent,maxBytes:24000}),weather:weather.execute};
@@ -66,7 +65,7 @@ export function apply(ctx,config={}){
       memberNativeRuntime=createNativeMemberRuntime({createAgent:createHostMemberSessionFactory({agents:nativeAgents,sessionController:nativeSessions,cwd:storageDir+'-member-workspace'})});
     }
   }catch{memberNativeRuntime=null;}
-  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,ownerMobileControl:{handle:args=>mobileControl?.handle(args),hasPendingTask:id=>mobileControl?.hasPendingTask(id)},toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,onOwnerTaskSettled:sessionId=>ownerReadGuard?.refreshSession(sessionId),memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
+  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,ownerMobileControl:{handle:args=>mobileControl?.handle(args),hasPendingTask:id=>mobileControl?.hasPendingTask(id)},toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
   mobileControl=installOwnerMobileControl({ctx,resolveTask:runtime.resolveOwnerMobileTask,sendNotice:runtime.sendOwnerMobileNotice});
   let unregister,disposal;
   const dispose=()=>disposal??=(async()=>{
@@ -75,20 +74,15 @@ export function apply(ctx,config={}){
     voice.dispose();
     try{await unregister?.();}
     finally{try{await mobileControl?.close();}catch{}
-    try{await runtime.close();}finally{try{await ownerPromptScope.close();}finally{await ownerReadGuard?.close();}}}
+    try{await runtime.close();}finally{await ownerPromptScope.close();}}
   })();
   // Cordis constructs ordinary exported functions; own cleanup explicitly.
   ctx.effect(()=>dispose,'family-assistant: runtime');
   let cachedCatalog=null,catalogAt=0;
   const catalog=async()=>{if(!cachedCatalog||Date.now()-catalogAt>60000){cachedCatalog=await modelCatalog(ctx);catalogAt=Date.now();}return cachedCatalog;};
-  try{
-    ownerReadGuard=installOwnerDotReadGuard({ctx,getTasks:()=>runtime.ownerTasksForToolGuard(),isOwnerSession:sessionId=>runtime.isOwnerSessionForToolGuard(sessionId)});
-  }catch(error){
-    // A Host without the internal tools guard cannot enforce the PTC read
-    // policy. Keep the plugin usable instead of failing the whole mount; the
-    // Owner bridge and every tool still authenticate by session identity.
-    ownerReadGuard={prepare(){throw new Error('owner_read_guard_unavailable');},refreshSession(){},close:async()=>{}};
-  }
+  // The Owner's own sessions are ordinary Host sessions: this plugin installs no
+  // tool guard and never changes their tool executor. Family members never run
+  // in a family_owner_ session; they keep their own scoped executors.
   try{
     // Host-internal only; Cordis removes the service on plugin unload. Hosts
     // (and test harnesses) without provide simply skip this internal bridge.

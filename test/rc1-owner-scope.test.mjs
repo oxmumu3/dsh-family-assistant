@@ -12,7 +12,6 @@ import {createScope} from '@deepseek-ai/dsh-scope';
 import * as Native from '@deepseek-ai/dsh-tool-executor-native';
 import {PtcExecutor} from '@deepseek-ai/dsh-tool-executor-ptc';
 import {HostConnectionService} from '@deepseek-ai/dsh-client-connection';
-import {installOwnerDotReadGuard} from '../src/owner-dot-read-guard.mjs';
 import {createOwnerPromptScope} from '../src/owner-prompt-scope.mjs';
 import {ownerPromptSection,OWNER_SECTION_NAME} from '../src/owner-prompt.mjs';
 import * as plugin from '../index.js';
@@ -70,40 +69,43 @@ test('actual rc1 scoped policy revalidates assembly and retains inline policy wh
  await release();await scope.detach(owner.agent.id);await owner.unregister();await owner.dispose();
 });
 
-test('actual rc1 Owner guard selects official native only in its own scope and still denies unsafe tools',async t=>{
+// The Owner's session is an ordinary Host session: the plugin must not narrow
+// its tools or replace its executor, whatever the Host default is.
+async function mounted(t,ctx){
+ const directory=await mkdtemp(join(tmpdir(),'family-rc1-owner-full-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ new HostConnectionService(ctx,[],{isAuthenticated:()=>false,authenticateApi:()=>undefined});
+ ctx.provide('llm',{listProviders:()=>[],chat:()=>assert.fail('No model calls')});
+ const fiber=ctx.plugin(plugin,{storageDir:directory});await fiber;t.after(()=>fiber.dispose());
+}
+const synthetic=(name,count)=>({name,description:'Synthetic ordinary Host tool',parameters:{type:'object',properties:{}},output:{schema:{type:'object'},render:()=>[]},execute:()=>{count.value++;return{};}});
+
+test('actual rc1 Owner session keeps the Host PTC executor after the plugin mounts',async t=>{
  const {ctx,agent}=await fixture(t,{native:false});
  const globalPtc=new PtcExecutor(ctx);ctx.tools.setExecutor(globalPtc);
- let unsafeCalls=0,allowedCalls=0;
- ctx.tools.register({name:'unsafe_synthetic',description:'Synthetic denial target',parameters:{type:'object',properties:{}},output:{schema:{type:'object'},render:()=>[]},execute:()=>{unsafeCalls++;return{};}});
- ctx.tools.register({name:'project_companion',description:'Synthetic allowed target',parameters:{type:'object',properties:{}},output:{schema:{type:'object'},render:()=>[]},execute:()=>{allowedCalls++;return{};}});
- const owner=await agent('family_owner_guard'),other=await agent('unrelated_guard');
- const guard=installOwnerDotReadGuard({ctx,getTasks:()=>[{sessionId:owner.agent.id,origin:'wechat',state:'running',prompt:'查看合成项目'}]});t.after(()=>guard.close());
- await guard.prepare(owner.agent.id);
- assert.ok(ctx.tools.selectExecutor(owner.agent) instanceof Native.NativeToolExecutor);
- assert.equal(ctx.tools.selectExecutor(other.agent),globalPtc);assert.equal(ctx.tools.selectExecutor(),globalPtc);
- const result=await ctx.tools.execute({agent:owner.agent,signal:new AbortController().signal,calls:[{type:'tool_call',id:'synthetic-denied',name:'unsafe_synthetic',arguments:'{}'}]});
- assert.equal(unsafeCalls,0);assert.equal(result.results[0].result.isError,true);
- assert.match(JSON.stringify(result.results[0].result),/本轮仅允许受控项目/);
- const allowed=await ctx.tools.execute({agent:owner.agent,signal:new AbortController().signal,calls:[{type:'tool_call',id:'synthetic-allowed',name:'project_companion',arguments:'{}'}]});
- assert.equal(allowedCalls,1);assert.equal(allowed.results[0].result.isError,false);
+ await mounted(t,ctx);
+ const owner=await agent('family_owner_full'),other=await agent('unrelated_full');
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.tools.selectExecutor(owner.agent),globalPtc);assert.equal(ctx.tools.selectExecutor(other.agent),globalPtc);
  await owner.unregister();await owner.dispose();await other.unregister();await other.dispose();
- assert.throws(()=>ctx.tools.selectExecutor(owner.agent),/executor/i);
 });
 
-test('actual rc1 conflicting per-agent executor blocks Owner preparation without changing any selection',async t=>{
- const {ctx,agent}=await fixture(t);const owner=await agent('family_owner_conflict');
- const prior=new PtcExecutor(owner.agent.ctx);owner.agent.ctx.tools.setExecutor(prior);
- const guard=installOwnerDotReadGuard({ctx,getTasks:()=>[{sessionId:owner.agent.id,state:'running',prompt:'查看合成项目'}]});t.after(()=>guard.close());
- await assert.rejects(()=>guard.prepare(owner.agent.id),/Only one tool executor/);
- assert.equal(ctx.tools.selectExecutor(owner.agent),prior);assert.ok(ctx.tools.selectExecutor() instanceof Native.NativeToolExecutor);
+test('actual rc1 Owner session runs an ordinary Host tool that the removed allowlist never named',async t=>{
+ const {ctx,agent}=await fixture(t);const count={value:0};
+ ctx.tools.register(synthetic('ordinary_synthetic',count));
+ await mounted(t,ctx);
+ const owner=await agent('family_owner_ordinary');await new Promise(resolve=>setImmediate(resolve));
+ const result=await ctx.tools.execute({agent:owner.agent,signal:new AbortController().signal,calls:[{type:'tool_call',id:'synthetic-ordinary',name:'ordinary_synthetic',arguments:'{}'}]});
+ assert.equal(count.value,1);assert.equal(result.results[0].result.isError,false);
+ assert.doesNotMatch(JSON.stringify(result.results[0].result),/本轮仅允许/);
  await owner.unregister();await owner.dispose();
 });
 
-test('closing the Owner guard during native-module acquisition prevents a late scoped selection',async t=>{
- const {ctx,agent}=await fixture(t,{native:false});const globalPtc=new PtcExecutor(ctx);ctx.tools.setExecutor(globalPtc);
- const owner=await agent('family_owner_closing');
- const guard=installOwnerDotReadGuard({ctx,getTasks:()=>[{sessionId:owner.agent.id,state:'running',prompt:'查看合成项目'}]});
- const rejected=assert.rejects(guard.prepare(owner.agent.id),/owner_read_guard_closed/);
- await guard.close();await rejected;assert.equal(ctx.tools.selectExecutor(owner.agent),globalPtc);
+test('actual rc1 per-agent executor chosen for an Owner session is left exactly as the Host set it',async t=>{
+ const {ctx,agent}=await fixture(t);
+ await mounted(t,ctx);
+ const owner=await agent('family_owner_chosen');
+ const prior=new PtcExecutor(owner.agent.ctx);owner.agent.ctx.tools.setExecutor(prior);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.tools.selectExecutor(owner.agent),prior);assert.ok(ctx.tools.selectExecutor() instanceof Native.NativeToolExecutor);
  await owner.unregister();await owner.dispose();
 });

@@ -125,7 +125,7 @@ export function exclusiveLock(directory){
     try{const current=JSON.parse(readFileSync(file,'utf8'));if(current&&current.id===id)unlinkSync(file);}catch{}};
 }
 
-export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,ownerMobileControl,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,ownerPromptStatus,classifyImportantEvent,transcribeVoice,onOwnerTaskSettled,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
+export function createRuntime({directory,api,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial,ownerAgent,ownerMobileControl,toolExecutors,weatherSearch,digestSources,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,memberAgent,memberReportFeedback,memberPublicTools,memberNativeRuntime,ownerPromptStatus,classifyImportantEvent,transcribeVoice,directOwnerReminders=true,now=()=>new Date().toISOString(),intervalMs=15000,channelFactory=createChannelManager}={}){
   if(typeof directory!=='string'||!directory)throw new Error('家庭助手需要独立数据目录。');
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
@@ -1066,7 +1066,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         if(!['queued','running'].includes(fresh.state)||fresh.delivery.state!=='none')return;
         try{await delay(800,undefined,{signal});}catch{return;}
       }
-    })();ownerObservers.set(task.id,pending);void pending.finally(()=>{if(ownerObservers.get(task.id)===pending)ownerObservers.delete(task.id);onOwnerTaskSettled?.(task.sessionId);}).catch(()=>{});
+    })();ownerObservers.set(task.id,pending);void pending.finally(()=>{if(ownerObservers.get(task.id)===pending)ownerObservers.delete(task.id);}).catch(()=>{});
   }
   async function nativeOwnerCommand(person,route,message,text,{origin='wechat'}={}){
     if(person.role!=='owner'||typeof ownerAgent?.ensureControlWorkspace!=='function')return null;
@@ -1573,16 +1573,5 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       await delay(20);
     }
   }
-  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge,ownerTasksForToolGuard:()=>gateway.snapshotForOwner(),
-    // Tool scope follows the writer, not the channel. family_owner_ sessions
-    // are created only from the Owner's own persisted conversation; if any
-    // task on such a session names another person we refuse to treat it as the
-    // Owner's, so a shared deployment can never widen a family member's scope.
-    isOwnerSessionForToolGuard:sessionId=>{
-      if(typeof sessionId!=='string'||!sessionId.startsWith('family_owner_'))return false;
-      const owner=store.snapshot().people.find(person=>person.role==='owner');
-      if(!owner)return false;
-      const related=gateway.snapshotForOwner().filter(task=>task?.sessionId===sessionId);
-      return related.every(task=>task?.personId===owner.id);
-    }};
+  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge};
 }
