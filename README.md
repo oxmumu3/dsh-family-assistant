@@ -61,7 +61,7 @@
 
 ## 安装与版本
 
-支持官方 Harness **0.2.1-rc.2 / rc.3 / rc.4 / rc.5 / 0.2.2-rc.1** 的 Web 或桌面宿主；`0.2.2-rc.1` 按官方要求使用 Node.js 24.9+，旧宿主沿用 22.13+。其他版本另行验证。
+支持官方 Harness **0.2.1-rc.2 / rc.3 / rc.4 / rc.5 / 0.2.2-rc.1 / 0.2.2-rc.2 / 0.2.2-rc.3** 的 Web 或桌面宿主；三个 0.2.2 RC 按官方要求使用 Node.js 24.9+，旧宿主沿用 22.13+。0.2.2-rc.2 与 rc.3 以签名桌面包和对应精确 npm SDK 验证。
 
 固定发行入口是 npm 的 [`@oxmumu3/dsh-family-assistant`](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)，分享 `latest` 即可，不必记版本号。GitHub Release 里的 tgz 固定指向对应历史版本，不要拿它猜新包。
 

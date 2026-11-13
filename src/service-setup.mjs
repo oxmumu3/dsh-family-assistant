@@ -505,6 +505,9 @@ export function createServiceSetup({ directory, store, toolbox, listProjects, di
     }
     if (draft.status !== 'ready') return draft.status === 'stale' ? stale(draft) : response(draft);
     if (!validDraft(draft) || draft.zoneSource?.type === 'member' && owner(draft.ownerId).snapshot.people.find(row => row.id === draft.personId)?.timeZone !== draft.timeZone || !live(draft) || !await verifyResource(draft) || !live(draft)) return stale(draft);
+    // Discovery awaits can outlive the Owner turn or binding. The caller supplies
+    // its own live check; it must still pass immediately before the write.
+    if (typeof args.authorize === 'function') { let allowed = false; try { allowed = args.authorize() === true; } catch {} if (!allowed) return { reply: '主人当前请求或连接已经变化，这次没有保存。', draft: publicDraft(draft) }; }
     const assignment = { actorId: draft.ownerId, personId: draft.personId, toolId: draft.toolId, resource: clone(draft.resource), allowInvoke: draft.allowInvoke, schedule: clone(draft.schedule) };
     draft.status = 'applying'; draft.updatedAt = clock(); persist();
     try {
@@ -550,8 +553,8 @@ export function createServiceSetup({ directory, store, toolbox, listProjects, di
       if (materialReadIntent(value) || toolIn(value) && !toolIn(intent)) return null;
       if (toolIn(intent) && nonActionSetup(intent)) return { reply: '暂不变更这项服务配置。等你明确要求时再安排。' };
       const explicitConfirm = value.match(/^确认\s+([A-Za-z0-9_-]+)\s+(?:v)?(\d+)$/u);
-      if (explicitConfirm) return confirmInner({ ...args, draftId: explicitConfirm[1], revision: Number(explicitConfirm[2]) });
-      if (active && naturalConfirm.test(value)) return confirmInner({ ...args, draftId: active.id, revision: active.revision });
+      if (!args.draftOnly && explicitConfirm) return confirmInner({ ...args, draftId: explicitConfirm[1], revision: Number(explicitConfirm[2]) });
+      if (!args.draftOnly && active && naturalConfirm.test(value)) return confirmInner({ ...args, draftId: active.id, revision: active.revision });
       if (active && naturalCancel.test(value)) return cancelInner({ ...args, draftId: active.id, revision: active.revision });
       const ordinal = active && value.match(/^(?:选(?:择)?(?:第)?\s*)?([0-9一二三四五六七八九十]+)(?:个|项)?[。！!\s]*$/u);
       if (ordinal) { const index = chineseNumber(ordinal[1]) - 1, selected = active.choices[index]; if (!selected) return { reply: '请选择上面列出的一项。', draft: publicDraft(active) }; return selectInner({ ...args, draftId: active.id, revision: active.revision, choiceId: selected.id }); }

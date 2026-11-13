@@ -2,11 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {buildOwnerTurn,ownerPolicyParagraphs,ownerPromptSection,OWNER_SECTION_NAME} from '../src/owner-prompt.mjs';
 
-test('policy stays a fixed 13-paragraph block without per-turn content',()=>{
+test('policy stays a short fixed block without per-turn content',()=>{
   const paragraphs=ownerPolicyParagraphs();
-  assert.equal(paragraphs.length,13);
-  assert.match(paragraphs[0],/乐乐对话交互版本/);
+  assert.equal(paragraphs.length,3);
+  assert.match(paragraphs[0],/family_assistant/);
+  assert.match(paragraphs[1],/统一发回微信/);
+  assert.match(paragraphs[2],/乐乐推送背景/);
   assert.ok(paragraphs.every(row=>!row.includes('当前 Owner 请求原文')));
+  assert.ok(paragraphs.every(row=>!row.includes('你就是乐乐')),'不再要求冒充乐乐');
+  assert.ok(paragraphs.every(row=>!row.includes('ask_user_question')),'不再禁止向主人提问');
+});
+
+test('the push background sits between the policy and the verbatim request',()=>{
+  const background='<<<乐乐推送背景：开始>>>\n- 要你转\n<<<乐乐推送背景结束>>>';
+  const prompt=buildOwnerTurn({text:'转过了',background});
+  assert.ok(prompt.indexOf(background)>prompt.indexOf('family_assistant'));
+  assert.ok(prompt.indexOf(background)<prompt.indexOf('当前 Owner 请求原文：\n转过了'));
+  assert.equal(buildOwnerTurn({text:'转过了',background:null}).includes('<<<乐乐推送背景：开始'),false,'没有推送就不加背景块');
 });
 
 test('the turn ends with the verbatim Owner request',()=>{

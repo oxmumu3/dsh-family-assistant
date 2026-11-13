@@ -29,15 +29,23 @@ test('classification failure never changes the normal family reply into a JSON e
  assert.equal(f.sent.filter(x=>x.route.personId==='owner').length,0);assert.equal(f.sent.filter(x=>x.route.personId==='mom').length,1);assert.equal(f.sent[0].text,'收到，我在。');assert.equal(f.runtime.status().lastError,null);
  assert.match(f.runtime.status().attention.lastError,/判断|分类|完成/);
 });
-test('Owner can acknowledge the actual latest alert in WeChat without opening the console',async t=>{
- const f=await fixture(t);await f.runtime.action({action:'attention_configure',enabled:true});f.advance();await f.receive('我需要一起帮忙');f.advance();await f.receive('我来处理','o1','owner');
- assert.equal(f.runtime.status().attention.incidents[0].status,'acknowledged');assert.match(f.sent.at(-1).text,/已记|你来处理/);assert.equal(f.sent.filter(x=>x.route.personId==='mom'&&x.text.includes('转达')).length,0);
- f.advance();await f.receive('已解决','o2','owner');assert.equal(f.runtime.status().attention.incidents[0].status,'resolved');
+test('Owner can acknowledge the actual latest alert through family_assistant without opening the console',async t=>{
+ const f=await fixture(t);await f.runtime.action({action:'attention_configure',enabled:true});f.advance();await f.receive('我需要一起帮忙');
+ const incidentId=f.runtime.status().attention.incidents[0].id;
+ const ack=await f.runtime.action({action:'attention_respond',incidentId,status:'acknowledged'});
+ assert.equal(f.runtime.status().attention.incidents[0].status,'acknowledged');assert.match(ack.text,/已记|知悉/);assert.equal(f.sent.filter(x=>x.route.personId==='mom'&&x.text.includes('转达')).length,0);
+ const resolved=await f.runtime.action({action:'attention_respond',incidentId,status:'resolved'});
+ assert.equal(f.runtime.status().attention.incidents[0].status,'resolved');assert.match(resolved.text,/解决/);
 });
-test('Owner contextual message is sent to the alert member once and later unrelated context cannot reuse it',async t=>{
- const f=await fixture(t);await f.runtime.action({action:'attention_configure',enabled:true});f.advance();await f.receive('这件事我一个人办不了');f.advance();await f.receive('告诉她：我晚上帮你处理','o1','owner');
- const direct=f.sent.filter(x=>x.route.personId==='mom'&&x.text.includes('我晚上帮你处理'));assert.equal(direct.length,1);assert.match(direct[0].text,/转达/);await f.receive('告诉她：我晚上帮你处理','o1','owner');assert.equal(f.sent.filter(x=>x.route.personId==='mom'&&x.text.includes('我晚上帮你处理')).length,1);
- f.advance();await f.receive('另一个话题','o2','owner');f.advance();await f.receive('已解决','o3','owner');assert.notEqual(f.runtime.status().attention.incidents[0].status,'resolved');
+test('Owner contextual message is sent to the alert member once and cannot be reused for another incident',async t=>{
+ const f=await fixture(t);await f.runtime.action({action:'attention_configure',enabled:true});f.advance();await f.receive('这件事我一个人办不了');
+ const incidentId=f.runtime.status().attention.incidents[0].id;
+ const first=await f.runtime.action({action:'attention_respond',incidentId,text:'我晚上帮你处理'});
+ assert.equal(first.status,'api_accepted');
+ const direct=f.sent.filter(x=>x.route.personId==='mom'&&x.text.includes('我晚上帮你处理'));assert.equal(direct.length,1);assert.match(direct[0].text,/转达/);
+ const again=await f.runtime.action({action:'attention_respond',incidentId,text:'我晚上帮你处理'});
+ assert.equal(again.status,'api_accepted');assert.equal(f.sent.filter(x=>x.route.personId==='mom'&&x.text.includes('我晚上帮你处理')).length,1,'同一句话不会重复发送');
+ await assert.rejects(f.runtime.action({action:'attention_respond',incidentId:'incident-does-not-exist',status:'resolved'}),/不在待处理/);
 });
 test('disabled observation and changed binding revoke pending classification without a send',async t=>{
  let release;const gate=new Promise(done=>release=done);const f=await fixture(t,{classify:async input=>{await gate;return classified(input);}});await f.runtime.action({action:'attention_configure',enabled:true});f.advance();await f.runtime.receive('mom',{id:'m1',peerId:'wx-mom',text:'需要帮忙'});await new Promise(setImmediate);await f.runtime.action({action:'attention_configure',enabled:false});f.runtime.store.bindPerson('mom',{accountId:'replacement',peerId:'new-peer'});release();await f.runtime.settled();assert.equal(f.sent.filter(x=>x.route.personId==='owner').length,0);
@@ -52,8 +60,10 @@ test('a disconnected Owner queues an alert and the unchanged binding receives it
 test('a pending alert for an old binding is cancelled instead of being forwarded to a replacement Owner',async t=>{
  const f=await fixture(t);await f.runtime.action({action:'attention_configure',enabled:true});f.connections.set('owner','disconnected');f.advance();await f.receive('有件事要帮忙');f.runtime.store.bindPerson('owner',{accountId:'replacement',peerId:'replacement'});f.connections.set('owner','connected');await f.runtime.tick();assert.equal(f.sent.filter(x=>x.route.personId==='owner').length,0);assert.equal(f.runtime.status().attention.enabled,false);
 });
-test('the Owner can operate the independent alert toggle directly in WeChat and config stays unchanged',async t=>{
- const f=await fixture(t),before=f.runtime.store.snapshot().config;f.advance();await f.receive('开启重要事项主动提醒','o1','owner');assert.equal(f.runtime.status().attention.enabled,true);f.advance();await f.receive('关闭重要事项主动提醒','o2','owner');assert.equal(f.runtime.status().attention.enabled,false);assert.deepEqual(f.runtime.store.snapshot().config,before);
+test('the Owner can operate the independent alert toggle through family_assistant and config stays unchanged',async t=>{
+ const f=await fixture(t),before=f.runtime.store.snapshot().config;
+ await f.runtime.action({action:'attention_configure',enabled:true});assert.equal(f.runtime.status().attention.enabled,true);
+ await f.runtime.action({action:'attention_configure',enabled:false});assert.equal(f.runtime.status().attention.enabled,false);assert.deepEqual(f.runtime.store.snapshot().config,before);
 });
 test('a slow background observation does not delay the normal family reply',async t=>{
  let release;const gate=new Promise(done=>release=done),f=await fixture(t,{classify:async input=>{await gate;return classified(input);}});await f.runtime.action({action:'attention_configure',enabled:true});f.advance();const response=f.runtime.receive('mom',{id:'slow',peerId:'wx-mom',text:'有件事需要一起帮忙'});await response;assert(f.sent.some(x=>x.route.personId==='mom'&&x.text==='收到，我在。'));assert.equal(f.sent.filter(x=>x.route.personId==='owner').length,0);release();await f.runtime.settled();assert.equal(f.sent.filter(x=>x.route.personId==='owner').length,1);

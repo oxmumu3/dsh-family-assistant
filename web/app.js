@@ -246,7 +246,8 @@
     text('person-name', person.label);
     text('person-role', person.role === 'owner' ? '简报接收人' : '家人的专属助手');
     const status = safeStatus(person);
-    text('connection-badge', statusText[status] || '状态待确认'); $('connection-badge').dataset.state = status;
+    const reconnecting = person.binding?.suspended === true && ['connecting', 'awaiting_scan', 'scanned', 'need_verification'].includes(status);
+    text('connection-badge', person.binding?.suspended && !reconnecting ? '已手动断开' : (statusText[status] || '状态待确认')); $('connection-badge').dataset.state = status;
     const description = {
       connected: '已连接当前成员的微信。开始服务后可接收聊天和发送提醒。',
       awaiting_scan: '请本人用微信扫描下方二维码，并在手机上确认。',
@@ -257,7 +258,11 @@
       disconnected: '尚未连接。为这位家人生成二维码，或恢复之前保存的连接。',
       error: '这位家人的连接遇到问题，请查看提示后恢复连接。',
     };
-    text('connection-text', description[status] || '连接状态待确认，请刷新查看。');
+    text('connection-text', person.binding?.suspended
+      ? reconnecting
+        ? (description[status] || '正在恢复这位家人的连接，请稍候。') + ' 这一步成功前仍保持手动断开；失败不会自动恢复。'
+        : '这位成员的微信已按本人要求断开，重新打开服务后也会保持断开。本人可以点“恢复已有连接”，或重新扫码。'
+      : (description[status] || '连接状态待确认，请刷新查看。'));
     text('connection-error', person.binding?.lastError || ''); show('connection-error', Boolean(person.binding?.lastError));
     text('login', connected(person) ? '重新扫码绑定' : ['awaiting_scan', 'scanned', 'expired'].includes(status) ? '重新生成二维码' : '生成登录二维码');
     const qr = Boolean(person.binding?.qrUrl && ['awaiting_scan', 'scanned', 'connecting'].includes(status));

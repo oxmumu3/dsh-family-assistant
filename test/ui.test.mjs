@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { createRuntime } from '../src/runtime.mjs';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
@@ -51,6 +54,36 @@ async function workbenchHarness({snapshot=initial(),storage=new Map(),post,voice
   await settle();
   return{elements,requests,settle,storage,snapshot,click:id=>elements.get(id).fire('click'),submit:id=>elements.get(id).fire('submit'),input:(id,value)=>{elements.get(id).value=value;elements.get(id).fire('input');},select:index=>elements.get('people-list').children[index].fire('click'),key:(key)=>{for(const fn of documentListeners.keydown??[])fn({key,preventDefault(){}});}};
 }
+
+function uiChannels(state) {
+  return ({onStatus} = {}) => ({
+    async connect(id) { state.connected.add(id); onStatus(id, {status: 'connected'}); },
+    async login(id) {
+      const phase = {status: 'awaiting_scan', phase: 'awaiting_scan', qrUrl: `https://weixin.example/${id}`};
+      state.phases.set(id, phase); onStatus(id, {status: 'awaiting_scan'}); return phase;
+    },
+    async disconnect(id) { state.connected.delete(id); state.phases.delete(id); onStatus(id, {status: 'disconnected'}); },
+    async close() { state.connected.clear(); },
+    status(id) { return state.connected.has(id) ? {status: 'connected', phase: 'connected'} : (state.phases.get(id) ?? {status: 'disconnected', phase: 'disconnected'}); },
+    statuses() { return []; },
+    async send() { return {status: 'api_accepted'}; },
+  });
+}
+
+async function uiRuntime(t, {suspended = false} = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'family-ui-reconnect-'));
+  const state = {connected: new Set(), phases: new Map()};
+  const runtime = createRuntime({directory, channelFactory: uiChannels(state), intervalMs: 60_000, respond: async () => ({reply: '好的'})});
+  t.after(async () => { await runtime.close(); rmSync(directory, {recursive: true, force: true}); });
+  runtime.store.addPerson({id: 'owner', role: 'owner', label: '我', shareWithOwner: 'full'});
+  runtime.store.bindPerson('owner', {accountId: 'bot-owner', peerId: 'wx-owner'});
+  if (suspended) {
+    await runtime.start();
+    await runtime.action({action: 'disconnect', personId: 'owner'});
+  }
+  return runtime;
+}
+
 function descendants(element){return element.children.flatMap(child=>[child,...descendants(child)]);}
 function button(container,label){return descendants(container).find(element=>element.tagName==='button'&&element.textContent===label);}
 
@@ -253,4 +286,35 @@ test('first voice preparation stays in composer and does not start recording aft
 test('long transcript never truncates an existing draft silently',async()=>{
  const voice=fakeVoice(),view=await workbenchHarness({voice});view.input('owner-input','原'.repeat(3998));view.click('voice-start');await view.settle();view.click('voice-stop');await view.settle();voice.finish('超出限制的文字');await view.settle();
  assert.equal(view.elements.get('owner-input').value.length,3998);assert.match(view.elements.get('voice-status').textContent,/4000|过长/);assert.equal(view.elements.get('voice-transcript').textContent,'超出限制的文字');
+});
+
+test('普通新成员配对时 status 页面仍显示真实二维码', async t => {
+  const runtime = await uiRuntime(t);
+  await runtime.action({action: 'login', personId: 'owner'});
+  const snapshot = {...initial(), ...runtime.status()};
+  const view = await workbenchHarness({snapshot});
+  view.select(0); await view.settle();
+  assert.equal(view.elements.get('connection-badge').textContent, '等待扫码');
+  assert.equal(view.elements.get('qr-wrap').hidden, false);
+  assert.match(view.elements.get('connection-text').textContent, /扫描下方二维码/);
+  assert.equal(snapshot.people[0].binding.suspended, false);
+});
+
+test('手动断开后重新扫码：页面显示真实进度和二维码，成功前仍是手动断开', async t => {
+  const runtime = await uiRuntime(t, {suspended: true});
+  const manual = {...initial(), ...runtime.status()};
+  const before = await workbenchHarness({snapshot: manual});
+  before.select(0); await before.settle();
+  assert.equal(before.elements.get('connection-badge').textContent, '已手动断开');
+  assert.equal(before.elements.get('qr-wrap').hidden, true);
+
+  await runtime.action({action: 'login', personId: 'owner'});
+  const scanning = {...initial(), ...runtime.status()};
+  const view = await workbenchHarness({snapshot: scanning});
+  view.select(0); await view.settle();
+  assert.equal(scanning.people[0].binding.suspended, true);
+  assert.equal(view.elements.get('connection-badge').textContent, '等待扫码');
+  assert.equal(view.elements.get('qr-wrap').hidden, false);
+  assert.match(view.elements.get('connection-text').textContent, /扫描下方二维码/);
+  assert.match(view.elements.get('connection-text').textContent, /成功前仍保持手动断开/);
 });

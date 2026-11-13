@@ -29,7 +29,7 @@ test('a member workflow request notifies Owner and an explicit Owner response re
  const f=await fixture(t);await incoming(f,'mom','want-tool','申请工具：我想每周整理一次菜谱');await f.runtime.settled();
  const notice=f.sent.find(row=>row.personId==='owner'&&row.text.includes('菜谱'));assert.ok(notice,'Owner must receive the actual new request');
  const shortId=notice.text.match(/wf-[a-f0-9]{12}/)?.[0];assert.ok(shortId);
- await incoming(f,'owner','respond-tool',`回复需求 ${shortId}：可以，周末先用你的菜单试一轮`);await f.runtime.settled();
+ const reply=await f.runtime.action({action:'workflow_reply',request:shortId,status:'accepted',note:'可以，周末先用你的菜单试一轮'});assert.equal(reply.notification?.status,'api_accepted',JSON.stringify(reply));
  assert.equal(f.sent.filter(row=>row.personId==='mom'&&row.text.includes('周末先用你的菜单')).length,1);
  assert.equal(f.sent.some(row=>row.personId==='dad'&&row.text.includes('菜单')),false);
  await incoming(f,'mom','extra-tool',`补充需求 ${shortId}：希望附上采购清单`);await f.runtime.settled();

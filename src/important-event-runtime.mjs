@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
 import {createImportantEvents,redactImportantText} from './important-events.mjs';
 import {recordMatchesBinding} from './store.mjs';
+import {withOwnerPushHeader} from './owner-push.mjs';
 
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const acknowledgement=text=>/^(?:知道了|收到|我来处理|我会处理|我来跟进|已解决|已经解决了?|处理好了|不再提醒这件事|这件事不用再提醒)[。！!\s]*$/.test(text.trim());
@@ -32,7 +33,7 @@ export function createRuntimeAttention({directory,store,classify,channels,flush,
    if(!authorize()||!running())return{status:'cancelled'};
    const personId=recipient==='member'?member.personId:owner.personId,label=store.person(member.personId)?.label??'家人';
    let row=coreDelivery(key);
-   if(!row){const body=recipient==='member'?text:`${label}${kind==='update'?'这件事有了更新':'有件事需要你留意'}\n\n${text}\n\n可以直接回复“我来处理”“已解决”，或“告诉${label}：……”继续安排。`;
+   if(!row){const body=recipient==='member'?text:withOwnerPushHeader('important_event',label,`${label}${kind==='update'?'这件事有了更新':'有件事需要你留意'}\n\n${text}\n\n可以直接回复“我来处理”“已解决”，或“告诉${label}：……”继续安排。`);
     row=store.enqueue({personId,text:body,kind:recipient==='member'?'important_clarify':'important_event',sourceKey:key,authorizationRoute:store.route(owner.personId),expiresAt:new Date(Date.parse(now())+24*3600000).toISOString()});}
    if(channels.status(personId)?.status==='connected')await flush(personId,{onlyId:row.id,authorize});
    const fresh=coreDelivery(key);return{status:fresh.status,outboxId:fresh.id};
@@ -41,7 +42,7 @@ export function createRuntimeAttention({directory,store,classify,channels,flush,
  const report=error=>{lastError=error?.code==='important_events_invalid'?'重要事项记录暂时不可用，请检查服务状态。':'重要事项判断暂时未完成；普通对话仍可继续。';};
  const safeRun=operation=>Promise.resolve().then(operation).catch(report);
  function snapshot(){const value=events.state(),scope=ownerScope(),current=value.settings.ownerScope&&scope&&isCurrent(value.settings.ownerScope,'owner');return{enabled:Boolean(value.settings.enabled&&current),available:typeof classify==='function',enabledAt:value.settings.enabledAt,
-  incidents:current?events.casesForOwner().filter(row=>isCurrent(row.memberScope,'elder')).map(row=>({id:row.id,personId:row.memberScope.personId,label:store.person(row.memberScope.personId)?.label??'家人',urgency:row.urgency,category:row.category,status:row.status,quote:row.evidence?.map(item=>item.quote).join('\n').slice(0,1000)??'',reason:{safety:'家人提到了需要留意的安全情况。',needs_help:'家人表示需要协助。',important_change:'家人报告了重要安排或情况变化。',service_failure:'家人报告助手服务可能未按预期完成。'}[row.category],createdAt:row.createdAt,updatedAt:row.updatedAt,deliveryStatus:row.delivery.status})):[],
+  incidents:current?events.casesForOwner().filter(row=>isCurrent(row.memberScope,'elder')).map(row=>({id:row.id,personId:row.memberScope.personId,label:store.person(row.memberScope.personId)?.label??'家人',urgency:row.urgency,category:row.category,status:row.status,quote:row.evidence?.map(item=>item.quote).join('\n').slice(0,1000)??'',reason:{safety:'家人提到了需要留意的安全情况。',needs_help:'家人表示需要协助。',important_change:'家人报告了重要安排或情况变化。',service_failure:'家人报告助手服务可能未按预期完成。'}[row.category],createdAt:row.createdAt,updatedAt:row.updatedAt,deliveryStatus:row.delivery.status,...(row.delivery.outboxId?{outboxId:row.delivery.outboxId}:{})})):[],
   pendingCount:value.counts.prepared+value.counts.classifying,active:value.counts.active,...(lastError||value.lastError?{lastError:lastError||value.lastError}:{})};}
  function configure(enabled){if(enabled&&typeof classify!=='function')throw new Error('重要事项判断模型尚未接通。');const scope=ownerScope();if(enabled&&!scope)throw new Error('请先绑定 Owner 微信，再开启重要事项提醒。');events.configure({enabled,...(scope?{ownerScope:scope}:{})});lastError=null;return snapshot();}
  function admit(person,message,text){try{

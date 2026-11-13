@@ -31,7 +31,7 @@ test('native replies reach Owner without waiting for the general 15-second sched
 });
 test('slow Owner work gets one relevant waiting message and then the result in the same chat',async t=>{
  const f=await fixture(t,{initial:{state:'queued'}});await f.send('找到本机最新的AI日报，先给我看');
- assert.equal(f.sent.length,0);f.advance(20000);await f.runtime.tick();
+ assert.equal(f.sent.length,0);f.advance(45000);await f.runtime.tick();
  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/查找.*日报/);assert.doesNotMatch(f.sent[0].text,/原生|Harness|任务结果/);
  await f.runtime.tick();assert.equal(f.sent.length,1);
  f.set({state:'succeeded',text:'这是已找到的日报正文。'});await f.runtime.tick();
@@ -39,12 +39,12 @@ test('slow Owner work gets one relevant waiting message and then the result in t
  await f.runtime.tick();assert.equal(f.sent.length,2);
 });
 for(const[state,pattern]of[['unknown',/尚未确认|中断/],['failed',/未能完成/],['needs_approval',/授权/],['needs_input',/补充/]])test(`Owner ${state} gets an honest visible state without replaying work`,async t=>{
- const f=await fixture(t,{initial:{state}});await f.send('查找我的学习资料');await f.runtime.tick();
+ const f=await fixture(t,{initial:{state}});await f.send('查找我的学习资料');f.advance(45000);await f.runtime.tick();
  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,pattern);assert.doesNotMatch(f.sent[0].text,/已接入|Harness 任务结果/);
  await f.runtime.tick();assert.equal(f.sent.length,1);assert.equal(f.starts.length,1);
 });
 test('a failed native start does not leave the Owner waiting indefinitely',async t=>{
- const f=await fixture(t,{initial:new Error('synthetic transport interruption')});await f.send('查找旧资料');await f.runtime.tick();
+ const f=await fixture(t,{initial:new Error('synthetic transport interruption')});await f.send('查找旧资料');f.advance(45000);await f.runtime.tick();
  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/尚未确认|中断/);assert.equal(f.starts.length,1);
 });
 test('management message instructions keep the reply with Owner instead of forwarding explanations to K',async t=>{
@@ -59,7 +59,7 @@ test('a project request needing clarification cannot forward the question to the
 test('Owner native prompt separates direct archived-history access, brief sharing and proactive notifications',async t=>{
  const f=await fixture(t);await f.send('能看家人记录吗？有什么重要的会告诉我吗？');
  const prompt=f.starts[0].prompt;
- assert.match(prompt,/完整.*已保存|已保存.*完整/);assert.match(prompt,/自动简报/);assert.match(prompt,/明确转告|明确求助/);
- assert.match(prompt,/不要.*工作台.*确认|无需.*工作台/);assert.match(prompt,/不.*自动.*重要|尚未.*重要/);
+ assert.match(prompt,/family_assistant/);assert.match(prompt,/统一发回微信/);assert.match(prompt,/乐乐推送背景/);
  assert.doesNotMatch(prompt,/它只创建草稿，已有明确卡片确认由工作台处理/);
+ assert.doesNotMatch(prompt,/ask_user_question/);
 });

@@ -98,6 +98,12 @@ let runtime;
 let evidence;
 try {
   runtime = createRuntime({ directory, api: createWeixinApi({ fetchImpl: fakeFetch }), now: () => now,
+    ownerAgent: {
+      ensureControlWorkspace: async () => ({ workspaceId: 'control', title: '控制台', path: join(directory, 'control') }),
+      listWorkspaces: async () => [{ workspaceId: 'control', title: '控制台', path: join(directory, 'control'), sessionIds: [] }],
+      start: async () => ({ state: 'succeeded', text: 'owner 的独立原生回复' }),
+      observe: async () => ({ state: 'succeeded', text: 'owner 的独立原生回复' }),
+    },
     intervalMs: 60_000, respond: async ({ person, history, text }) => {
       assert.ok(history.every(message => message.personId === person.id));
       assert.equal(text, `仅${person.id}可见的演示聊天`);
@@ -114,14 +120,16 @@ try {
   });
   const threePollersLive = pendingPolls.size === 3 && polled.size === 3;
   for (const person of aliases) inject(person);
-  await waitFor(() => runtime.store.snapshot().outbox.filter(row => row.kind === 'reply' && row.status === 'api_accepted').length === 3, '三路独立回复');
+  await waitFor(() => runtime.store.snapshot().outbox.filter(row => row.kind === 'reply' && row.status === 'api_accepted').length === 2 &&
+    runtime.store.snapshot().outbox.filter(row => row.kind === 'harness_result' && row.status === 'api_accepted').length === 1, '三路独立回复');
   await waitFor(() => pendingPolls.size === 3, '处理后继续独立轮询');
   const independentHistories = aliases.every(person => {
-    const messages = runtime.store.messages(person);
+    const messages = runtime.store.messages(person), expected = person === 'owner' ? 'owner 的独立原生回复' : `${person} 的独立演示回复`;
     return messages.length === 2 && messages.every(message => message.personId === person) &&
-      messages[0].text === `仅${person}可见的演示聊天` && messages[1].text === `${person} 的独立演示回复`;
+      messages[0].text === `仅${person}可见的演示聊天` && messages[1].text === expected;
   });
-  const exactReplyRoutes = sends.length === 3 && sends.every(send => {
+  const directSends = sends.filter(send => ['reply', 'harness_result'].includes(runtime.store.snapshot().outbox.find(row => row.id === send.clientId)?.kind));
+  const exactReplyRoutes = directSends.length === 3 && directSends.every(send => {
     const fixture = fixtures.get(send.person);
     return send.token === fixture.token && send.peerId === fixture.peerId && send.context === fixture.context;
   });
@@ -163,6 +171,7 @@ try {
       people: state.people.length, logins: loginCount, pollAccounts: polled.size,
       inbound: state.messages.filter(message => message.dir === 'in').length,
       replyApiAccepted: state.outbox.filter(row => row.kind === 'reply' && row.status === 'api_accepted').length,
+      harnessResultApiAccepted: state.outbox.filter(row => row.kind === 'harness_result' && row.status === 'api_accepted').length,
       briefApiAccepted: state.outbox.filter(row => row.kind === 'owner_brief' && row.status === 'api_accepted').length,
       welcomeApiAccepted: state.outbox.filter(row => row.kind === 'member_welcome' && row.status === 'api_accepted').length,
       reminderApiAccepted: state.outbox.filter(row => row.kind === 'reminder' && row.status === 'api_accepted').length,

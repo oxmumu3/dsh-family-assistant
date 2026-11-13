@@ -1,6 +1,6 @@
 # 安装与首次接入
 
-此包是 DeepSeek Harness 社区插件，支持精确版本 0.2.1-rc.2 / rc.3 / rc.4 / rc.5 / 0.2.2-rc.1；rc1 使用官方要求的 Node 24.9+，旧宿主仍可用 Node 22.13+，未上架 Harness 官方插件市场。长期分享同一个 npm 包名即可，新版本发布时更新 `latest`：
+此包是 DeepSeek Harness 社区插件，支持精确版本 0.2.1-rc.2 / rc.3 / rc.4 / rc.5 / 0.2.2-rc.1 / 0.2.2-rc.2 / 0.2.2-rc.3；三个 0.2.2 RC 使用官方要求的 Node 24.9+，旧宿主仍可用 Node 22.13+，未上架 Harness 官方插件市场。长期分享同一个 npm 包名即可，新版本发布时更新 `latest`：
 
 ```text
 @oxmumu3/dsh-family-assistant@latest

@@ -12,7 +12,8 @@ const inbound=(runtime,personId,id,text)=>runtime.receive(personId,{id,peerId:'p
 
 async function setup(t,extra={}){
  const directory=mkdtempSync(join(tmpdir(),'family-harness-runtime-')),sent=[];
- const runtime=createRuntime({directory,intervalMs:600000,respond:async()=>({reply:'普通回复'}),channelFactory:()=>({connect:async()=>{},disconnect:async()=>{},close:async()=>{},status:()=>({status:'connected'}),send:async(route,text,options)=>{assert.equal(options.authorize(),true);sent.push({personId:route.personId,text});return{status:'api_accepted'};}}),...extra});
+ const ownerAgent=extra.ownerAgent?{...extra.ownerAgent,ensureControlWorkspace:async()=>{const rows=await extra.ownerAgent.listWorkspaces?.()??[];return rows[0]??{workspaceId:'control',title:'control',path:join(directory,'control')};}}:undefined;
+ const runtime=createRuntime({directory,intervalMs:600000,respond:async()=>({reply:'普通回复'}),channelFactory:()=>({connect:async()=>{},disconnect:async()=>{},close:async()=>{},status:()=>({status:'connected'}),send:async(route,text,options)=>{assert.equal(options.authorize(),true);sent.push({personId:route.personId,text});return{status:'api_accepted'};}}),...extra,...(ownerAgent?{ownerAgent}:{})});
  t.after(async()=>{await runtime.close();rmSync(directory,{recursive:true,force:true});});
  for(const[id,role]of[['owner','owner'],['mom','elder'],['dad','elder']]){runtime.store.addPerson({id,role,label:id});runtime.store.bindPerson(id,{accountId:'account-'+id,peerId:'peer-'+id});}
  await runtime.start();return{runtime,sent};
@@ -30,12 +31,16 @@ test('control permissions use the registered Owner rather than actorId from the 
  await assert.rejects(runtime.action({action:'family_access_grant',actorId:'owner',personId:'dad',workspaceIds:['family'],capabilities:['write']}));
 });
 test('Owner WeChat lists official projects and family does not receive ungranted project metadata',async t=>{
- const ownerAgent={listWorkspaces:async()=>[{workspaceId:'family',path:'/tmp/synthetic-family',title:'家庭资料',sessionIds:[]},{workspaceId:'private',path:'/tmp/synthetic-private',title:'Owner专属项目',sessionIds:[]}]};
+ const prompts=[];
+ const ownerAgent={listWorkspaces:async()=>[{workspaceId:'family',path:'/tmp/synthetic-family',title:'家庭资料',sessionIds:[]},{workspaceId:'private',path:'/tmp/synthetic-private',title:'Owner专属项目',sessionIds:[]}],start:async intent=>{prompts.push(intent.prompt);return{state:'succeeded',text:'合成项目清单：家庭资料、Owner专属项目'};},observe:async()=>({state:'succeeded',text:'合成项目清单：家庭资料、Owner专属项目'})};
  const{runtime,sent}=await setup(t,{ownerAgent});
- await runtime.receive('owner',{id:'p1',peerId:'peer-owner',text:'列出 Harness 项目'});
- assert.match(sent.at(-1).text,/家庭资料/);assert.match(sent.at(-1).text,/Owner专属项目/);
- await runtime.receive('mom',{id:'p2',peerId:'peer-mom',text:'列出 Harness 项目'});
- assert.doesNotMatch(sent.at(-1).text,/Owner专属项目|synthetic-private/);
+ await runtime.receive('owner',{id:'p1',peerId:'peer-owner',text:'列出 Harness 项目'});await runtime.settled();
+ assert.equal(prompts.length,1,'主人的项目请求交给原生会话');
+ assert.match(prompts[0],/列出 Harness 项目/);
+ assert.equal(prompts[0].includes('/tmp/synthetic-private'),false,'项目路径不塞进提示');
+ assert.match(sent.at(-1).text,/合成项目清单/);
+ await runtime.receive('mom',{id:'p2',peerId:'peer-mom',text:'列出 Harness 项目'});await runtime.settled();
+ assert.equal(sent.filter(row=>row.personId==='mom').some(row=>/Owner专属项目|synthetic-private/.test(row.text)),false,'家人拿不到未授权项目');
 });
 test('Owner native task completion is durably returned only to the original WeChat route',async t=>{
  let starts=0;
@@ -99,8 +104,15 @@ test('long native results still produce a bounded WeChat return instead of silen
  const content='合成正文。'.repeat(800);const{runtime,sent}=await setup(t,{ownerAgent:{listWorkspaces:async()=>[{workspaceId:'family',path:'/tmp/synthetic-family',title:'家庭资料',sessionIds:[]}],start:async()=>({state:'succeeded',text:content}),observe:async()=>({state:'succeeded',text:content})}});
  await inbound(runtime,'owner','long-native','在【家庭资料】项目执行：起草内容。');await runtime.settled();
  const rows=runtime.store.snapshot().outbox.filter(row=>row.kind==='harness_result');assert.ok(rows.length>=1);assert.ok(rows.every(row=>row.text.length<=3200));assert.equal(sent.some(row=>row.text.includes('合成正文')),true);
- assert.equal(rows.map(row=>row.text.replace(/^（\d+\/\d+）\n/,'')).join(''),content);assert.ok(sent.findIndex(row=>row.text.includes('任务已登记'))<sent.findIndex(row=>row.text.includes('合成正文')));
- await inbound(runtime,'owner','long-native','在【家庭资料】项目执行：起草内容。');await runtime.settled();assert.equal(runtime.store.snapshot().outbox.filter(row=>row.kind==='harness_result').length,rows.length);
+ assert.equal(rows.map(row=>row.text.replace(/^（\d+\/\d+）\n/,'')).join(''),content);
+ // 4000 字结果按 outbox 分段逐段发送，每段恰好一次；重试不重发。
+ const delivered=sent.filter(row=>row.text.includes('合成正文'));
+ assert.equal(delivered.length,rows.length,'每一段各发送一次');
+ assert.deepEqual(delivered.map(row=>row.text),rows.map(row=>row.text),'发送内容与 outbox 分段一致');
+ const beforeRetry=sent.length;
+ await inbound(runtime,'owner','long-native','在【家庭资料】项目执行：起草内容。');await runtime.settled();
+ assert.equal(sent.length,beforeRetry,'重试不重发');
+ assert.equal(runtime.store.snapshot().outbox.filter(row=>row.kind==='harness_result').length,rows.length);
 });
 test('long family tool results produce a bounded return through the ordinary member route',async t=>{
  const{runtime,sent}=await setup(t,{toolExecutors:{ai_digest:async()=>({text:'较长的合成日报。'.repeat(600)})}});await assign(runtime);
@@ -128,7 +140,7 @@ test('a planner proposal cannot cross a family member identity or create an ungr
 });
 test('recovered native intents wait until every channel connects and observe without dispatching a second task',async t=>{
  const directory=mkdtempSync(join(tmpdir(),'family-harness-recovery-')),connecting=deferred(),connected=deferred(),sent=[];let runtime,starts=0,observes=0,connects=0,gated=false;
- const ownerAgent={listWorkspaces:async()=>[{workspaceId:'family',path:'/tmp/synthetic-family',title:'家庭资料',sessionIds:[]}],start:async()=>{starts++;return{state:'queued'};},observe:async()=>{observes++;return{state:'succeeded',text:'通路连接完成后的恢复结果'};}};
+ const ownerAgent={ensureControlWorkspace:async()=>({workspaceId:'family',title:'家庭资料',path:'/tmp/synthetic-family'}),listWorkspaces:async()=>[{workspaceId:'family',path:'/tmp/synthetic-family',title:'家庭资料',sessionIds:[]}],start:async()=>{starts++;return{state:'queued'};},observe:async()=>{observes++;return{state:'succeeded',text:'通路连接完成后的恢复结果'};}};
  const options={directory,intervalMs:600000,ownerAgent,respond:async()=>({reply:'普通回复'}),channelFactory:()=>({connect:async()=>{connects++;if(gated){connecting.resolve();await connected.promise;}},disconnect:async()=>{},close:async()=>{},status:()=>({status:'connected'}),send:async(route,text,sendOptions)=>{assert.equal(sendOptions.authorize(),true);sent.push({personId:route.personId,text});return{status:'api_accepted'};}})};
  t.after(async()=>{await runtime?.close();rmSync(directory,{recursive:true,force:true});});runtime=createRuntime(options);
  for(const[id,role]of[['owner','owner'],['mom','elder']]){runtime.store.addPerson({id,role,label:id});runtime.store.bindPerson(id,{accountId:'account-'+id,peerId:'peer-'+id});}

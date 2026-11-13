@@ -4,6 +4,10 @@ const matrixVersions=JSON.parse(readFileSync(new URL('../compatibility.json',imp
 const sdkPeers=['@deepseek-ai/dsh'];
 const registry='https://registry.npmjs.org/@deepseek-ai%2fdsh';
 const desktopFeed='https://download.deepseek.com/dsh-desk/feeds/mac-arm64/nightly-mac.yml';
+// A Desktop prerelease can ship before its exact SDK appears on npm. The
+// signed Desktop feed remains the release source; verify its exact package
+// manifest from the corresponding official source tag instead of guessing.
+const releaseTag='https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/dsh-v';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 // These contracts intentionally enumerate validated prereleases. Never bypass
@@ -13,6 +17,15 @@ export function validateCompatibility(metadata,version,verified=matrixVersions){
  const listed=range=>typeof range==='string'?range.split(/\s*\|\|\s*/).sort():[];
  const exact=range=>JSON.stringify(listed(range))===JSON.stringify([...verified].sort());
  if(!exact(metadata.engines?.dsh)||sdkPeers.some(name=>!exact(metadata.peerDependencies?.[name])))throw Error('Host and all SDK peers must exactly match the tested matrix');
+ // Development dependencies are intentionally single-version pins: they are
+ // the local snapshot used by tests, not a second compatibility declaration.
+ // Requiring them to equal the whole matrix would make every added prerelease
+ // unbuildable, so only require an exact version that remains in the matrix.
+ for(const [name,range] of Object.entries(metadata.devDependencies??{})){
+  if(!name.startsWith('@deepseek-ai/dsh-'))continue;
+  if(typeof range!=='string'||!/^0\.\d+\.\d+-(?:rc|alpha)\.\d+$/.test(range))throw Error('SDK development dependencies must pin one exact version: '+name);
+  if(!verified.includes(range))throw Error('SDK development dependency is outside the tested matrix: '+name+' '+range);
+ }
  if(!verified.includes(version))throw Error('Official version is absent from the tested matrix: '+version);
  if(!/^0\.\d+\.\d+-(?:rc|alpha)\.\d+$/.test(version))throw Error('Invalid exact SDK version');
  const admits=range=>typeof range==='string'&&range.split(/\s*\|\|\s*/).includes(version);
@@ -37,7 +50,11 @@ function desktopVersion(text){
 export async function checkOfficialVersions(metadata,{fetchImpl=fetch}={}){
  const read=async(url,limit)=>{
   const response=await fetchImpl(url,{signal:AbortSignal.timeout(15000),redirect:'error'});
-  if(!response.ok)throw Error('Official version lookup failed: '+response.status);
+  if(!response.ok){
+   const error=Error('Official version lookup failed: '+response.status);
+   error.status=response.status;
+   throw error;
+  }
   let text='';
   if(response.body?.getReader){
    const reader=response.body.getReader();let bytes=0;const decoder=new TextDecoder();
@@ -50,10 +67,17 @@ export async function checkOfficialVersions(metadata,{fetchImpl=fetch}={}){
  const sdkLatest=JSON.parse(npmText)['dist-tags']?.latest;
  const desktop=desktopVersion(feed);
  validateCompatibility(metadata,sdkLatest);validateCompatibility(metadata,desktop);
- const exact=JSON.parse(await read(registry+'/'+encodeURIComponent(desktop),1024*1024));
+ let exact,desktopSdkSource='npm';
+ try{
+  exact=JSON.parse(await read(registry+'/'+encodeURIComponent(desktop),1024*1024));
+ }catch(error){
+  if(error.status!==404)throw error;
+  desktopSdkSource='github-release-tag';
+  exact=JSON.parse(await read(releaseTag+encodeURIComponent(desktop)+'/apps/cli/package.json',1024*1024));
+ }
  if(exact.name!=='@deepseek-ai/dsh'||exact.version!==desktop)throw Error('Desktop SDK metadata mismatch');
  if(typeof exact.engines?.node!=='string'||!exact.engines.node)throw Error('Desktop SDK Node requirement missing');
- return {sdkLatest,desktopVersion:desktop,desktopSdkVersion:exact.version,desktopNodeRequirement:exact.engines.node,desktopFeed,compatibilityOverride:false};
+ return {sdkLatest,desktopVersion:desktop,desktopSdkVersion:exact.version,desktopNodeRequirement:exact.engines.node,desktopSdkSource,desktopFeed,compatibilityOverride:false};
 }
 async function main(){
  const metadata=JSON.parse(await readFile(new URL('../package.json',import.meta.url)));

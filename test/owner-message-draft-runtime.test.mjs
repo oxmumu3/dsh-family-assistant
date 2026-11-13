@@ -38,7 +38,19 @@ for(const origin of ['wechat','console']){
  test(`a new ${origin} topic prevents a later confirmation from executing an older draft`,async t=>{
   const f=await fixture(t);await f.send(origin,'先帮我起草给K发：晚上八点见','stale-first');
   await f.send(origin,'今天你能做什么呢？','unrelated-next');await f.send(origin,'确认','unrelated-confirm');
-  assert.equal(f.sent.some(row=>row.personId==='k'),false);assert.equal(f.runtime.status().workbench.cards[0].status,'draft');
+  if(origin==='wechat'){
+   // 新契约：微信每句话都原样进原生会话，不再生成面板草稿，也不会用「确认」执行旧草稿。
+   const texts=['先帮我起草给K发：晚上八点见','今天你能做什么呢？','确认'];
+   assert.equal(f.native.length,3,'三句微信消息都进了原生会话');
+   assert.ok(f.native.every((row,index)=>row.prompt.endsWith('当前 Owner 请求原文：\n'+texts[index])),'每句原话都完整转入');
+   assert.equal(f.plans.length,0,'微信草稿不再经过工作台规划器');
+   assert.equal(f.runtime.status().workbench.cards.length,0,'微信不再生成面板草稿');
+   assert.equal(f.sent.some(row=>row.personId==='k'),false,'没有任何内容发给K');
+   assert.equal(f.sent.at(-1).text,'合成普通答复','微信只收到会话自己的答复');
+  }else{
+   // 面板（console）仍是草稿与确认入口：新话题不会确认旧草稿。
+   assert.equal(f.sent.some(row=>row.personId==='k'),false);assert.equal(f.runtime.status().workbench.cards[0].status,'draft');
+  }
  });
 }
 test('a replaced Owner WeChat binding cannot confirm a draft from the previous binding',async t=>{

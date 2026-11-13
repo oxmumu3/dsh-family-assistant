@@ -18,7 +18,7 @@ test('mounted Owner native tool offers direct messages, complete local history a
   const services={connection:{fetch:{register(){return()=>{};}}},tools:{register(tool){tools.push(tool);}},llm:{listProviders:()=>[]}};
   const dispose=apply({get:name=>services[name],tools:services.tools,effect:fn=>fn()},{storageDir:directory});t.after(dispose);
   const actions=tools.find(tool=>tool.name==='family_assistant').parameters.properties.action.enum;
-  for(const action of ['send_message','history_page','confirm_management'])assert.ok(actions.includes(action),'Missing actual Owner capability: '+action);
+  for(const action of ['send_message','history_page','confirm_management','important_update','important_alert','important_alert','important_reply','family_reply','workflow_reply','dismiss_relay','service_request','reminder'])assert.ok(actions.includes(action),'Missing actual Owner capability: '+action);
 });
 test('Host project result becomes an idempotent family draft without dispatch',async t=>{
   const {wb,executed}=setup(t),input={text:'把合成摘要给K，先准备安排',requestId:'host-call-1',draftOnly:true};

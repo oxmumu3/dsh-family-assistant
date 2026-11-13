@@ -9,7 +9,7 @@ const instant='2026-10-25T02:00:00.000Z';
 async function fixture(t,options={}){
  const directory=mkdtempSync(join(tmpdir(),'lele9-runtime-')),sent=[],native=[];let callbacks;
  const runtime=createRuntime({directory,now:()=>instant,intervalMs:600000,
-  ownerAgent:{listWorkspaces:async()=>[{workspaceId:'digest',title:'AI 日报',path:directory}],start:async x=>{native.push(x);return{state:'succeeded',text:'原生结果'};},observe:async()=>({state:'succeeded',text:'原生结果'})},
+  ownerAgent:{ensureControlWorkspace:async()=>({workspaceId:'digest',title:'AI 日报',path:directory}),listWorkspaces:async()=>[{workspaceId:'digest',title:'AI 日报',path:directory}],start:async x=>{native.push(x);return{state:'succeeded',text:'原生结果'};},observe:async()=>({state:'succeeded',text:'原生结果'})},
   digestSources:async()=>[{relativePath:'daily.md',name:'daily.md',bytes:30,updatedAt:instant}],
   toolExecutors:{ai_digest:async()=>({text:'三条合成AI精选'})},
   planWorkbench:async()=>({reply:'普通管理回复',operation:null}),
@@ -39,14 +39,20 @@ test('Owner console drafts an actual digest service, confirms it in chat and doe
  assert.equal((await runtime.action({action:'tool_assignments',personId:'mom'}))[0].revision,grants[0].revision);
 });
 
-test('Owner WeChat uses the same service path and accepts a natural current-plan confirmation',async t=>{
+test('Owner WeChat routes service setup through the native session and the family tool',async t=>{
  const{runtime,sent,native}=await fixture(t);
- await incoming(runtime,'owner','wechat-setup','用【AI 日报】项目的 daily.md，给妈妈每天北京时间08:00推送AI日报');
- assert.ok(runtime.status().serviceSetup.some(row=>row.origin==='wechat'&&row.status==='ready'));
- await incoming(runtime,'owner','wechat-confirm','确认开通');
- const grants=await runtime.action({action:'tool_assignments',personId:'mom'});assert.equal(grants.length,1);
- assert.equal(native.length,0);assert.equal(sent.some(row=>row.personId==='mom'),false);
- assert.ok(sent.some(row=>row.personId==='owner'&&/开通|保存|生效/.test(row.text)));
+ const request='用【AI 日报】项目的 daily.md，给妈妈每天北京时间08:00推送AI日报';
+ await incoming(runtime,'owner','wechat-setup',request);await runtime.settled();
+ assert.equal(native.length,1,'服务请求原样进原生会话');
+ assert.ok(native[0].prompt.endsWith('当前 Owner 请求原文：\n'+request),'会话收到原话');
+ assert.equal(runtime.status().serviceSetup.some(row=>row.origin==='wechat'),false,'不再由微信固定短语直接建服务草稿');
+ await runtime.action({action:'service_request',text:request,requestId:'wechat-service-tool'});
+ const draft=runtime.status().serviceSetup.find(row=>row.status==='ready');
+ assert.ok(draft,'family_assistant 的服务动作能建立可确认草稿');
+ assert.equal(draft.origin,'wechat','草稿记录真实来源');
+ assert.equal((await runtime.action({action:'tool_assignments',personId:'mom'})).length,0,'确认之前不落授权');
+ assert.equal(native.length,1,'确认由工具完成，不再多进一轮会话');
+ assert.equal(sent.some(row=>row.personId==='mom'),false);
 });
 
 test('member memory actions are persisted for that member and never exposed to Owner status or another member model',async t=>{
@@ -106,8 +112,12 @@ test('a replacement binding does not put old private note text or reminder conte
 });
 
 test('Owner help in console and WeChat explains actual project control and family service setup',async t=>{
- const{runtime,sent}=await fixture(t,{respond:async()=>{throw Error('help does not need a model');},planWorkbench:async()=>{throw Error('help does not need a planner');}});
+ const{runtime,sent,native}=await fixture(t,{respond:async()=>{throw Error('help does not need a model');},planWorkbench:async()=>{throw Error('help does not need a planner');}});
  const state=await runtime.action({action:'owner_chat',text:'你能帮我做什么',requestId:'owner-help'});
  const reply=state.workbench.messages.at(-1).text;assert.match(reply,/项目/);assert.match(reply,/家人/);assert.match(reply,/开通|配置/);
- await incoming(runtime,'owner','owner-help-wechat','你能帮我做什么');assert.match(sent.at(-1).text,/项目/);assert.match(sent.at(-1).text,/家人/);
+ await incoming(runtime,'owner','owner-help-wechat','你能帮我做什么');await runtime.settled();
+ assert.equal(native.length,1,'WeChat 帮助原样进原生会话');
+ assert.ok(native[0].prompt.endsWith('当前 Owner 请求原文：\n你能帮我做什么'),'会话收到的是原话');
+ assert.equal(sent.some(row=>row.personId==='owner'&&/开通|配置/.test(row.text)),false,'不再回固定能力说明');
+ assert.equal(sent.at(-1).text,'原生结果','微信只收到会话自己的答复');
 });

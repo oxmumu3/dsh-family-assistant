@@ -9,6 +9,10 @@ on:
         type: boolean
         required: true
         default: false
+      expected_sha:
+        description: SHA-256 of the approved npm tarball from a validation-only run.
+        type: string
+        required: false
 permissions: {}
 concurrency:
   group: npm-release-dsh-family-assistant
@@ -146,6 +150,7 @@ jobs:
       EXPECTED_PACKAGE: "@oxmumu3/dsh-family-assistant"
       EXPECTED_SOURCE_DIRECTORY: .
       VALIDATED_SHA256: ${{ needs.validate.outputs.family_sha256 }}
+      APPROVED_SHA256: ${{ inputs.expected_sha }}
       VALIDATED_RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
     steps:
       - *a1
@@ -171,7 +176,8 @@ jobs:
           manifest=json.loads((root/'release-manifest.json').read_text());assert manifest['name']==expected and manifest['source_directory']==relative
           assert manifest['repository']==os.environ['EXPECTED_REPOSITORY'] and manifest['source_commit']==os.environ['GITHUB_SHA']
           assert manifest['run_id']==os.environ['GITHUB_RUN_ID'] and manifest['run_attempt']==os.environ['VALIDATED_RUN_ATTEMPT']
-          assert re.fullmatch('[a-f0-9]{64}',os.environ['VALIDATED_SHA256']) and manifest['sha256']==os.environ['VALIDATED_SHA256']
+          assert re.fullmatch('[a-f0-9]{64}',os.environ['APPROVED_SHA256']), 'Supply the previously verified SHA-256 before publishing'
+          assert manifest['sha256']==os.environ['VALIDATED_SHA256']==os.environ['APPROVED_SHA256'], 'New artifact differs from the approved tarball'
           filename=manifest['filename'];assert Path(filename).name==filename and filename.endswith('.tgz');archive=root/filename
           assert archive.is_file() and not archive.is_symlink() and archive.stat().st_size<=32*1024*1024
           assert hashlib.sha256(archive.read_bytes()).hexdigest()==manifest['sha256'],'Tarball digest mismatch'

@@ -129,10 +129,18 @@ test('explicit profile, selected member/card and draft-only management remain in
 
 for(const origin of origins)test(`Owner ${origin} brief keeps the existing service summary route`,async t=>{
  const f=await fixture(t);await f.send(origin,'查看简报');
- assert.equal(f.starts.length,0);assert.equal(f.ensures.length,0);assert.equal(f.harnessPlans.length,0);
- const replies=origin==='console'?f.runtime.status().workbench.messages:f.sent;
- assert.ok(replies.some(row=>/简报|家庭服务/.test(row.text)));
- assert.equal(replies.some(row=>/请说明要使用哪个项目/.test(row.text)),false);
+ if(origin==='console'){
+  assert.equal(f.starts.length,0);assert.equal(f.ensures.length,0);assert.equal(f.harnessPlans.length,0);
+  const replies=f.runtime.status().workbench.messages;
+  assert.ok(replies.some(row=>/简报|家庭服务/.test(row.text)));
+  assert.equal(replies.some(row=>/请说明要使用哪个项目/.test(row.text)),false);
+  return;
+ }
+ // 新契约：主人微信里的「查看简报」也是原话，直接进原生会话，不再被固定短语抢答。
+ assert.equal(f.starts.length,1);assert.ok(f.starts[0].prompt.includes('查看简报'));
+ assert.ok(f.ensures.length>=1);
+ assert.equal(f.harnessPlans.length,0);assert.equal(f.responses.length,0);
+ assert.equal(f.sent.some(row=>/家庭服务|简报/.test(row.text)&&row.text!=='合成原生结果 1'),false,'没有固定简报回复被发出');
 });
 
 test('Owner console self-reminder stays with existing management instead of a null native route',async t=>{
@@ -141,12 +149,28 @@ test('Owner console self-reminder stays with existing management instead of a nu
  assert.equal(f.runtime.status().workbench.messages.at(-1).text,'合成管理结果');
 });
 
-test('Owner WeChat self-reminder retains its personal organizer and does not start native execution',async t=>{
- const f=await fixture(t,{respond:()=>({reply:'准备记录',action:{type:'remind',text:'浇花',dueAt:'2026-10-26T00:00:00.000Z',repeat:'once'}})});
+test('Owner WeChat self-reminder enters the native session and uses family_assistant reminder actions',async t=>{
+ const f=await fixture(t);
  await f.send('wechat','提醒我明早八点浇花');
- assert.equal(f.starts.length,0);assert.equal(f.ensures.length,0);assert.equal(f.workbenchPlans.length,0);
- assert.equal(f.responses.length,1);assert.equal(f.runtime.store.reminders('owner').length,1);
+ // 新契约：这句话不再归个人记事规划器，原话直接进主人自己的原生会话。
+ assert.equal(f.starts.length,1);
+ assert.ok(f.starts[0].prompt.includes('提醒我明早八点浇花'));
+ assert.ok(f.ensures.length>=1,'进会话前确保控制工作区');
+ assert.equal(f.responses.length,0,'不再经过通用应答模型');
+ assert.equal(f.workbenchPlans.length,0);
+ // 主人自己的提醒改由 family_assistant.reminder（runtime 的 owner_reminder）承接。
+ const dueAt='2026-10-26T00:00:00.000Z';
+ const added=await f.runtime.action({action:'owner_reminder',op:'add',text:'浇花',dueAt});
+ assert.match(added.text,/已记下提醒：浇花/);
+ const listed=await f.runtime.action({action:'owner_reminder',op:'list'});
+ assert.equal(listed.reminders.length,1);
+ assert.equal(listed.reminders[0].text,'浇花');
+ assert.equal(listed.reminders[0].dueAt,dueAt);
+ assert.equal(f.runtime.store.reminders('owner').length,1);
  assert.equal(f.runtime.store.reminders('mom').length,0);
+ await f.runtime.action({action:'owner_reminder',op:'cancel',reminderId:added.reminderId});
+ assert.equal((await f.runtime.action({action:'owner_reminder',op:'list'})).reminders.length,0);
+ assert.equal(f.runtime.store.reminders('owner').filter(row=>row.status==='active').length,0,'取消后没有仍生效的提醒');
 });
 
 for(const origin of origins)test(`an unrelated old draft cannot capture Owner ${origin} confirmation after a native exchange`,async t=>{

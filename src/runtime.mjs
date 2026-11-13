@@ -8,6 +8,7 @@ import {createWorkbench} from './workbench.mjs';
 import {buildOwnerBrief,buildElderDaily,localDate,localDateTimeToInstant} from './brief.mjs';
 import {scheduleTick} from './scheduler.mjs';
 import {createChannelManager} from './channels.mjs';
+import {createConnectionSuspensions} from './connection-suspensions.mjs';
 import {weixinSendFailureDetail,readWeixinSendFailureDetail} from './weixin-send-diagnostic.mjs';
 import {parseModelReply,modelFailureReply} from './model.mjs';
 import {isOwnerCommandCandidate,resolveOwnerTarget,hasExplicitOwnerTime} from './owner-commands.mjs';
@@ -20,6 +21,8 @@ import {createConsoleConversationStore} from './owner-console-conversation.mjs';
 import {reachFor,reachLabel,canSendNow} from './reach.mjs';
 import {safetyCard} from './safety.mjs';
 import {buildOwnerTurn} from './owner-prompt.mjs';
+import {writeAttachmentFile} from './owner-attachments.mjs';
+import {ownerPushBackground,withOwnerPushHeader,ownerPushCategory} from './owner-push.mjs';
 import {createFamilyAccess} from './family-access.mjs';
 import {createHarnessGateway} from './harness-gateway.mjs';
 import {createFamilyToolbox} from './family-toolbox.mjs';
@@ -36,8 +39,10 @@ import {createDeferredMemberNotices,deferredNoticeKind} from './deferred-member-
 import {buildServiceProgress} from './service-progress.mjs';
 import {createDigestDelivery} from './digest-delivery.mjs';
 import {createWorkflowNotifications} from './workflow-notifications.mjs';
-import {canRequestMemberOwnerHelp} from './member-agent.mjs';
-import {isOwnerManagementConfirmation,isOwnerMessageDraftIntent} from './owner-management-tool.mjs';
+import {canRequestMemberOwnerHelp,canAskMemberOwner} from './member-agent.mjs';
+import {isOwnerManagementConfirmation,isOwnerMessageDraftIntent,ownerServiceContextId} from './owner-management-tool.mjs';
+import {confirmOwnerServiceDraft} from './owner-service-confirm.mjs';
+import {createOwnerServiceLedger,serviceDraftMarker} from './owner-service-ledger.mjs';
 import {createRuntimeAttention} from './important-event-runtime.mjs';
 import {createDotOwnerProjectRead} from './dot-owner-project-read.mjs';
 import {acceptedReviewToken} from './owner-review-ack.mjs';
@@ -79,7 +84,8 @@ const inputKeys={
   family_access_grant:['personId','workspaceIds','capabilities'],family_access_revoke:['personId'],
   harness_projects:[],harness_submit:['workspaceId','text','requestId','recipientPersonId'],harness_task_status:['taskId'],harness_continue:['taskId','text','requestId'],harness_cancel:['taskId'],harness_artifact:['taskId','relativePath'],
   tool_catalog:['personId'],tool_assignments:['personId'],tool_assign:['personId','toolId','resource','allowInvoke','schedule'],
-  tool_invoke:['personId','toolId','requestId','input','expectedRevision'],workflow_requests:[],workflow_request_update:['personId','requestId','status','note','operationId'],weather_locations:['query'],digest_sources:['workspaceId','query'],
+  tool_invoke:['personId','toolId','requestId','input','expectedRevision'],workflow_requests:[],workflow_request_update:['personId','requestId','status','note','operationId'],workflow_reply:['request','status','note','operationId'],weather_locations:['query'],digest_sources:['workspaceId','query'],
+  family_reply:['requestId','text'],attention_respond:['incidentId','status','text'],service_request:['text','requestId'],owner_reminder:['op','text','dueAt','repeat','reminderId'],
   service_select:['draftId','revision','choiceId','requestId'],service_confirm:['draftId','revision','requestId'],service_cancel:['draftId','revision','requestId'],
   service_send_once:['draftId','revision','requestId'],
   resume_owner_native_message:['messageId'],
@@ -130,12 +136,16 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   directory=resolve(directory);const unlock=exclusiveLock(directory);
   let store;
   try{store=createStore({directory,now});store.recoverDispatching();}catch(error){unlock();throw error;}
+  // 本人手动断开的标记独立存放，不改变 family.json 的字段结构，旧版回退仍能读台账。
+  let suspensions;
+  try{suspensions=createConnectionSuspensions({directory,now});}catch(error){unlock();throw error;}
   const inboundTiming=createInboundTimingLedger({directory});
   const reminderAdmission=createInboundTimingLedger({directory,fileName:'owner-reminder-admission.json'});
   let ownerLibrarySources;try{ownerLibrarySources=createOwnerLibrarySources({directory,now});}catch(error){unlock();throw error;}
+  let ownerServiceViews;try{ownerServiceViews=createOwnerServiceLedger({directory,now});}catch(error){unlock();throw error;}
   let closed=false,timer=null,ticking=null,lastBrief=null,lastBriefAccess=null,lastError=null,runtimeReady=false;let lastPruneAt=0;
   const managementLifecycle=new AbortController();
-  let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map(),memberWork=new Map(),memberQueued=new Map(),outboxAuthorities=new Map(),ownerObservers=new Map();
+  let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map(),memberWork=new Map(),memberQueued=new Map(),outboxAuthorities=new Map(),ownerObservers=new Map(),reconnectAttempt=new Map(),reconnectSerial=new Map();
   const safeError=error=>{
     const deliveryDetail=weixinSendFailureDetail(error);if(deliveryDetail)return deliveryDetail;
     const text=String(error?.message??'服务暂时不可用');
@@ -146,7 +156,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   let onboarding,deferredNotices;
   const channels=channelFactory({directory:join(directory,'channels'),api,now,...(transcribeVoice?{transcribeVoice}:{}),
     lookupInboundVoice:(personId,messageId)=>{const binding=store.binding(personId),row=store.messages(personId).find(value=>value.dir==='in'&&value.id===messageId&&recordMatchesBinding(value,binding));return row?{text:row.text,at:row.at,...(row.text==='[未能识别的语音]'?{voiceError:'failed'}:{})}:null;},
-    onBound:(id,identity)=>{const newBinding=!store.binding(id),binding=store.bindPerson(id,identity);onboarding?.markBound(id,identity,{newBinding});return binding;},
+    onBound:(id,identity,options={})=>{const newBinding=!store.binding(id),wasSuspended=suspended(id);if(wasSuspended&&!reconnectArmed(id,options?.resumeToken))throw new Error('这位成员的微信已手动断开，只有本人当前这次恢复连接或重新扫码成功后才会接回。');const binding=store.bindPerson(id,identity);if(wasSuspended)suspensions.clear(id);reconnectAttempt.delete(id);onboarding?.markBound(id,identity,{newBinding});return binding;},
     onStatus:(id,patch)=>{if(!closed&&store.person(id)){store.setConnection(id,patch);if(runtimeReady&&patch.status==='connected')void resumeMemberAdmissions(id).catch(error=>{lastError=safeError(error);});}},
     onMessage:(id,message)=>receive(id,message),
   });
@@ -161,7 +171,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     }:undefined;
     toolbox=createFamilyToolbox({directory,store,now,executors:{...toolExecutors,...(presentationExecutor?{presentation:presentationExecutor}:{})}});
     consoleConversations=createConsoleConversationStore({directory,now});
-    gateway=createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,consoleConversation:()=>consoleConversations.read(),now,recoverOnCreate:false,onResult:deliverHarnessResult});
+    gateway=createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,ownerServiceDraftIds:({personId,sessionId})=>ownerServiceViews.idsFor({sessionId,personId,contextId:ownerServiceContextId(sessionId)}),consoleConversation:()=>consoleConversations.read(),now,recoverOnCreate:false,onResult:deliverHarnessResult});
     presentations=createPresentationWorkflow({directory,store,now,generate:generatePresentation,extract:extractMaterial,defaultEnabled:Boolean(memberAgent&&generatePresentation&&extractMaterial&&typeof channels.sendFile==='function'&&typeof channels.downloadFile==='function'),
     download:typeof channels.downloadFile==='function'?(...args)=>channels.downloadFile(...args):undefined,
     send:typeof channels.sendFile==='function'?(...args)=>channels.sendFile(...args):undefined,
@@ -196,7 +206,18 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     map.set(key,task);task.finally(()=>{if(map.get(key)===task)map.delete(key);}).catch(()=>{});return task;
   };
   const alive=()=>{if(closed)throw new Error('家庭助手已关闭。');};
+  // 本人明确点过「断开连接」的成员停在本机 sidecar 里，重开服务不会自动接回。
+  const suspended=id=>suspensions.isSuspended(id);
+  // 每次显式恢复/扫码有自己的 token；旧操作的 catch/finally 不能撤掉新操作。
+  const reconnectArmed=(id,token)=>{const row=reconnectAttempt.get(id);if(!row||row.token!==token)return false;if(Date.parse(now())>=row.until){if(reconnectAttempt.get(id)===row)reconnectAttempt.delete(id);return false;}return true;};
+  const reconnectActive=id=>{const row=reconnectAttempt.get(id);if(!row)return false;if(Date.parse(now())>=row.until){if(reconnectAttempt.get(id)===row)reconnectAttempt.delete(id);return false;}return true;};
+  const beginReconnect=(id,ms)=>{const token=(reconnectSerial.get(id)??0)+1;reconnectSerial.set(id,token);reconnectAttempt.set(id,{token,until:Date.parse(now())+ms});return token;};
+  const endReconnect=(id,token)=>{const row=reconnectAttempt.get(id);if(row?.token===token)reconnectAttempt.delete(id);};
+  const cancelReconnect=id=>reconnectAttempt.delete(id);
   const current=route=>{try{return !closed&&!store.snapshot().config.paused&&sameRoute(store.route(route.personId),route);}catch{return false;}};
+  // 单点拦截：即使异步重连把通道短暂标成 connected，也不能从已停用通道发出任何内容。
+  const channelSend=typeof channels.send==='function'?channels.send.bind(channels):null;
+  if(channelSend)channels.send=async(route,text,options)=>{if(suspended(route?.personId))throw Object.assign(new Error('这位成员的微信已由本人断开，没有发送。'),{sendOutcome:'failed'});return channelSend(route,text,options);};
   const currentMember=(person,route)=>current(route)&&channels.status(route.personId)?.status==='connected'&&store.person(person.id)?.role==='elder'&&store.person(person.id)?.createdAt===person.createdAt;
   const memberHistory=(personId,limit)=>store.messages(personId).filter(message=>recordMatchesBinding(message,store.binding(personId))).slice(-limit);
   function memberReports(personId,route){
@@ -228,12 +249,19 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       memberTools:memberPresetTools(person,route,message,text),
       ...(memberReportFeedback?{setReportPreference:async args=>{if(!authorize()||await args.authorize()!==true||!authorize())throw new Error('当前连接已改变。');return memberReportFeedback.setPreference({personId:person.id,route,text,instruction:args.instruction,evidence:args.evidence,authorize});}}:{}),
       requestOwnerHelp:async args=>{
-        if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted||!canRequestMemberOwnerHelp({text,evidence:args.evidence,requestText:args.text}))throw new Error('没有获得这次转告的明确同意。');
-        const sourceNotice=await attention.ownerNoticeForSource(person.id,message.id);
+        if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted||!canRequestMemberOwnerHelp({text,evidence:args.evidence,requestText:args.text}))throw new Error('没有获得这次转告的明确同意。');        const sourceNotice=await attention.ownerNoticeForSource(person.id,message.id);
         if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted)throw new Error('当前连接已改变。');
         const request=toolbox.requestWorkflow({personId:person.id,requestId:args.requestId,text:args.text}),notification=sourceNotice??await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal});
         const reply=sourceNotice?sourceNotice.status==='api_accepted'?'已向微信接口提交这件事的提醒，实际收到仍待确认。':sourceNotice.status==='failed'?'这件事已记录，提醒发送失败，没有重复发送。':sourceNotice.status==='pendingOwner'?'这件事已记录，提醒正在等待投递。':'这件事已记录，提醒投递尚未确认，没有重复发送。':'已记录这次求助，家庭联系人可在同一需求中继续处理。';
         return{status:notification?.status??'recorded',requestId:request.requestId,reply};
+      },
+      askOwner:async args=>{
+        if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted||!canAskMemberOwner({text,evidence:args.evidence,question:args.text}))throw new Error('没有获得这次托问的明确同意。');
+        const request=workbench.createRequest({personId:person.id,text:args.text,sourceId:`${route.generation}:${message.id}`});
+        const notified=await notifyRequest(request);
+        if(!authorize())throw new Error('当前连接已改变。');
+        const reply=notified?'已把这条托问提交给家庭联系人的待回应；微信接口已接受，不代表手机已收到，也不保证对方一定答复。':'已经记在家庭联系人的待回应里，微信通知尚未确认。';
+        return{status:notified?'api_accepted':'recorded',requestId:request.id,reply};
       },
       ...(typeof channels.sendFile==='function'?{deliverFile:async args=>{
         if(!authorize()||await args.authorize()!==true)throw Object.assign(new Error('文件接收人的连接已改变。'),{sendOutcome:'failed'});
@@ -361,7 +389,18 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     migration:(()=>{try{return planMemberMigration({directory,people:state.people,bindings:state.bindings});}catch{return null;}})(),people:state.people.map(person=>{
       const persisted=store.binding(person.id);const live=channels.status(person.id)??{};
       const reach=reachOf(person.id);
-      return{...person,reach:{state:reach.state,remainingMs:reach.remainingMs,label:reachLabel(reach)},binding:{...live,generation:persisted?.generation??null,status:live.status??persisted?.status??'disconnected',connected:live.status==='connected',lastError:live.lastError??persisted?.lastError??null}};
+      const manuallyDisconnected=suspended(person.id);
+      const reconnecting=manuallyDisconnected&&reconnectActive(person.id);
+      const liveStatus=live.status??live.phase;
+      // 本人刚发起的扫码/恢复要显示真实进度和二维码；成功前仍是停用状态。
+      const showReconnect=reconnecting&&['connecting','awaiting_scan','scanned','need_verification'].includes(liveStatus);
+      const binding={...live,generation:persisted?.generation??null,
+        status:manuallyDisconnected?(showReconnect?liveStatus:'disconnected'):liveStatus??persisted?.status??'disconnected',
+        connected:!manuallyDisconnected&&live.status==='connected',
+        suspended:manuallyDisconnected,reconnecting,
+        lastError:manuallyDisconnected?(showReconnect?live.lastError??null:null):live.lastError??persisted?.lastError??null};
+      if(manuallyDisconnected&&!showReconnect)delete binding.qrUrl;
+      return{...person,reach:{state:reach.state,remainingMs:reach.remainingMs,label:reachLabel(reach)},binding};
     }),reminders:state.reminders.map(row=>visible.has(row.personId)?row:{...row,text:'内容未授权展示'}),outbox:state.outbox.map(({route,authorizationRoute,text,...row})=>row),ownerCommands:store.ownerCommands().map(({requestRoute,...command})=>{
       const deliveries=command.action==='send_daily'?state.outbox.filter(row=>row.id===command.resultId):state.outbox.filter(row=>row.sourceKey.startsWith(`reminder:${command.resultId}:`));
       const reminder=command.action==='remind'?state.reminders.find(row=>row.id===command.resultId):null;
@@ -476,7 +515,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const what=row.kind==='reminder'?'提醒':'这句话';
     try{
       store.enqueue({personId:owner.id,kind:'undeliverable_notice',sourceKey:`undeliverable:${row.id}`,
-        text:`给${label}的${what}没送到（${reason}）：\n「${body}」\n把引号里这句直接转给她就行。`});
+        text:withOwnerPushHeader('undeliverable_notice',label,`给${label}的${what}没送到（${reason}）：\n「${body}」\n把引号里这句直接转给她就行。`)});
     }catch(error){lastError=safeError(error);}
   };
   const reachOf=personId=>{
@@ -522,7 +561,9 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         for(const row of store.pending().filter(item=>item.personId===personId&&item.kind==='manual_daily'&&(!onlyId||item.id===onlyId)))cancelUnauthorized(row);
         return;
       }
+      if(suspended(personId))return;
       for(const row of store.pending().filter(x=>x.personId===personId&&(!onlyId||x.id===onlyId))){
+        if(suspended(personId))return;
         if(row.kind===deferredNoticeKind&&!deferredNotices.canDeliver(row))continue;
         if(['important_event','important_clarify'].includes(row.kind)&&channels.status(personId)?.status!=='connected')continue;
         if(extraAuthorize&&extraAuthorize()!==true){store.transition(row.id,'cancelled','当前指令授权已改变，没有发送。');continue;}
@@ -552,6 +593,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           try{const fresh=store.snapshot().outbox.find(item=>item.id===row.id);if(fresh?.status==='pending'){const adapted=await memberReportFeedback.adaptReport({personId,route:row.route,text:fresh.text,sourceKey:row.sourceKey,signal:lifecycle.signal,authorize:()=>current(row.route)});if(current(row.route))store.updatePendingText(row.id,adapted.text);}}
           catch(error){lastError=safeError(error);const fresh=store.snapshot().outbox.find(item=>item.id===row.id);if(fresh?.status==='pending')store.transition(row.id,'blocked','本人的日报改写尚未完成，未自动重试。');continue;}
         }
+        if(suspended(personId))return;
         if(cancelUnauthorized(row))continue;
         if(store.snapshot().outbox.find(x=>x.id===row.id)?.status!=='pending')continue;
         const started=store.transition(row.id,'dispatching');
@@ -619,13 +661,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const owner=store.snapshot().people.find(p=>p.role==='owner');
     if(!owner||!request.ownerRoute||!current(request.ownerRoute)||channels.status(owner.id)?.status!=='connected')return false;
     const label=store.person(request.personId).label;
-    const row=store.enqueue({personId:owner.id,text:`${label}请家庭助手转告你：\n${request.text}\n\n你可以在家庭助手的“待我回应”里回复，也可以在微信告诉我如何回复这件事。`,kind:'family_request',authorizationRoute:request.route,sourceKey:`family-request:${request.id}`});
+    const row=store.enqueue({personId:owner.id,text:withOwnerPushHeader('family_request',label,`${label}请家庭助手转告你：\n${request.text}\n\n你可以在家庭助手的“待我回应”里回复，也可以在微信告诉我如何回复这件事。`),kind:'family_request',authorizationRoute:request.route,sourceKey:`family-request:${request.id}`});
     await flush(owner.id,{onlyId:row.id});return store.snapshot().outbox.find(r=>r.id===row.id)?.status==='api_accepted';
   }
   async function notifyRequestResponse(request,response,messageId){
     const owner=store.snapshot().people.find(p=>p.role==='owner');
     if(!owner||!request.ownerRoute||!current(request.ownerRoute)||!current(request.route))return;
-    const row=store.enqueue({personId:owner.id,text:`${store.person(request.personId).label}回应了先前转告的事项：\n${response}\n\n关于：${request.text.slice(0,180)}\n已记录这次回应；不代表外部事项已完成。`,kind:'family_response',authorizationRoute:request.route,sourceKey:`family-response:${request.id}:${messageId}`});
+    const label=store.person(request.personId).label;
+    const row=store.enqueue({personId:owner.id,text:withOwnerPushHeader('family_response',label,`${label}回应了先前转告的事项：\n${response}\n\n关于：${request.text.slice(0,180)}\n已记录这次回应；不代表外部事项已完成。`),kind:'family_response',authorizationRoute:request.route,sourceKey:`family-response:${request.id}:${messageId}`});
     await flush(owner.id,{onlyId:row.id});
   }
   function managementReply(view){
@@ -691,6 +734,76 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const result=replying?await workflowNotifications.requestUpdate({actorId:person.id,personId:request.personId,requestId:request.requestId,status:'accepted',note:match[3],operationId:requestId,...(origin==='wechat'?{authorityRoute:route}:{}),signal:lifecycle.signal}):await workflowNotifications.followUp({personId:person.id,requestId:request.requestId,text:match[3],operationId:requestId,expectedRoute:route,signal:lifecycle.signal});
     return{reply:result.reply};
   }
+  /** 会话里答复家人的工具需求：背景块给的是 wf- 短编号，这里换回真实请求。 */
+  function workflowRequestByShort(short){
+    const rows=toolbox.listRequests({actorId:ownerId()});
+    const matches=rows.filter(row=>workflowNotifications.shortId({personId:row.personId,requestId:row.requestId})===short);
+    if(matches.length!==1)throw new Error(matches.length?'这项需求对应多条记录，请在背景里核对需求编号。':'没有找到这项需求，可能已经结束。');
+    return matches[0];
+  }
+  /** 更新一项工具需求，并把答复送回家人。console 与原生会话共用同一实现。 */
+  async function updateWorkflowRequest(args,{origin='session'}={}){
+    if(!['pending','accepted','completed','declined'].includes(args.status)||args.note!==undefined&&(typeof args.note!=='string'||!args.note.trim()||args.note.length>2000))throw new Error('需求状态或说明无效。');
+    const actorId=ownerId(),operationId=args.operationId??(origin==='console'?'console-':'session-')+createHash('sha256').update(JSON.stringify(args)).digest('hex');
+    const authorityRoute=origin==='console'?undefined:store.route(actorId);
+    let result;
+    const run=async()=>{result=await workflowNotifications.requestUpdate({actorId,...args,operationId,...(authorityRoute?{authorityRoute}:{}),signal:lifecycle.signal});return{reply:result.reply};};
+    if(origin==='console')await workbench.external({text:'更新工具需求的接续进度：'+({pending:'待处理',accepted:'正在接续',completed:'已完成',declined:'暂不制作'}[args.status])+(args.note?'\n'+args.note:''),contextId:'workflow-'+createHash('sha256').update(JSON.stringify([args.personId,args.requestId])).digest('hex'),requestId:'workflow-update-'+createHash('sha256').update(operationId).digest('hex')},run);
+    else await run();
+    const request=result?.request??toolbox.listRequests({actorId}).find(row=>row.personId===args.personId&&row.requestId===args.requestId);
+    return{...request,notification:{status:result?.status??'recorded',reply:result?.reply??'该操作已有记录，未重复修改。'}};
+  }
+  /** 会话里直接答复家人托问的事：走工作台那条写回复的既有通路。 */
+  async function replyFamilyRequest({requestId,text}){
+    const owner=store.person(ownerId()),route=store.route(owner.id);
+    const authorize=()=>!closed&&store.person(owner.id)?.role==='owner'&&store.binding(owner.id)?.status==='connected'&&sameRoute(store.route(owner.id),route);
+    const operationId='family-reply-'+createHash('sha256').update(JSON.stringify([requestId,text])).digest('hex').slice(0,40);
+    const result=await workbench.reply({requestId,text,operationId,authorityRoute:route,authorize});
+    const status=result?.status??'unknown';
+    return{status,requestId,...(result?.resultId?{resultId:result.resultId}:{}),text:status==='api_accepted'?'已向家人的微信接口提交你的回复；实际收信待本人确认。':['failed','cancelled'].includes(status)?'这条回复没有完成，没有自动重发。':'这条回复的结果尚未确认，没有自动重发。'};
+  }
+  /** 会话里处理一件重要事项：只认事项编号，不依赖上一句话在不在历史里。 */
+  async function respondImportant({incidentId,status,text}){
+    const owner=store.person(ownerId()),incident=attention.snapshot().incidents.find(row=>row.id===incidentId);
+    if(!incident)throw new Error('这件事已经不在待处理里了。');
+    if(typeof text==='string'&&text.trim()){
+      const target=store.person(incident.personId),binding=store.binding(target.id),route=store.route(owner.id);
+      const result=await sendOwnerMessage({personId:target.id,text:text.trim().slice(0,2800),bindingGeneration:binding.generation,requestId:'attention-reply-'+createHash('sha256').update(JSON.stringify([incidentId,text.trim()])).digest('hex').slice(0,40)},{authorityRoute:route,authorize:()=>!closed&&store.person(owner.id)?.role==='owner'&&store.binding(owner.id)?.status==='connected',signal:lifecycle.signal});
+      return{incidentId,status:result?.status??'unknown',text:result?.status==='api_accepted'?`已向${target.label}的微信提交你的回复；实际收信待本人确认。`:'这条回复的投递尚未确认，没有自动重发。'};
+    }
+    if(!['acknowledged','resolved','muted'].includes(status))throw new Error('请说明这件事要记为已知悉、已解决还是不再提醒。');
+    attention.mark(incidentId,status);
+    return{incidentId,status,text:{acknowledged:'已记下你已知悉这件事。',resolved:'这件事已记为解决。',muted:'已将这件事静音；新的明确紧急变化仍会提醒你。'}[status]};
+  }
+  /** 主人自己的提醒与记事：会话可以列、加、取消，旧能力不丢。 */
+  function ownerReminder({op,text,dueAt,repeat,reminderId}){
+    const person=store.person(ownerId());
+    if(op==='list'){
+      const rows=store.reminders(person.id).filter(row=>['active','scheduled'].includes(row.status));
+      return{reminders:rows.map(row=>({id:row.id,text:row.text,dueAt:row.dueAt,repeat:row.repeat})),text:rows.length?`你有 ${rows.length} 条待执行的提醒。`:'你现在没有待执行的提醒。'};
+    }
+    if(op==='cancel'){
+      if(typeof reminderId!=='string'||!reminderId)throw new Error('取消提醒需要提醒编号；先列一次再取消。');
+      store.cancelReminder(person.id,reminderId);
+      return{text:'已取消这条提醒。'};
+    }
+    if(op!=='add')throw new Error('提醒操作只能是 list、add 或 cancel。');
+    if(typeof text!=='string'||!text.trim()||text.length>200)throw new Error('请说明提醒内容和具体时间。');
+    const due=Date.parse(String(dueAt??''));
+    if(!Number.isFinite(due))throw new Error('请说明提醒的具体时间。');
+    if(due<=Date.parse(now()))throw new Error('提醒时间已经过去，没有创建。');
+    const reminder=store.addReminder({personId:person.id,text:text.trim(),dueAt:new Date(due).toISOString(),repeat:repeat==='daily'?'daily':'once',timeZone:person.timeZone});
+    return{reminderId:reminder.id,text:'已记下提醒：'+reminder.text+'。时间：'+new Date(reminder.dueAt).toLocaleString('zh-CN',{timeZone:person.timeZone,hour12:false})+'。'};
+  }
+  /** 旧工作台/HTTP 服务草稿入口：保持既有接受范围，不接收 origin / contextId /
+   * draftOnly 等内部字段；Owner 原生会话走下面的 ownerServiceDraftForSession。 */
+  async function serviceRequest({text,requestId}){
+    const owner=store.person(ownerId());
+    try{
+      const result=await serviceSetup.handle({actorId:owner.id,text,requestId:requestId??('service-'+randomUUID()),origin:'wechat'});
+      return result??{status:'needs_input',text:'没有对应的服务草稿；请说明要给哪位家人开通或调整什么服务。'};
+    }catch(error){return{status:'needs_input',text:serviceSetupErrorText(error)};}
+  }
   async function runTool(args,route,{actorId,authorityRoute,notify=false,scheduled=false}={}){
     if(typeof args.requestId!=='string'||!args.requestId||args.requestId.length>160)throw new Error('工具请求标识须为1到160字符。');
     const authorize=()=>current(route)&&(!authorityRoute||current(authorityRoute)&&store.person(actorId)?.role==='owner');
@@ -700,7 +813,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const noticeRoute=authorityRoute??route;
       if((notify||scheduled)&&authorize()&&['executor_failed','invalid_result','restart_uncertain','executor_pending'].includes(result.reason))await serial(peopleWork,noticeRoute.personId,async()=>{
         if(!current(noticeRoute))return;
-        store.enqueue({personId:noticeRoute.personId,text:result.status==='uncertain'?'这项工具的结果尚未确认，未自动重跑。请让 Owner 核对资料源和任务记录。':({digest_no_current_report:'今天这份日报还没有生成，未发送旧日报。请让 Owner 检查上游生成进度。',digest_ambiguous_source:'找到了多份可能的日报，未替你选择或发送。请让 Owner 核对来源。',digest_source_changed:'日报来源刚刚发生变化，本次未发送。请让 Owner 重新核对来源。'}[result.failureCode]??'这次工具未能完成，尚未取得可返回的结果。请让 Owner 检查资料源和工具配置。'),kind:'tool_notice',sourceKey:'tool-notice:'+createHash('sha256').update(args.requestId).digest('hex'),authorizationRoute:noticeRoute});
+        store.enqueue({personId:noticeRoute.personId,text:result.status==='uncertain'?'这项工具的结果尚未确认，未自动重跑。请让 Owner 核对资料源和任务记录。':({digest_no_current_report:'今天这份日报还没有生成，未发送旧日报。请让 Owner 检查上游生成进度。',digest_ambiguous_source:'找到了多份可能的日报，未替你选择或发送。请让 Owner 核对来源。',digest_source_changed:'日报来源刚刚发生变化，本次未发送。请让 Owner 重新核对来源。'}[result.failureCode]??'这次工具未能完成，尚未取得可返回的结果。请让 Owner 检查资料源和工具配置。'),kind:'harness_notice',sourceKey:'tool-notice:'+createHash('sha256').update(args.requestId).digest('hex'),authorizationRoute:noticeRoute});
         await flush(noticeRoute.personId);
       });
       return result;
@@ -985,6 +1098,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       if(row&&(row.personId!==target.id||row.kind!=='owner_message'||row.text!==text||!sameRoute(row.route,store.route(target.id))||!!row.authorizationRoute!==!!authorityRoute||authorityRoute&&!sameRoute(row.authorizationRoute,authorityRoute)))throw new Error('这个消息标识已用于其他内容或绑定。');
       if(!row){
         if(store.snapshot().config.paused)throw new Error('服务已暂停，尚未发送。');
+        if(suspended(target.id))throw new Error('这位成员的微信已手动断开，恢复连接前不会发送。');
         if(channels.status(target.id)?.status!=='connected')throw new Error('这位家人的微信暂未连接，尚未发送。');
         row=store.enqueue({personId:target.id,text,kind:'owner_message',sourceKey,...(authorityRoute?{authorizationRoute:authorityRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
         outboxAuthorities.set(row.id,permitted);
@@ -1007,6 +1121,70 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     if(!isOwnerManagementConfirmation(authority.userText))throw new Error('当前消息没有确认这项安排，尚未执行。');
     if(authority.deliveryTarget)throw new Error('这轮成果由原任务统一投递，不能重复确认发送。');
     return workbench.confirm({cardId,revision,authorityRoute:authority.route??undefined,authorize:authority.authorize});
+  }
+  /** Whether the immediately previous Owner turn really reached WeChat with
+   * this exact draft revision. A tool result the model kept to itself is not a
+   * draft the owner saw, and an older same-summary revision is not this one. */
+  function previousOwnerTurnDelivered(authority,sessionId,shown){
+    try{
+      if(!authority||authority.origin!=='wechat'||typeof sessionId!=='string'||typeof authority.previousSourceRequestId!=='string'||!authority.previousSourceRequestId)return false;
+      const summary=shown?.summary,marker=shown?.marker,summaryHash=shown?.summaryHash;
+      // No loose branch: an empty summary, a missing verifier payload or a
+      // ledger row without exact version evidence always rejects.
+      if(typeof summary!=='string'||!summary.trim()||summary.length>6000)return false;
+      if(typeof marker!=='string'||!marker.trim()||marker.length>80)return false;
+      if(typeof summaryHash!=='string'||!/^[a-f0-9]{64}$/u.test(summaryHash)||createHash('sha256').update(summary).digest('hex')!==summaryHash)return false;
+      const matches=[];
+      for(const task of gateway.snapshot({personId:authority.personId})){
+        if(task.sessionId!==sessionId||!task.conversationId||task.origin!=='wechat')continue;
+        for(const entry of [task,...(task.turns??[])])if(entry.sourceRequestId===authority.previousSourceRequestId)matches.push({task,entry});
+      }
+      if(matches.length!==1)return false;
+      const {task,entry}=matches[0],prefix='harness-task:'+task.id+':'+entry.requestId+':';
+      const rows=store.snapshot().outbox.filter(row=>row.kind==='harness_result'&&typeof row.sourceKey==='string'&&row.sourceKey.startsWith(prefix));
+      const route=authority.route;
+      if(!rows.length||!rows.every(row=>row.status==='api_accepted'&&row.personId===authority.personId&&sameRoute(row.route,route)&&sameRoute(row.authorizationRoute,route)))return false;
+      // Producing a tool result is not the same as showing the draft: the
+      // delivered reply must contain this version's summary and its readable
+      // version marker. Two revisions with identical summaries still differ.
+      const delivered=rows.map(row=>String(row.text??'')).join('\n'),fold=value=>value.replace(/\s+/gu,'');
+      return fold(delivered).includes(fold(summary))&&fold(delivered).includes(fold(marker));
+    }catch{return false;}
+  }
+  /** Draft one service change from this same Owner native session. The caller
+   * cannot supply origin/contextId/draftOnly: they are derived from the verified
+   * active Owner tool call, and WeChat drafts are recorded with a readable
+   * revision marker so only the exact version shown in the previous turn can be
+   * confirmed next. */
+  async function ownerServiceDraftForSession({sessionId,callId,text,signal}={}){
+    const authority=await ownerAuthorityForSession({sessionId,callId,signal});
+    if(!['wechat','console'].includes(authority.origin))throw new Error('服务草稿只在主人原生会话里创建。');
+    if(authority.deliveryTarget)throw new Error('这轮成果由原任务统一投递，不能同时创建服务草稿。');
+    if(typeof text!=='string'||!text.trim()||text.length>6000)throw new Error('请说明要给哪位家人开通或调整什么服务。');
+    const origin=authority.origin,contextId=origin==='wechat'?ownerServiceContextId(sessionId):undefined;
+    const operationId='owner-service-draft-'+createHash('sha256').update(JSON.stringify([authority.personId,authority.sourceRequestId,text.trim()])).digest('hex').slice(0,40);
+    const result=await serviceSetup.handle({actorId:authority.personId,text,requestId:operationId,origin,draftOnly:true,...(contextId?{contextId}:{})});
+    if(!result?.draft)return result??{status:'needs_input',text:'没有对应的服务草稿；请说明要给哪位家人开通或调整什么服务。'};
+    if(authority.authorize()!==true)throw new Error('主人当前请求或微信绑定已改变，这次没有保留服务草稿。');
+    const summary=typeof result.draft.summary==='string'?result.draft.summary:'';
+    const marker=result.draft.status==='ready'&&summary.trim()?serviceDraftMarker(result.draft.revision):null;
+    if(origin==='wechat'&&marker)ownerServiceViews.record({sessionId,sourceRequestId:authority.sourceRequestId,personId:authority.personId,origin,contextId,draftId:result.draft.id,revision:result.draft.revision,summary,marker});
+    // Preview only: an immediate-send proposal must never reach a sender from here.
+    const{deliveryProposal,...preview}=result;void deliveryProposal;
+    if(origin!=='wechat'||!marker)return preview;
+    // The readable marker travels in the rendered reply. The Owner never has to
+    // copy it; confirmation only needs to find it in the accepted reply.
+    const rendered=typeof preview.reply==='string'?preview.reply:typeof preview.text==='string'?preview.text:null;
+    return rendered?{...preview,reply:`${rendered}\n（${marker}）`}:preview;
+  }
+  /** Confirm one service draft created and shown by this same Owner native
+   * session. The session-derived context plus the exact displayed revision is
+   * the domain boundary; the confirmation phrase comes from the trusted inbound
+   * message, never from a model-supplied argument. HTTP/console keep their own
+   * serviceSetup.confirm routes. */
+  async function ownerServiceConfirmForSession({sessionId,callId,draftId,revision,signal}={}){
+    const authority=await ownerAuthorityForSession({sessionId,callId,signal});
+    return confirmOwnerServiceDraft({authority,sessionId,draftId,revision,serviceSetup,ledger:ownerServiceViews,previousTurnDelivered:shown=>previousOwnerTurnDelivered(authority,sessionId,shown)});
   }
   function resolveOwnerMobileTask(sessionId,requestId){
     const captured=gateway.mobileTaskScope({sessionId,requestId});
@@ -1042,7 +1220,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       if(!currentTask||task.state==='succeeded')continue;
       if(ownerMobileControl?.hasPendingTask?.(task.id))continue;
       const waiting=['queued','running'].includes(task.state);
-      if(waiting&&Date.parse(now())-Date.parse(task.createdAt)<12000)continue;
+      if(waiting&&Date.parse(now())-Date.parse(task.createdAt)<45000)continue;
       const text=waiting?ownerWaitingText(task.prompt):({unknown:'这次处理的结果尚未确认，可能中途被打断了。我没有自动重新执行；你可以让我核对这件事的状态。',failed:'这件事未能完成，已有记录已保留。你可以告诉我接下来想怎样处理。',cancelled:'这件事已停止，已经保存或发出的内容会保留。',needs_approval:'这一步需要你在电脑上授权，尚未完成。你可以先让我处理不需要这项权限的部分。',needs_input:'这件事还需要你补充信息。请在这里告诉我具体要求，我会接着核对。'}[task.state]);
       if(!text)continue;
       const key='native-status-'+task.requestId+'-'+(waiting?'waiting':task.state);
@@ -1068,12 +1246,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       }
     })();ownerObservers.set(task.id,pending);void pending.finally(()=>{if(ownerObservers.get(task.id)===pending)ownerObservers.delete(task.id);}).catch(()=>{});
   }
-  async function nativeOwnerCommand(person,route,message,text,{origin='wechat'}={}){
+  async function nativeOwnerCommand(person,route,message,text,{origin='wechat',background=null,direct=false}={}){
     if(person.role!=='owner'||typeof ownerAgent?.ensureControlWorkspace!=='function')return null;
     // Explicit organizer/brief actions keep their established durable journals.
     const related=/(?:刚才|刚刚|上一|这|那|上次|本次).{0,16}(?:简报|报告|资料|项目|交办)/.test(text);
     const previous=related?gateway.snapshot({personId:person.id}).filter(task=>task.conversationId&&(task.origin??'wechat')===origin).at(-1):null;
-    if(ownerPersonalIntent(text)&&!ownerContextTask(text)&&!(previous&&ownerContextTask(previous.prompt))||ownerBriefIntent(text))return null;
+    // A direct Owner message never detours to the old planners; only the Console
+    // entry keeps those fallbacks.
+    if(!direct&&(ownerPersonalIntent(text)&&!ownerContextTask(text)&&!(previous&&ownerContextTask(previous.prompt))||ownerBriefIntent(text)))return null;
     const authorized=()=>!closed&&store.person(person.id)?.role==='owner'&&(origin==='console'||current(route));
     if(!authorized())throw new Error('Owner 身份或微信绑定已改变，没有开始原生处理。');
     const signal=origin==='console'?managementLifecycle.signal:lifecycle.signal;
@@ -1084,8 +1264,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const anchored=origin==='console'?gateway.consoleConversation({personId:person.id}):null;
     const previousConversation=gateway.snapshot({personId:person.id}).filter(task=>task.conversationId&&(task.origin??'wechat')===origin&&task.workspaceId===workspace.workspaceId).at(-1);
     const conversationId=anchored&&anchored.workspaceId===workspace.workspaceId?anchored.conversationId:previousConversation?.conversationId??randomUUID();
-    const legacyHistory=previousConversation||anchored?[]:(origin==='console'?workbench.snapshot().messages.slice(-12).map(row=>({role:row.role,text:row.text.slice(0,500)})):memberHistory(person.id,12).map(row=>({role:row.dir==='in'?'user':'assistant',text:row.text.slice(0,500)})));
-    const prompt=buildOwnerTurn({text,legacyHistory});
+    const legacyHistory=previousConversation||anchored?[]:(origin==='console'?workbench.snapshot().messages.slice(-12).map(row=>({role:row.role,text:row.text.slice(0,500)})):memberHistory(person.id,12).filter(row=>!(row.dir==='out'&&ownerPushCategory(row.kind))).map(row=>({role:row.dir==='in'?'user':'assistant',text:row.text.slice(0,500)})));
+    const prompt=buildOwnerTurn({text,legacyHistory,...(background?{background}:{})});
     const candidateRecipient=ownerArtifactIntent(text)?recipientIn(text):undefined,recipientPersonId=candidateRecipient===person.id?undefined:candidateRecipient;
     const task=await gateway.submit({personId:person.id,route,origin,workspaceId:workspace.workspaceId,conversationId,prompt,requestId:sourceRequest(route,message),...(recipientPersonId?{deliveryTarget:captureDeliveryTarget(recipientPersonId)}:{})});
     observeOwnerTask(task);
@@ -1111,6 +1291,96 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const task=gateway.snapshotForOwner().find(row=>row.id===admitted.taskId);
       return{resumed:true,taskId:admitted.taskId,task};
     });
+  }
+  /** 原生会话真正看见过这段话的时刻：任务创建时间就是交给会话的那一轮。 */
+  function lastOwnerSessionAt(personId){
+    const tasks=gateway.snapshot({personId}).filter(task=>(task.origin??'wechat')==='wechat'&&task.conversationId);
+    return tasks.at(-1)?.createdAt??null;
+  }
+  /** 乐乐推给主人的真实编号，都能直接交给 family_assistant。 */
+  function ownerPushRefs(row){
+    const refs=[];
+    if(row.kind==='undeliverable_notice')refs.push({label:'转告编号',value:row.id});
+    const family=(String(row.sourceKey??'').match(/^family-request:([^\s:]+)$/)??[])[1];
+    if(family)refs.push({label:'请求编号',value:family});
+    const workflow=(String(row.text??'').match(/wf-[a-f0-9]{12}/)??[])[0];
+    if(workflow)refs.push({label:'需求编号',value:workflow});
+    const incident=attention.snapshot().incidents.find(item=>item.outboxId===row.id);
+    if(incident)refs.push({label:'事项编号',value:incident.id});
+    return refs;
+  }
+  /** 上一轮原生会话之后、微信接口真正接受了的乐乐推送。
+   *
+   * 时间取消息记录里的接受时间（出站转 api_accepted 时写入），不是入队时间：
+   * 排队很久、最后才送到的内容，仍要在下一次会话里出现。
+   * 边界只随「真正交给会话的那一轮」前进。被审批或提问接走的消息没有进会话，
+   * 它之前的推送留到下一轮，不会被吞掉。 */
+  function ownerPushesSince(boundaryAt){
+    const state=store.snapshot(),owner=state.people.find(person=>person.role==='owner');
+    if(!owner)return[];
+    const boundary=Date.parse(String(boundaryAt??''));
+    const since=Number.isFinite(boundary)?boundary:Date.parse(now())-24*3600000;
+    const acceptedAt=new Map();
+    for(const row of state.messages)if(row.personId===owner.id&&row.dir==='out'&&typeof row.id==='string'&&row.id.startsWith('out-'))acceptedAt.set(row.id.slice(4),String(row.at??''));
+    return state.outbox
+      .filter(row=>row.personId===owner.id&&row.status==='api_accepted'&&ownerPushCategory(row.kind))
+      .map(row=>({...row,acceptedAt:acceptedAt.get(row.id)??null}))
+      .filter(row=>row.acceptedAt&&Date.parse(row.acceptedAt)>since)
+      .sort((a,b)=>String(a.acceptedAt).localeCompare(String(b.acceptedAt)))
+      .slice(-10);
+  }
+  /** 主人发来的文件落到他的控制工作区里，会话拿到的是真实路径。 */
+  async function saveOwnerAttachments(route,message){
+    if(!message.attachments?.length||typeof channels.downloadFile!=='function'||typeof ownerAgent?.ensureControlWorkspace!=='function')return[];
+    const workspace=await ownerAgent.ensureControlWorkspace({signal:lifecycle.signal});
+    const folder=join(workspace.path,'inbox',now().slice(0,10));
+    mkdirSync(folder,{recursive:true,mode:0o700});
+    const saved=[];
+    for(const attachment of message.attachments.slice(0,3)){
+      const file=await channels.downloadFile(route,attachment,{signal:lifecycle.signal,authorize:()=>current(route)});
+      const target=writeAttachmentFile(folder,String(attachment?.name??'file'),file.bytes);
+      saved.push(target);
+    }
+    return saved;
+  }
+  /** 主人微信来的一句话：只留入站记录、去重、暂停和待审批/待回答，其余原样进原生会话。 */
+  async function ownerDirect(person,route,message,text){
+    const requestId=sourceRequest(route,message);
+    const boundary=lastOwnerSessionAt(person.id);
+    const accepted=store.recordInbound(person.id,{id:message.id,peerId:message.peerId,text:text.slice(0,6000),...(message.attachments?.length?{attachments:displayAttachments(message.attachments)}:{}),...(message.at?{at:message.at}:{})});
+    if(accepted.accepted&&message.sourceTiming)inboundTiming.recordFirst(requestId,message.sourceTiming);
+    if(!accepted.accepted)return accepted;
+    if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
+    await deliverDeferredNotice(person.id,route,message);
+    if(message.unsupported){
+      if(current(route)){store.enqueue({personId:person.id,text:'这条消息的格式暂时打不开。发文字，或者把文件发给我。',kind:'harness_notice',sourceKey:'owner-unsupported:'+requestId,authorizationRoute:route,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});await flush(person.id);}
+      return{accepted:true,unsupported:true};
+    }
+    if(ownerMobileControl){
+      // 手机上批权限、回答问题只有这一条通路，必须留在会话之前。
+      const control=await ownerMobileControl.handle({personId:person.id,route,text});
+      if(control){
+        if(control.taskId){const task=gateway.snapshot({personId:person.id}).find(row=>row.id===control.taskId);if(task)observeOwnerTask(task);}
+        if(control.reply&&current(route)){store.enqueue({personId:person.id,text:control.reply,kind:'harness_notice',sourceKey:'owner-control:'+requestId,authorizationRoute:route,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});await flush(person.id);}
+        return{accepted:true,control:true};
+      }
+    }
+    let attachments=[];
+    try{attachments=await saveOwnerAttachments(route,message);}
+    catch(error){lastError=safeError(error);}
+    const note=attachments.length?`\n\n主人发来文件，已存到：\n${attachments.map(row=>'- '+row).join('\n')}`:'';
+    // 原话逐字进会话：不 trim、不改写、不补标点。只有确实没有文字时才写占位说明。
+    const body=(typeof text==='string'&&text.trim()?text:'（只发了文件，没有文字）')+note;
+    const background=ownerPushBackground(ownerPushesSince(boundary),{refOf:ownerPushRefs});
+    try{
+      const result=await nativeOwnerCommand(person,route,message,body,{origin:'wechat',background,direct:true});
+      if(result?.deferred)return{accepted:true,queued:true,taskId:result.taskId};
+      throw new Error('owner_agent_unavailable');
+    }catch(error){
+      lastError=safeError(error);
+      if(current(route)){store.enqueue({personId:person.id,text:'这条消息没能送进你的原生会话，这次没有执行任何操作。等电脑上的会话可用后再发一次。',kind:'harness_notice',sourceKey:'owner-direct-failed:'+requestId,authorizationRoute:route,expiresAt:new Date(Date.parse(now())+10*60000).toISOString()});await flush(person.id);}
+      return{accepted:true,failed:true};
+    }
   }
   async function harnessCommand(person,route,message,text,{origin='wechat',directReminderAdmitted=false}={}){
     const value=text.trim(),requestId=sourceRequest(route,message),commandCurrent=()=>origin==='console'?!closed&&store.person(person.id)?.role==='owner':current(route);
@@ -1218,7 +1488,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           if(target.id===person.id&&origin!=='console')return;
           const reply=result?.deliveryStatus==='api_accepted'?`已向${target.label}的微信接口提交工具结果，实际收信仍待本人确认。`:result?.deliveryStatus==='uncertain'||result?.status==='uncertain'?`${target.label}这项工具的结果尚未确认，没有自动重跑或重发。`:`${target.label}这项工具尚未完成，请检查资料源、配置和连接后再处理。`;
           if(origin==='console'){await workbench.appendExternal({reply,requestId:'tool-result-'+createHash('sha256').update(requestId).digest('hex')});return;}
-          await serial(peopleWork,person.id,async()=>{if(current(route)){store.enqueue({personId:person.id,text:reply,kind:'tool_notice',sourceKey:`tool-status:${requestId}`,authorizationRoute:route});await flush(person.id);}});
+          await serial(peopleWork,person.id,async()=>{if(current(route)){store.enqueue({personId:person.id,text:reply,kind:'harness_notice',sourceKey:`tool-status:${requestId}`,authorizationRoute:route});await flush(person.id);}});
         };
         void serial(toolWork,target.id,async()=>{try{const result=await runTool({personId:target.id,toolId:op.toolId,requestId},targetRoute,{notify:origin!=='console'&&target.id===person.id,...(origin==='console'?{actorId:person.id}:target.id!==person.id?{actorId:person.id,authorityRoute:route}:{})});await report(result);}catch(error){lastError=safeError(error);await report({status:'failed'});}}).catch(error=>{lastError=safeError(error);});
         return{reply:`正在为${target.label}调用这项工具，结果将返回${target.id===person.id?'本会话':'其本人会话'}。`};
@@ -1282,9 +1552,12 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         const accepted=store.recordInbound(personId,{id:message.id,peerId:message.peerId,text,...(message.at?{at:message.at}:{})});
         if(!accepted.accepted||store.snapshot().config.paused)return accepted;
         await deliverDeferredNotice(personId,route,message);
-        if(current(route)){store.enqueue({personId,text:message.voiceError==='unavailable'?'这段语音暂时没能识别，请用微信转文字后发给我，也可以请家庭联系人准备好语音服务。':'这段语音没能听清，请重新说一次，或用微信转文字后发给我。',kind:'reply',sourceKey:'voice-error:'+sourceRequest(route,message)});await flush(personId);}
+        if(current(route)){store.enqueue({personId,text:message.voiceError==='unavailable'?'这段语音暂时没能识别，请用微信转文字后发给我，也可以请家庭联系人准备好语音服务。':'这段语音没能听清，请重新说一次，或用微信转文字后发给我。',kind:person.role==='owner'?'harness_notice':'reply',sourceKey:'voice-error:'+sourceRequest(route,message)});await flush(personId);}
         return{accepted:true,voiceError:true};
       }
+      // 主人的微信就是他自己的原生会话：只留入站记录、去重、暂停和待审批/待回答。
+      // 家人继续走下面的原有路径，一行不动。
+      if(person.role==='owner')return ownerDirect(person,route,message,text);
       // Write a preparation marker before inbound dedup. Until preparation has
       // durably saved the material, the channel has not advanced its cursor and
       // only this unfinished admission may safely replay after a crash.
@@ -1414,7 +1687,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   async function start(){
     alive();if(lifecycle.signal.aborted)lifecycle=new AbortController();
     try{
-      await Promise.all(store.snapshot().people.filter(p=>store.binding(p.id)).map(async p=>{try{await channels.connect(p.id);}catch(error){lastError=safeError(error);}}));
+      await Promise.all(store.snapshot().people.filter(p=>{const binding=store.binding(p.id);return binding&&!suspended(p.id);}).map(async p=>{try{await channels.connect(p.id);}catch(error){lastError=safeError(error);}}));
       await resumeMemberAdmissions();
       void attention.resume();
       // Recover existing native intents only after channel initialization. Never
@@ -1435,7 +1708,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   }
   async function pause(){
     alive();store.configure({paused:true});if(timer){clearInterval(timer);timer=null;}
-    lifecycle.abort();
+    lifecycle.abort();reconnectAttempt.clear();
     // Don't wait on a model call here: it will recheck pause/route before any send.
     await Promise.allSettled(store.snapshot().people.map(async p=>{try{await channels.disconnect(p.id);}catch(error){lastError=safeError(error);}}));return status();
   }
@@ -1514,25 +1787,28 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       case'tool_assign':return assignTool({actorId:ownerId(),...args});
       case'tool_invoke':{const actorId=ownerId();let authorityRoute;try{authorityRoute=store.route(actorId);}catch{}return runTool(args,store.route(args.personId),{actorId,...(authorityRoute?{authorityRoute}:{})});}
       case'workflow_requests':return toolbox.listRequests({actorId:ownerId()});
-      case'workflow_request_update':{
-        if(!['pending','accepted','completed','declined'].includes(args.status)||args.note!==undefined&&(typeof args.note!=='string'||!args.note.trim()||args.note.length>2000))throw new Error('需求状态或说明无效。');
-        const actorId=ownerId(),operationId=args.operationId??'console-'+createHash('sha256').update(JSON.stringify(args)).digest('hex');let result;
-        await workbench.external({text:'更新工具需求的接续进度：'+({pending:'待处理',accepted:'正在接续',completed:'已完成',declined:'暂不制作'}[args.status])+(args.note?'\n'+args.note:''),contextId:'workflow-'+createHash('sha256').update(JSON.stringify([args.personId,args.requestId])).digest('hex'),requestId:'workflow-update-'+createHash('sha256').update(operationId).digest('hex')},async()=>{result=await workflowNotifications.requestUpdate({actorId,...args,operationId,signal:lifecycle.signal});return{reply:result.reply};});
-        const request=result?.request??toolbox.listRequests({actorId}).find(row=>row.personId===args.personId&&row.requestId===args.requestId);return{...request,notification:{status:result?.status??'recorded',reply:result?.reply??'该操作已有记录，未重复修改。'}};
+      case'workflow_request_update':return updateWorkflowRequest(args,{origin:'console'});
+      case'workflow_reply':{
+        const target=workflowRequestByShort(args.request);
+        return updateWorkflowRequest({personId:target.personId,requestId:target.requestId,status:args.status,...(args.note!==undefined?{note:args.note}:{}),...(args.operationId?{operationId:args.operationId}:{})});
       }
+      case'family_reply':return replyFamilyRequest({requestId:args.requestId,text:args.text});
+      case'attention_respond':return respondImportant({incidentId:args.incidentId,status:args.status,text:args.text});
+      case'owner_reminder':return ownerReminder(args);
+      case'service_request':return serviceRequest({text:args.text,requestId:args.requestId});
       case'add_person':store.addPerson(args);break;
       case'update_person':{const{personId,...patch}=args;store.updatePerson(personId,patch);break;}
       case'configure':{const{paused,...patch}=args;store.configure(patch);if(paused===true)await pause();else if(paused===false)await start();break;}
-      case'login':await channels.login(args.personId);break;
+      case'login':{const token=beginReconnect(args.personId,300000);try{await channels.login(args.personId,{resumeToken:token});}catch(error){endReconnect(args.personId,token);throw error;}break;}
       case'verify_login':if(typeof channels.submitCode!=='function')throw new Error('当前微信接入暂不支持验证码。');await channels.submitCode(args.personId,args.code);break;
-      case'connect':await channels.connect(args.personId);break;
-      case'disconnect':await channels.disconnect(args.personId);break;
+      case'connect':{const token=beginReconnect(args.personId,60000);try{await channels.connect(args.personId,{resumeToken:token});if(channels.status(args.personId)?.status==='connected')suspensions.clear(args.personId);await flush(args.personId);}finally{endReconnect(args.personId,token);}break;}
+      case'disconnect':cancelReconnect(args.personId);suspensions.mark(args.personId);await channels.disconnect(args.personId);await flush(args.personId);break;
       case'add_reminder':store.addReminder(args);break;
       case'cancel_reminder':store.cancelReminder(args.personId,args.reminderId);break;
       case'dismiss_relay':{const row=store.snapshot().outbox.find(item=>item.id===args.relayId);if(!row||row.kind!=='undeliverable_notice')throw new Error('这条已经不在待转告里了。');if(row.status==='pending')store.transition(row.id,'cancelled','本人已处理');return status();}
       case'preview_brief':await preview();break;
-      case'send_brief':{if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)throw new Error('请先添加简报接收人。');const route=store.route(owner.id);const brief=await preview();if(!current(route))throw new Error('简报接收人的绑定已改变或服务已暂停，未发送。');store.enqueue({personId:brief.personId,text:brief.text,kind:'owner_brief',sourceKey:`manual-brief:${randomUUID()}`});await flush(brief.personId);break;}
-      case'send_message':if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');store.enqueue({personId:args.personId,text:args.text,kind:'manual',sourceKey:`manual:${randomUUID()}`});await flush(args.personId);break;
+      case'send_brief':{if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)throw new Error('请先添加简报接收人。');if(suspended(owner.id))throw new Error('这位成员的微信已手动断开，恢复连接前不会发送。');const route=store.route(owner.id);const brief=await preview();if(!current(route))throw new Error('简报接收人的绑定已改变或服务已暂停，未发送。');store.enqueue({personId:brief.personId,text:brief.text,kind:'owner_brief',sourceKey:`manual-brief:${randomUUID()}`});await flush(brief.personId);break;}
+      case'send_message':if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');if(suspended(args.personId))throw new Error('这位成员的微信已手动断开，恢复连接前不会发送。');store.enqueue({personId:args.personId,text:args.text,kind:'manual',sourceKey:`manual:${randomUUID()}`});await flush(args.personId);break;
       case'start':await start();break;
       case'pause':await pause();break;
     }
@@ -1573,5 +1849,5 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       await delay(20);
     }
   }
-  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge};
+  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,ownerServiceDraftForSession,ownerServiceConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge};
 }

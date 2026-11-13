@@ -1,6 +1,7 @@
 import {DIARY_INVITATION_WINDOW_MS,diaryInvitationText} from './diary-invitations.mjs';
 import {recordMatchesBinding} from './store.mjs';
 import { addLocalDays, asInstant, buildElderDaily, buildOwnerBrief, localDate, localDateTimeToInstant } from './brief.mjs';
+import { withOwnerPushHeader } from './owner-push.mjs';
 
 export const CATCH_UP_MS = 120 * 60 * 1000;
 const expiry = (due,window=CATCH_UP_MS) => new Date(Date.parse(due)+window+1).toISOString();
@@ -69,7 +70,8 @@ export function scheduleTick(store,{now,hasDiary=()=>false}={}) {
     const day=localDate(instant,owner.timeZone);
     for(const candidate of dailyCandidates(day,state.config.ownerBriefTime,owner.timeZone)) {
       if(!eligible(candidate.due,nowMs)) continue;
-      enqueue({...buildOwnerBrief(store,{date:candidate.date,now:instant}),kind:'owner_brief',expiresAt:expiry(candidate.due)});
+      const brief=buildOwnerBrief(store,{date:candidate.date,now:instant});
+      enqueue({...brief,text:withOwnerPushHeader('owner_brief','全家',brief.text),kind:'owner_brief',expiresAt:expiry(candidate.due)});
     }
   }
   return newly;

@@ -1,7 +1,9 @@
 import {mkdirSync,lstatSync,realpathSync,openSync,readFileSync,writeFileSync,fsyncSync,closeSync,renameSync,unlinkSync,constants} from 'node:fs';
+import {BACKGROUND_BEGIN,BACKGROUND_END} from './owner-push.mjs';
 import {join,isAbsolute,resolve} from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {createOwnerTaskArtifactScope,ownerTaskArtifactInstructions,sanitizeOwnerTaskText} from './owner-task-artifacts.mjs';
+import {serviceDraftReferenceMarker} from './owner-management-tool.mjs';
 
 const clone=value=>structuredClone(value);
 const states=['queued','running','needs_approval','needs_input','unknown','succeeded','failed','cancelled','cancelling'];
@@ -10,6 +12,29 @@ const fail=code=>{throw Object.assign(new Error(code),{code});};
 const text=(value,max=24000,empty=false)=>typeof value==='string'&&value.length<=max&&(empty||value.trim())&&!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(value);
 const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
+const internalInstruction=/（内部引用：主人下一轮明确说“确认”时[^\n）]*）/gu;
+/** The one place an Owner-facing native final text is made safe. It removes the
+ * internal service-draft reference only when it names a draft this same Owner
+ * actually saw in this same session (or the fixed instruction line). Business
+ * summary, readable revision marker, ordinary prose and look-alike user input
+ * are kept as-is; tool results and confirmation authority are untouched. */
+export function stripOwnerServiceReference(value,{draftIds=[]}={}){
+  if(typeof value!=='string'||!value)return typeof value==='string'?value:'';
+  const known=new Set((Array.isArray(draftIds)?draftIds:[]).filter(item=>typeof item==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(item)));
+  let out=value,cursor=0;
+  while((cursor=out.indexOf(serviceDraftReferenceMarker,cursor))>=0){
+    const after=out.slice(cursor+serviceDraftReferenceMarker.length),match=after.match(/^\s*(\{[^\n{}]*\})/u);
+    let reference=null;if(match){try{reference=JSON.parse(match[1]);}catch{reference=null;}}
+    if(!reference||reference.action!=='service_confirm'||!known.has(reference.draftId)||!Number.isSafeInteger(reference.revision)){cursor+=serviceDraftReferenceMarker.length;continue;}
+    const lineStart=out.lastIndexOf('\n',cursor-1)+1,before=out.slice(lineStart,cursor);
+    let start=before.trim()?cursor:lineStart,end=cursor+serviceDraftReferenceMarker.length+match[0].length;
+    if(out[end]==='\n')end++;
+    out=out.slice(0,start)+out.slice(end);cursor=Math.max(0,start);
+  }
+  out=out.replace(internalInstruction,'');
+  for(const draftId of known)out=out.split(draftId).join('');
+  return out.replace(/[ \t]+\n/gu,'\n').replace(/\n{3,}/gu,'\n\n').trim();
+}
 const object=(value,keys)=>value&&[Object.prototype,null].includes(Object.getPrototypeOf(value))&&Object.keys(value).every(key=>keys.includes(key));
 const routeKeys=['personId','accountId','peerId','generation'];
 const validRoute=route=>object(route,routeKeys)&&routeKeys.every(key=>Object.hasOwn(route,key))&&id(route.personId)&&text(route.accountId,200)&&text(route.peerId,200)&&Number.isSafeInteger(route.generation)&&route.generation>0;
@@ -37,8 +62,8 @@ function validTask(task){
  * Source request IDs deduplicate admission; native UUIDs identify one Host turn.
  * A recovered intent is observed, never re-prompted, even after an uncertain start.
  */
-export function createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,consoleConversation=()=>null,now=()=>new Date().toISOString(),onResult=async()=>{},recoverOnCreate=true}={}){
-  if(!text(directory,4096)||!store||typeof store.snapshot!=='function'||typeof now!=='function'||typeof onResult!=='function'||typeof recoverOnCreate!=='boolean')fail('gateway_invalid_argument');
+export function createHarnessGateway({directory,store,access,ownerAgent,familyProjectExecutor,ownerTaskArtifacts,ownerServiceDraftIds=()=>[],consoleConversation=()=>null,now=()=>new Date().toISOString(),onResult=async()=>{},recoverOnCreate=true}={}){
+  if(!text(directory,4096)||!store||typeof store.snapshot!=='function'||typeof now!=='function'||typeof onResult!=='function'||typeof ownerServiceDraftIds!=='function'||typeof recoverOnCreate!=='boolean')fail('gateway_invalid_argument');
   directory=resolve(directory);
   const stat=path=>{try{return lstatSync(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}};
   const initial=stat(directory);if(initial&&(initial.isSymbolicLink()||!initial.isDirectory()))fail('gateway_storage_symlink');
@@ -154,11 +179,17 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
     open();available('listWorkspaces');const rows=await ownerAgent.listWorkspaces({signal:lifecycle.signal});open();
     if(!Array.isArray(rows)||rows.length>10000||rows.some(row=>!row||!text(row.workspaceId,240)||!text(row.path,4096)||!isAbsolute(row.path)||!text(row.title,240))||new Set(rows.map(row=>row.workspaceId)).size!==rows.length)fail('owner_agent_registry_invalid');return rows;
   }
+  const draftIdsFor=task=>{try{const rows=ownerServiceDraftIds({personId:task.personId,sessionId:task.sessionId});return Array.isArray(rows)?rows.filter(item=>typeof item==='string'&&item.length<=100):[];}catch{return[];}};
+  const ownerFacingText=task=>stripOwnerServiceReference(task.text,{draftIds:draftIdsFor(task)});
   async function deliver(task){
     if(closed||!readyResult(task)||task.delivery.state!=='none')return;
     if(!eligible(task)||!targetAllowed(task)){update(task.id,{delivery:{state:'suppressed',at:clock()}});return;}
+    // A model may echo the internal reference. Text that was nothing but internal
+    // wiring is dropped from public state and never sent to the Owner.
+    const visible=ownerFacingText(task);
+    if(!visible&&!(task.files??[]).length){update(task.id,{text:'',delivery:{state:'suppressed',at:clock()}});return;}
     task=update(task.id,{delivery:{state:'dispatching',at:clock()}});
-    const event={task:{id:task.id,personId:task.personId,workspaceId:task.workspaceId,sessionId:task.sessionId,requestId:task.requestId,sourceRequestId:task.sourceRequestId,route:clone(task.route),origin:task.origin??'wechat',executor:task.executor,state:task.state,files:clone(task.files??[]),...(task.conversationId?{conversationId:task.conversationId}:{}),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget),artifactScope:clone(task.artifactScope)}:{})},text:task.deliveryTarget?sanitizeOwnerTaskText(task.text,{cwd:task.cwd}):task.text};
+    const event={task:{id:task.id,personId:task.personId,workspaceId:task.workspaceId,sessionId:task.sessionId,requestId:task.requestId,sourceRequestId:task.sourceRequestId,route:clone(task.route),origin:task.origin??'wechat',executor:task.executor,state:task.state,files:clone(task.files??[]),...(task.conversationId?{conversationId:task.conversationId}:{}),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget),artifactScope:clone(task.artifactScope)}:{})},text:task.deliveryTarget?sanitizeOwnerTaskText(visible,{cwd:task.cwd}):visible};
     const key=task.id+':'+task.requestId;activeDeliveries.add(key);try{const result=await onResult(event);if(!closed)update(task.id,{delivery:{state:result?.suppressed===true?'suppressed':'accepted',at:clock()}});}catch(error){if(!closed)update(task.id,{delivery:{state:error?.sendOutcome==='failed'?'failed':'unknown',at:clock()}});}finally{activeDeliveries.delete(key);}
   }
   async function perform(taskId,method){
@@ -182,7 +213,7 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
       }
       const files=task.executor==='family_project'?result?.files??[]:nativeFiles;
       if(files!==undefined&&!validFiles(files,task.deliveryTarget?.personId??task.personId,task.artifactScope))fail('gateway_invalid_artifacts');
-      task=update(task.id,{state:nativeState,...(files!==undefined?{files}:{}),text:typeof result?.text==='string'?result.text.slice(0,24000).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,''):'',pendingApprovals:Number.isSafeInteger(result?.pendingApprovals)&&result.pendingApprovals>=0?result.pendingApprovals:0,notice:artifactNotice});
+      task=update(task.id,{state:nativeState,...(files!==undefined?{files}:{}),text:typeof result?.text==='string'?stripOwnerServiceReference(result.text,{draftIds:draftIdsFor(task)}).slice(0,24000).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,''):'',pendingApprovals:Number.isSafeInteger(result?.pendingApprovals)&&result.pendingApprovals>=0?result.pendingApprovals:0,notice:artifactNotice});
       if(!eligible(task)&&task.delivery.state==='none')task=update(task.id,{delivery:{state:'suppressed',at:clock()}});
       await deliver(task);
     }catch{if(!closed){const cancelling=tasks.find(row=>row.id===task.id)?.state==='cancelling';task=update(task.id,{state:cancelling?'cancelled':'unknown',notice:cancelling?'已停止后续操作，已有成果保留。':'任务状态尚待核对。',...(task.executor==='family_project'?{text:cancelling?'已停止后续项目操作；此前写入的文件会保留，请核对已有成果。':'这次项目任务的结果尚未确认，请让 Owner 核对任务记录。我不会自动重跑。'}:{})});await deliver(task);}}
@@ -265,7 +296,8 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
         }catch{signal.throwIfAborted();}
       }
       if(!current(task))forbidden();
-      return{taskId:task.id,requestId:task.requestId,sourceRequestId:task.sourceRequestId,previousSourceRequestId:prior?.sourceRequestId??previous?.sourceRequestId??null,previousUserText:prior?conversationPrompt(prior.prompt):previous?conversationPrompt(previous.prompt):null,...(previousReview?{previousReview}:{}),personId,origin:task.origin??'wechat',route:clone(task.route),userText:conversationPrompt(task.prompt),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget)}:{}),authorize:()=>current(task)};
+      const prompt=String(task.prompt??'');const bgStart=prompt.indexOf(BACKGROUND_BEGIN),bgEnd=prompt.indexOf(BACKGROUND_END);const background=bgStart>=0&&bgEnd>bgStart?prompt.slice(bgStart,bgEnd):'';const familyRequestIds=[...new Set([...background.matchAll(/请求编号\s+([A-Za-z0-9_-]{1,100})/g)].map(match=>match[1]))];
+      return{taskId:task.id,requestId:task.requestId,sourceRequestId:task.sourceRequestId,previousSourceRequestId:prior?.sourceRequestId??previous?.sourceRequestId??null,familyRequestIds,previousUserText:prior?conversationPrompt(prior.prompt):previous?conversationPrompt(previous.prompt):null,...(previousReview?{previousReview}:{}),personId,origin:task.origin??'wechat',route:clone(task.route),userText:conversationPrompt(task.prompt),...(task.deliveryTarget?{deliveryTarget:clone(task.deliveryTarget)}:{}),authorize:()=>current(task)};
     },
     async submit(input){
       open();if(!object(input,['personId','route','workspaceId','prompt','requestId','origin','deliveryTarget','conversationId'])||!id(input.personId)||!(input.origin==='console'?input.route===null:validRoute(input.route))||input.origin!==undefined&&!['console','wechat'].includes(input.origin)||!text(input.workspaceId,240)||!text(input.prompt,64000)||!text(input.requestId,512)||input.conversationId!==undefined&&!uuid(input.conversationId))fail('gateway_invalid_argument');
@@ -324,7 +356,7 @@ export function createHarnessGateway({directory,store,access,ownerAgent,familyPr
     snapshotForOwner(){return tasks.map(ownerView);},
     // Notices were introduced with this prompt contract. Historical unknown
     // tasks must never emit a new message merely because the plugin upgraded.
-    nativeNoticeTasks(){return tasks.filter(task=>task.conversationId&&task.prompt.startsWith('乐乐对话交互版本：2。\n')).map(ownerView);},
+    nativeNoticeTasks(){return tasks.filter(task=>task.conversationId&&task.executor!=='family_project').map(ownerView);},
     async checkForOwner({actorId,taskId}){if(person(actorId).role!=='owner')fail('gateway_person_forbidden');const task=tasks.find(row=>row.id===taskId);if(!task)fail('gateway_invalid_task');if(eligible(task))await api.check({personId:task.personId,taskId});return ownerView(tasks.find(row=>row.id===taskId));},
     async cancelForOwner({actorId,taskId}){if(person(actorId).role!=='owner')fail('gateway_person_forbidden');const task=tasks.find(row=>row.id===taskId);if(!task)fail('gateway_invalid_task');const result=await api.cancel({personId:task.personId,taskId});return{...result,task:ownerView(tasks.find(row=>row.id===taskId))};},
     async settled(){while(jobs.size||admissions.size)await Promise.all([...jobs.values(),...Array.from(admissions.values(),entry=>entry.promise)]);},

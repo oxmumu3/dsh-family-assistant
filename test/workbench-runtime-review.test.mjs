@@ -25,8 +25,11 @@ test('review: relay consent for one matter cannot expose unrelated text from the
 
 test('review: owner self reminders retain their original path with a workbench planner installed',async t=>{
   let plannerCalls=0;const {runtime}=await fixture(t,{planWorkbench:async()=>{plannerCalls++;return{reply:'管理对话。',operation:null};},respond:async()=>({reply:'准备设置。',action:{type:'remind',text:'散步',dueAt:'2026-10-24T00:00:00Z',repeat:'once'}})});
-  await runtime.receive('owner',{id:'own_reminder',peerId:'peer-owner',text:'明早八点提醒我散步'});
-  assert.equal(plannerCalls,0);assert.equal(runtime.store.reminders('owner').length,1);assert.equal(runtime.store.reminders('mom').length,0);
+  await runtime.receive('owner',{id:'own_reminder',peerId:'peer-owner',text:'明早八点提醒我散步'});await runtime.settled();
+  assert.equal(plannerCalls,0,'固定短语不再抢答');
+  assert.equal(runtime.store.reminders('owner').length,0,'这句话不再直接建提醒，先交给原生会话');
+  const added=await runtime.action({action:'owner_reminder',op:'add',text:'散步',dueAt:'2026-10-24T00:00:00Z'});
+  assert.ok(added.reminderId);assert.equal(runtime.store.reminders('owner').length,1);assert.equal(runtime.store.reminders('mom').length,0);
 });
 
 test('review: lost owner authority during an earlier action blocks a later schedule',async t=>{

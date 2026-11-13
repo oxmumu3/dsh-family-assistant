@@ -19,6 +19,8 @@ function fixture(t){
   action:async input=>{if(input.action==='owner_chat'){await wb.chat(input);return{workbench:wb.snapshot()};}if(input.action==='history_page')return history.page({viewerPersonId:'owner',personId:input.personId,...(input.limit!==undefined?{limit:input.limit}:{}),...(input.before?{before:input.before}:{}),...(input.query!==undefined?{query:input.query}:{})});if(input.action==='preview_brief')return{lastBrief:{text:'自动简报受分享偏好控制'}};throw Error('Unexpected runtime action');},
   ownerSendForSession:async input=>{sendCalls.push(input);await runtime.ownerAuthorityForSession(input);const key=JSON.stringify([context.sourceRequestId,input.personId,input.text]);let row=sent.find(item=>item.key===key);if(!row){row={key,personId:input.personId,text:input.text,status:receipt,outboxId:'synthetic-outbox'};sent.push(row);}return{status:row.status,outboxId:row.outboxId};},
   ownerConfirmForSession:async input=>{confirmCalls.push(input);await runtime.ownerAuthorityForSession(input);await wb.confirm({cardId:input.cardId,revision:input.revision,authorityRoute:context.route,authorize:()=>allowed});return{workbench:wb.snapshot()};},
+  ownerServiceDraftForSession:async input=>{await runtime.ownerAuthorityForSession(input);return runtime.action({action:'service_request',text:input.text,requestId:input.requestId??('service-'+Math.random())});},
+  ownerServiceConfirmForSession:async input=>{await runtime.ownerAuthorityForSession(input);return runtime.action({action:'service_confirm',draftId:input.draftId,revision:input.revision,requestId:input.requestId??('service-confirm-'+Math.random())});},
  };
  const execution={callId:'call-1',agent:{id:'session-owner'},signal:new AbortController().signal},tool=createOwnerManagementTool({runtime,directory});
  return{directory,store,runtime,tool,execution,wb,sent,executed,authorityCalls,sendCalls,confirmCalls,planCalls:()=>planCalls,setContext:patch=>{context={...context,...patch};},setPlan:value=>{planOutput=value;},setAllowed:value=>{allowed=value;},setReceipt:value=>{receipt=value;},setExtraDrafts:value=>{extraDrafts=value;},restart:()=>createOwnerManagementTool({runtime,directory})};
@@ -166,4 +168,29 @@ test('Owner journal symlink and hardlink substitutions fail without modifying ta
 
 test('literal source matching permits a quoted payload but rejects ambiguous family aliases',async t=>{
  const f=fixture(t),target=f.store.person('mom');assert.equal(ownerLiteralMessageAuthorized({userText:'请转告妈妈：“今晚早点休息”。',target,people:f.store.snapshot().people,text:'今晚早点休息'}),true);f.store.addPerson({id:'other-mom',role:'elder',label:'妈妈的另一个账户'});assert.equal(ownerLiteralMessageAuthorized({userText:'请转告妈妈：今晚早点休息。',target,people:f.store.snapshot().people,text:'今晚早点休息'}),false);
+});
+
+test('the draft confirmation guard applies only to confirm_management so every new family route stays reachable',async t=>{
+ const f=fixture(t),calls=[],base=f.runtime.action;
+ f.runtime.action=async input=>{
+  if(['owner_chat','history_page','preview_brief'].includes(input.action))return base(input);
+  calls.push(input);return{text:'已处理 '+input.action};
+ };
+ f.setContext({userText:'帮我处理家里这些事'});
+ const routes=[
+  [{action:'important_update',incidentId:'inc-1',status:'resolved'},'attention_respond'],
+  [{action:'important_alert',enabled:true},'attention_configure'],
+  [{action:'family_reply',requestId:'request-1',text:'家里这些事'},'family_reply'],
+  [{action:'workflow_reply',request:'wf-0123456789ab',status:'accepted'},'workflow_reply'],
+  [{action:'dismiss_relay',relayId:'relay-1'},'dismiss_relay'],
+  [{action:'service_request',text:'给妈妈开通AI日报'},'service_request'],
+  [{action:'reminder',op:'list'},'owner_reminder'],
+ ];
+ for(const [args,expected] of routes){
+  const before=calls.length,result=await f.tool.execute(args,f.execution);
+  assert.notEqual(result.status,'needs_input',args.action+' 不应被确认守卫拦下');
+  assert.equal(calls.length,before+1,args.action+' 应到达运行时');
+  assert.equal(calls.at(-1).action,expected,args.action+' 应映射到现有动作');
+ }
+ assert.equal((await f.tool.execute({action:'confirm_management',cardId:'missing',revision:1},f.execution)).status,'needs_input');
 });

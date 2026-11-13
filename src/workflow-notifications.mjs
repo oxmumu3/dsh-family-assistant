@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { withOwnerPushHeader } from './owner-push.mjs';
 
 const clone = value => structuredClone(value);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
@@ -35,7 +36,7 @@ export function createWorkflowNotifications({ directory, store, toolbox, flush, 
   function request(personId, requestId, actorId = owner().id) { if (!id(personId) || !text(requestId, 512)) fail('workflow_notification_invalid_argument'); const rows = toolbox.listRequests({ actorId }); if (!Array.isArray(rows) || rows.length > 3000) fail('workflow_notification_invalid_state'); const selected = rows.filter(row => row.personId === personId && row.requestId === requestId); if (selected.length !== 1) fail('workflow_notification_unknown_request'); return selected[0]; }
   function route(personId) { const binding = snapshot().bindings?.find(row => row.personId === personId), value = binding && { personId, accountId: binding.accountId, peerId: binding.peerId, generation: binding.generation }; return validRoute(value) ? value : null; }
   function current(expected, role) { if (!validRoute(expected)) return false; const state = snapshot(), person = state.people?.find(row => row.id === expected.personId), binding = state.bindings?.find(row => row.personId === expected.personId); return state.config?.paused === false && person?.role === role && (!person.status || person.status === 'active') && binding?.status === 'connected' && same(route(person.id), expected); }
-  const notifyBody = value => `${family(value.personId).label}提出了工具或工作流需求：\n${value.text}\n\n回复需求 ${shortId(value)}：你的答复`;
+  const notifyBody = value => withOwnerPushHeader('workflow_request', family(value.personId).label, `${family(value.personId).label}提出了工具或工作流需求：\n${value.text}\n\n回复需求 ${shortId(value)}：你的答复`);
   const responseBody = (value, status, note) => `家庭联系人回复你的工具需求：\n${note}\n\n需求状态：${statusNames[status]}\n关于：${value.text.slice(0, 180)}\n补充需求 ${shortId(value)}：补充内容`;
   const followBody = (value, content) => `${family(value.personId).label}补充了工具需求：\n${content}\n\n关于：${value.text.slice(0, 180)}\n回复需求 ${shortId(value)}：你的答复`;
   function groupRows(group) { return snapshot().outbox.filter(row => sourceParts(row.sourceKey)?.group === group).sort((a, b) => sourceParts(a.sourceKey).index - sourceParts(b.sourceKey).index); }

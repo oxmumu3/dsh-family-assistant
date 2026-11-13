@@ -66,11 +66,11 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
     return epoch;
   }
   function active(s, epoch, signal) { return !closed && s.epoch === epoch && !signal.aborted; }
-  async function bind(s, auth, epoch, signal) {
+  async function bind(s, auth, epoch, signal, resumeToken) {
     if (!active(s, epoch, signal)) return false;
     for (const other of states.values()) if (other !== s && other.route &&
       (other.route.accountId === auth.accountId || other.route.peerId === auth.peerId)) throw new Error('该微信已连接其他成员');
-    const route = await onBound(s.personId, { accountId: auth.accountId, peerId: auth.peerId });
+    const route = await onBound(s.personId, { accountId: auth.accountId, peerId: auth.peerId }, { resumeToken });
     if (!active(s, epoch, signal)) return false;
     if (route?.personId !== s.personId || route.accountId !== auth.accountId || route.peerId !== auth.peerId || !Number.isInteger(route.generation)) throw new Error('微信绑定未确认');
     s.auth = auth; s.route = { ...route }; save(s); status(s, 'connected'); return true;
@@ -142,7 +142,7 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
       }
     }
   }
-  async function loginLoop(s, qrcode, epoch, signal) {
+  async function loginLoop(s, qrcode, epoch, signal, resumeToken) {
     const deadline = Date.now() + Math.min(Math.max(qrTimeoutMs, 1), 300_000);
     const expiry = setTimeout(() => {
       if (s.epoch === epoch) { s.controller?.abort(); s.wakeVerify?.(); }
@@ -153,13 +153,13 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
         if (!active(s, epoch, signal)) return;
         if (result.status === 'confirmed') {
           s.verifyCode = undefined;
-          if (await bind(s, validAuth(result), epoch, signal)) { clearTimeout(expiry); await pollLoop(s, epoch, signal); }
+          if (await bind(s, validAuth(result), epoch, signal, resumeToken)) { clearTimeout(expiry); await pollLoop(s, epoch, signal); }
           return;
         }
         if (result.status === 'binded_redirect') {
           const file = authPath(s);
           if (!fs.existsSync(file)) throw new Error('请重新扫码');
-          if (await bind(s, validAuth(JSON.parse(fs.readFileSync(file, 'utf8'))), epoch, signal)) { clearTimeout(expiry); await pollLoop(s, epoch, signal); }
+          if (await bind(s, validAuth(JSON.parse(fs.readFileSync(file, 'utf8'))), epoch, signal, resumeToken)) { clearTimeout(expiry); await pollLoop(s, epoch, signal); }
           return;
         }
         if (result.status === 'expired' || result.status === 'verify_code_blocked') { status(s, 'expired', '二维码已失效，请重新扫码'); return; }
@@ -178,7 +178,7 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
     } finally { clearTimeout(expiry); s.verifyCode = undefined; s.wakeVerify = null; }
   }
   return {
-    async login(personId) {
+    async login(personId, { resumeToken } = {}) {
       if (closed) throw new Error('家庭助手已停止');
       const s = state(personId), epoch = await stop(s);
       if (closed || s.epoch !== epoch) throw new Error('连接已被更新的操作替代');
@@ -190,12 +190,12 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
         s.qrUrl = qr.qrUrl; status(s, 'awaiting_scan');
         // Yield the QR to caller before the background confirmation can change it.
         const visible = publicStatus(s);
-        s.task = Promise.resolve().then(() => loginLoop(s, qr.qrcode, epoch, controller.signal));
+        s.task = Promise.resolve().then(() => loginLoop(s, qr.qrcode, epoch, controller.signal, resumeToken));
         return { phase: visible.phase, qrUrl: visible.qrUrl };
       } catch { if (s.epoch === epoch) status(s, 'error', '暂时无法获取微信二维码'); throw new Error('暂时无法获取微信二维码'); }
       finally { resolveSetup(); }
     },
-    async connect(personId) {
+    async connect(personId, { resumeToken } = {}) {
       if (closed) throw new Error('家庭助手已停止');
       const s = state(personId);
       if (s.connected && s.controller && !s.controller.signal.aborted) return publicStatus(s);
@@ -204,7 +204,7 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
       const controller = s.controller = new AbortController(); status(s, 'connecting');
       try {
         const auth = validAuth(JSON.parse(fs.readFileSync(authPath(s), 'utf8')));
-        if (await bind(s, auth, epoch, controller.signal)) s.task = pollLoop(s, epoch, controller.signal);
+        if (await bind(s, auth, epoch, controller.signal, resumeToken)) s.task = pollLoop(s, epoch, controller.signal);
         return publicStatus(s);
       } catch { status(s, 'error', '请先为该成员扫码连接微信'); throw new Error('请先为该成员扫码连接微信'); }
     },
