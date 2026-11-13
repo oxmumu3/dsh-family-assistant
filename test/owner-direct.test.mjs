@@ -253,14 +253,6 @@ test('发给主人的出站只剩四类推送和会话本身', async t => {
   assert.equal(ownerPushCategory('member_notice'), null);
 });
 
-test('「还在处理」的等待提示改成 45 秒才发，且每轮最多一条', async t => {
-  const source = readFileSync(new URL('../src/runtime.mjs', import.meta.url), 'utf8');
-  assert.match(source, /Date\.parse\(task\.createdAt\)<45000/, '12 秒门槛已经换成 45 秒');
-  assert.equal(source.includes('task.createdAt)<12000'), false, '旧门槛不再出现');
-  // 去重点仍是 task.requestId + 状态：同一轮不会重复追一句。
-  assert.ok(source.includes("'native-status-'+task.requestId"));
-});
-
 test('主人自己的提醒仍能列、加、取消（旧能力不丢）', async t => {
   const f = await fixture(t);
   const added = await f.runtime.action({action: 'owner_reminder', op: 'add', text: '喝水', dueAt: new Date(Date.parse(instant) + 3600000).toISOString()});
@@ -280,4 +272,65 @@ test('附件用独占创建：同名目标存在时换编号，绝不覆盖已�
   assert.match(second, /报告 \(2\)\.txt$/);
   assert.equal(readFileSync(first, 'utf8'), '旧内容', '已有文件没有被覆盖');
   assert.equal(readFileSync(second, 'utf8'), '新内容');
+});
+
+test('主人语音不可用时只给可直接执行的替代途径，家人提示保持', async t => {
+  const f = await fixture(t);
+  await f.say('owner', '', {voiceError: 'unavailable'});
+  const owner = f.sent.filter(row => row.personId === 'owner').at(-1);
+  assert.equal(owner.text, '这段语音暂时没能识别。请用微信转文字后发给我。');
+  assert.doesNotMatch(owner.text, /家庭联系人/);
+  await f.say('mom', '', {voiceError: 'unavailable'});
+  const family = f.sent.filter(row => row.personId === 'mom').at(-1);
+  assert.match(family.text, /请家庭联系人准备好语音服务/);
+});
+
+test('仅附件时主人原生会话收到说明和实际落盘路径，入站账本保留占位', async t => {
+  const f = await fixture(t);
+  await f.say('owner', '', {attachments: [{name: '合成材料.txt'}]});
+  const prompt = f.prompts.at(-1).prompt;
+  assert.match(prompt, /当前 Owner 请求原文：\n（只发了文件，没有文字）/);
+  assert.match(prompt, /主人发来文件，已存到：/);
+  const inbound = f.store.snapshot().messages.filter(row => row.personId === 'owner' && row.dir === 'in').at(-1);
+  assert.equal(inbound.text, '[收到本人上传的文件材料]');
+  const path = prompt.split('\n').find(line => line.startsWith('- '))?.slice(2).trim();
+  assert.ok(path && existsSync(path), '落盘路径真实存在: ' + path);
+
+  await f.say('owner', '看一下这份材料', {attachments: [{name: '带文字.txt'}]});
+  const withText = f.prompts.at(-1).prompt;
+  assert.match(withText, /看一下这份材料/);
+  assert.match(withText, /主人发来文件，已存到：/);
+  assert.doesNotMatch(withText, /只发了文件，没有文字/);
+});
+
+test('实际运行时生成「今天家里」和「要你转」两类推送给主人', async t => {
+  const f = await fixture(t);
+  await f.runtime.action({action: 'send_brief'});
+  await f.runtime.settled();
+  const homeRow = f.store.snapshot().outbox.filter(row => row.personId === 'owner' && row.kind === 'owner_brief').at(-1);
+  assert.equal(ownerPushCategory(homeRow.kind), 'home');
+
+  f.store.enqueue({personId: 'mom', kind: 'reminder', text: '吃药', sourceKey: 'reminder:synthetic', expiresAt: new Date(Date.parse(instant) - 1).toISOString()});
+  await f.runtime.tick();
+  await f.runtime.settled();
+  await f.runtime.tick();
+  await f.runtime.settled();
+  const relay = f.sent.filter(row => row.personId === 'owner').at(-1);
+  assert.match(relay.text, /^【乐乐·要你转】/);
+  assert.match(relay.text, /吃药/);
+});
+
+
+test('用户把通用占位字符串当原话输入时，不被改写', async t => {
+  const f = await fixture(t);
+  const marker = '[收到本人上传的文件材料]';
+  await f.say('owner', marker);
+  assert.ok(f.prompts.at(-1).prompt.endsWith('当前 Owner 请求原文：\n' + marker));
+  const inbound = f.store.snapshot().messages.filter(row => row.personId === 'owner' && row.dir === 'in').at(-1);
+  assert.equal(inbound.text, marker);
+
+  await f.say('owner', marker, {attachments: [{name: '碰撞.txt'}]});
+  const prompt = f.prompts.at(-1).prompt;
+  assert.ok(prompt.includes('当前 Owner 请求原文：\n' + marker), prompt);
+  assert.doesNotMatch(prompt, /当前 Owner 请求原文：\n（只发了文件，没有文字）/);
 });

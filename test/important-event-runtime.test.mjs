@@ -8,7 +8,7 @@ import {createRuntime} from '../src/runtime.mjs';
 const classified=(input,patch={})=>({decision:'notify',urgency:'soon',category:'needs_help',relatedIncidentId:null,subject:'self',eventState:'current',evidence:[{messageId:input.message.id,quote:input.message.text}],clarificationKind:null,...patch});
 async function fixture(t,options={}){
  const directory=mkdtempSync(join(tmpdir(),'lele-attention-runtime-')),sent=[],calls=[],connections=new Map();let clock='2026-10-26T10:00:00.000Z';
- const runtime=createRuntime({directory,now:()=>clock,intervalMs:60000,respond:options.respond??(async()=>({reply:'收到，我在。'})),classifyImportantEvent:async input=>{calls.push(input);return options.classify?options.classify(input):classified(input);},channelFactory:()=>({connect:async()=>{},disconnect:async()=>{},close:async()=>{},statuses:()=>({}),status:id=>({status:connections.get(id)??'connected'}),send:async(route,text)=>{sent.push({route,text});return{status:'api_accepted'};}})});
+ const runtime=createRuntime({directory,now:()=>clock,intervalMs:60000,respond:options.respond??(async()=>({reply:'收到，我在。'})),classifyImportantEvent:async input=>{calls.push(input);return options.classify?options.classify(input):classified(input);},...(options.runtimeExtra??{}),channelFactory:()=>({connect:async()=>{},disconnect:async()=>{},close:async()=>{},statuses:()=>({}),status:id=>({status:connections.get(id)??'connected'}),send:async(route,text)=>{sent.push({route,text});return{status:'api_accepted'};}})});
  for(const[id,role,label]of[['owner','owner','我'],['mom','elder','妈妈'],['dad','elder','爸爸']]){runtime.store.addPerson({id,role,label,shareWithOwner:'none'});runtime.store.bindPerson(id,{accountId:'bot-'+id,peerId:'wx-'+id});}
  await runtime.start();t.after(async()=>{await runtime.close();rmSync(directory,{recursive:true,force:true});});
  return{runtime,sent,calls,connections,advance:()=>clock=new Date(Date.parse(clock)+1000).toISOString(),receive:async(text,id='m1',personId='mom')=>{await runtime.receive(personId,{id,peerId:'wx-'+personId,text,at:clock});await runtime.settled();}};
@@ -85,4 +85,41 @@ test('an explicit relay uses its established notice rather than producing a seco
 });
 test('a quoted relay phrase does not bypass observation of an otherwise important family message',async t=>{
  const f=await fixture(t);await f.runtime.action({action:'attention_configure',enabled:true});f.advance();await f.receive('我这件事需要家里帮忙，材料里那句“请帮我转告家人”是引用');assert.equal(f.calls.length,1);assert.equal(f.sent.filter(row=>row.route.personId==='owner').length,1);
+});
+
+test('实际 important 事件推送只属于「要紧的事」类，不带会话状态类', async t => {
+  const f = await fixture(t);
+  await f.runtime.action({action: 'attention_configure', enabled: true});
+  f.advance();
+  await f.receive('这件事我一个人办不了', 'important-actual');
+  const alerts = f.sent.filter(x => x.route.personId === 'owner');
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].text, /^【乐乐·要紧的事】/);
+  assert.equal(f.runtime.status().attention.incidents.length, 1);
+});
+
+
+test('重要事项真实发生后，下一轮背景带真实事项编号，下一轮用它处理同一件事', async t => {
+  const prompts = [];
+  const f = await fixture(t, {runtimeExtra: {
+    ownerAgent: {
+      ensureControlWorkspace: async () => ({workspaceId: 'control', title: 'Owner', path: '/synthetic/control'}),
+      listWorkspaces: async () => [{workspaceId: 'control', title: 'Owner', path: '/synthetic/control'}],
+      start: async intent => { prompts.push(structuredClone(intent)); return {state: 'succeeded', text: '好'}; },
+      observe: async () => ({state: 'running', requestSeen: true, events: []}),
+    },
+    ownerTaskArtifacts: {collect: async () => []},
+  }});
+  await f.runtime.action({action: 'attention_configure', enabled: true});
+  f.advance();
+  await f.receive('这件事我一个人办不了', 'incident-source');
+  const incident = f.runtime.status().attention.incidents[0];
+  assert.ok(incident?.id);
+  await f.runtime.receive('owner', {id: 'owner-next', peerId: 'wx-owner', text: '我来处理'});
+  await f.runtime.settled();
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0].prompt.includes('事项编号 ' + incident.id), prompts[0].prompt);
+  const handled = await f.runtime.action({action: 'attention_respond', incidentId: incident.id, status: 'acknowledged'});
+  assert.match(handled.text, /知悉|已记/);
+  assert.equal(f.runtime.status().attention.incidents[0].status, 'acknowledged');
 });

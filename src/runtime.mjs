@@ -1370,7 +1370,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     catch(error){lastError=safeError(error);}
     const note=attachments.length?`\n\n主人发来文件，已存到：\n${attachments.map(row=>'- '+row).join('\n')}`:'';
     // 原话逐字进会话：不 trim、不改写、不补标点。只有确实没有文字时才写占位说明。
-    const body=(typeof text==='string'&&text.trim()?text:'（只发了文件，没有文字）')+note;
+    const ownerWroteText=typeof message.text==='string'&&message.text.trim().length>0;
+    const body=(ownerWroteText?text:'（只发了文件，没有文字）')+note;
     const background=ownerPushBackground(ownerPushesSince(boundary),{refOf:ownerPushRefs});
     try{
       const result=await nativeOwnerCommand(person,route,message,body,{origin:'wechat',background,direct:true});
@@ -1552,7 +1553,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         const accepted=store.recordInbound(personId,{id:message.id,peerId:message.peerId,text,...(message.at?{at:message.at}:{})});
         if(!accepted.accepted||store.snapshot().config.paused)return accepted;
         await deliverDeferredNotice(personId,route,message);
-        if(current(route)){store.enqueue({personId,text:message.voiceError==='unavailable'?'这段语音暂时没能识别，请用微信转文字后发给我，也可以请家庭联系人准备好语音服务。':'这段语音没能听清，请重新说一次，或用微信转文字后发给我。',kind:person.role==='owner'?'harness_notice':'reply',sourceKey:'voice-error:'+sourceRequest(route,message)});await flush(personId);}
+        if(current(route)){
+          const voiceReply=message.voiceError==='unavailable'
+            ? (person.role==='owner'
+              ? '这段语音暂时没能识别。请用微信转文字后发给我。'
+              : '这段语音暂时没能识别，请用微信转文字后发给我，也可以请家庭联系人准备好语音服务。')
+            : '这段语音没能听清，请重新说一次，或用微信转文字后发给我。';
+          store.enqueue({personId,text:voiceReply,kind:person.role==='owner'?'harness_notice':'reply',sourceKey:'voice-error:'+sourceRequest(route,message)});await flush(personId);
+        }
         return{accepted:true,voiceError:true};
       }
       // 主人的微信就是他自己的原生会话：只留入站记录、去重、暂停和待审批/待回答。

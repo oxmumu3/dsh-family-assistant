@@ -63,3 +63,26 @@ test('Owner native prompt separates direct archived-history access, brief sharin
  assert.doesNotMatch(prompt,/它只创建草稿，已有明确卡片确认由工作台处理/);
  assert.doesNotMatch(prompt,/ask_user_question/);
 });
+
+test('44,999ms 不发等待提示，45,000ms 发一次；下一轮单独计时', async t => {
+  const f = await fixture(t, {initial: {state: 'queued'}});
+  await f.send('找一下我上周的笔记', 'round-1');
+  assert.equal(f.sent.length, 0);
+  f.advance(44999); await f.runtime.tick();
+  assert.equal(f.sent.length, 0, '未到 45 秒不发');
+  f.advance(1); await f.runtime.tick();
+  assert.equal(f.sent.length, 1);
+  assert.match(f.sent[0].text, /还在/);
+  await f.runtime.tick(); await f.runtime.tick();
+  assert.equal(f.sent.length, 1, '同一轮重复 tick 不重发');
+
+  await f.send('再找一下上周的日报', 'round-2');
+  assert.equal(f.sent.length, 1, '第二轮从自己收到时开始计时');
+  f.advance(44999); await f.runtime.tick();
+  assert.equal(f.sent.length, 1);
+  f.advance(1); await f.runtime.tick();
+  assert.equal(f.sent.length, 2, '第二轮自己满 45 秒后单独发一条');
+  assert.notEqual(f.sent[1].text, f.sent[0].text);
+  await f.runtime.tick();
+  assert.equal(f.sent.length, 2);
+});
