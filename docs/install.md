@@ -69,18 +69,18 @@ CLI 须与目标宿主版本一致。当前机器全局 `dsh` 可能是更旧版
 
 ## 从旧版升级
 
-固定入口更新不会自动更新电脑上已经安装的插件。官方 rc.3 中，重复安装相同 npm 包名会提示已安装；隔离测试中，移除后再次安装 `@latest` 也曾仍得到旧版。因此升级时先在 [npm 页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)核对当前版本，再使用精确版本，例如本轮已验证的 `@oxmumu3/dsh-family-assistant@0.2.0-preview.35`。
+固定入口更新不会自动更新电脑上已经安装的插件。重复安装相同 npm 包名可能提示已安装，或因本机缓存解析到旧的 `@latest`。因此升级时建议先在 [npm 页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)核对当前最新版本号，再使用精确版本（例如当前正式版 `@oxmumu3/dsh-family-assistant@0.2.0`）。
 
 旧 tgz 的包名 `dsh-family-assistant` 与新 npm 包名 `@oxmumu3/dsh-family-assistant` 是两个安装身份，不能直接叠加启用。按下面顺序操作，始终沿用原 `storageDir`：
 
 1. 等待当前扫码和发送结束，在家庭助手暂停服务，备份原数据目录；若使用自定义 `storageDir`，记下并继续使用它。
 2. 在 Harness 插件管理移除旧的家庭助手插件包，保留数据目录。确认旧插件已停止；若宿主提示需要重启，先完全退出并重开 Harness，再继续安装。
-3. 安装 npm 当前版本的精确包名，例如 `@oxmumu3/dsh-family-assistant@0.2.0-preview.35`，并启用。隔离验收使用 npm 官方源 `https://registry.npmjs.org/`；可在创造模式明确要求原生插件管理器使用这个源安装精确版本。
+3. 安装 npm 当前最新版本的精确包名（例如 `@oxmumu3/dsh-family-assistant@0.2.0`，或从 [npm 页面](https://www.npmjs.com/package/@oxmumu3/dsh-family-assistant)核对的最新正式版）并启用。可在创造模式明确要求原生插件管理器从 npm 官方源 `https://registry.npmjs.org/` 安装该精确版本。
 4. 完全退出并重新打开 Harness，确认只保留一个家庭助手插件，原成员与绑定还在，再恢复服务。
 
 本轮在官方 rc.3 隔离环境验证了 scoped preview.21 升级和旧 tgz preview.30 迁移到 scoped preview.31；合成成员、绑定和聊天记录保持，未使用真实微信凭据或发送消息。真实微信登录是否仍有效还取决于微信平台；过期时需成员本人重新扫码。不要删除 `family.json`、成员通道目录或私有数据来更新插件。
 
-管理对话、资料卡、经本人允许转达的请求与私有服务偏好保存在同一数据目录的 `workbench.json`；状态文件保持 0600。
+管理对话、资料卡、经本人允许转达的请求与私有服务偏好保存在同一数据目录的 `workbench.json` 与 `hearth-preferences.json`；状态文件保持 0600。
 
 preview.7 另外增加 `presentations.json` 与 `presentation-files/`，保存已开通成员的 PPT 任务和成果；不改变微信凭据路径。Owner 本地项目会话保存在 Harness，刷新只核对原请求。preview.15 为通用 Owner 对话登记独立的 `storageDir + "-owner-workspace"` 目录，沿用 `harness-tasks.json` 保存稳定会话和每轮请求；旧记录兼容，不迁移微信凭据。微信平台主动过期登录、手动重绑或删除数据仍可能需要重新扫码。
 
@@ -92,7 +92,7 @@ preview.7 另外增加 `presentations.json` 与 `presentation-files/`，保存�
 
 用户无需另去插件页查找或安装语音包；家庭助手调用官方插件管理能力自动完成接入。语音模型没有塞入家庭助手 tgz，首次仍需联网下载并预留约 1 GB 磁盘/内存。宿主未自带组件时只使用官方插件目录提供的安装目标；宿主不支持则明确提示更新，不使用非官方下载源。此项已验证目标版本为 0.2.1-rc.2。
 
-识别使用官方本地 SenseVoiceSmall INT8 服务，不切换宿主已有语音偏好，不把音频交给家庭对话模型或微信。音频只在内存处理；文字回填后与普通未发送草稿一样可编辑。识别期间继续打字会保留两份内容，需手动选择插入；切换家人或事项不会串入原来的录音。主窗口负责麦克风权限，工作台 iframe 只接收状态与文本。独立 npm start 预览不含宿主语音服务。
+识别使用官方本地 SenseVoiceSmall INT8 服务，不切换宿主已有语音偏好，不把音频交给家庭对话模型或微信。音频只在内存处理；文字回填后与普通未发送草稿一样可编辑。识别期间继续打字会保留两份内容，需手动选择插入；切换家人或事项不会串入原来的录音。主窗口负责麦克风权限，纯 React 原生工作台直接接收状态与转写文本（0.2.0 起已全面移除旧版 iframe 挂载）。独立 npm start 预览不含宿主语音服务。
 
 ## 家人的默认能力与额外授权
 
