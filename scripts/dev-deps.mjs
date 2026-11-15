@@ -17,8 +17,12 @@ import {fileURLToPath} from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
-const profile = process.argv[2] ?? join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules');
-const plugin = process.argv[3] ?? join(profile, 'dsh-family-assistant', 'node_modules');
+const defaultProfile = join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules');
+const hoistedFallback = process.env.DSH_DEV_DEPS;
+const profile = process.argv[2] ?? (existsSync(join(defaultProfile, '@deepseek-ai', 'cordis')) ? defaultProfile : hoistedFallback && existsSync(hoistedFallback) ? hoistedFallback : defaultProfile);
+const scopedPlugin = join(profile, '@oxmumu3', 'dsh-family-assistant', 'node_modules');
+const unscopedPlugin = join(profile, 'dsh-family-assistant', 'node_modules');
+const plugin = process.argv[3] ?? (existsSync(scopedPlugin) ? scopedPlugin : existsSync(unscopedPlugin) ? unscopedPlugin : join(defaultProfile, '@oxmumu3', 'dsh-family-assistant', 'node_modules'));
 const target = join(root, 'node_modules');
 
 mkdirSync(target, {recursive: true});

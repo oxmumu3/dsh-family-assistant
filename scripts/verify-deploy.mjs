@@ -14,7 +14,9 @@ import {readFileSync, statSync, existsSync, readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {homedir} from 'node:os';
 
-const installed = join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-family-assistant');
+const scopedInstalled = join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', '@oxmumu3', 'dsh-family-assistant');
+const unscopedInstalled = join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-family-assistant');
+const installed = existsSync(scopedInstalled) ? scopedInstalled : unscopedInstalled;
 const dataDir = join(homedir(), '.local', 'share', 'dsh-family-assistant');
 const problems = [];
 const notes = [];

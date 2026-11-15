@@ -19,7 +19,7 @@ function nextDailyAfter(reminder, instant) {
 }
 
 /** Enqueues at most one occurrence per source key. It never performs transport effects. */
-export function scheduleTick(store,{now,hasDiary=()=>false}={}) {
+export function scheduleTick(store,{now,hasDiary=()=>false,isReminderSkipped=()=>false}={}) {
   const state=store.snapshot();
   if(state.config.paused) return [];
   const instant=asInstant(now);
@@ -46,6 +46,7 @@ export function scheduleTick(store,{now,hasDiary=()=>false}={}) {
     const diary=reminder.purpose==='diary_invitation',window=diary?DIARY_INVITATION_WINDOW_MS:CATCH_UP_MS,date=localDate(occurrence,reminder.timeZone);
     if(eligible(occurrence,nowMs,window)) {
       if(diary&&hasDiary(reminder.personId,date)){store.markReminder(reminder.id,reminder.repeat==='once'?{status:'completed'}:{dueAt:nextDailyAfter(reminder,instant)});continue;}
+      if(!diary&&isReminderSkipped(reminder.id,date)){store.markReminder(reminder.id,reminder.repeat==='once'?{status:'cancelled'}:{dueAt:nextDailyAfter(reminder,instant)});continue;}
       const record=enqueue({
         personId:reminder.personId,text:diary?diaryInvitationText(reminder.personId,date):`提醒：${reminder.text}`,kind:diary?'diary_invitation':'reminder',
         ...(diary?{authorizationRoute:store.route(reminder.personId)}:{}),

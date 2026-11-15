@@ -52,6 +52,7 @@ import {sourceTimingState} from './source-timing.mjs';
 import {createDotOwnerProjectAdmission,ownerProjectAdmissionTimeCurrent} from './dot-owner-project-admission.mjs';
 import {createInboundTimingLedger} from './inbound-timing-ledger.mjs';
 import {parseOwnerRelativeReminder} from './owner-relative-reminder.mjs';
+import {createHearthPreferences} from './hearth-preferences.mjs';
 
 const displayAttachments=items=>Array.isArray(items)?items.slice(0,4).flatMap(item=>{if(typeof item?.name!=='string'||!item.name.trim())return[];const name=item.name.replace(/[\\/\x00-\x1f\x7f]/g,'_').slice(0,180),size=Number(item.size??item.len);return[{name,...(Number.isSafeInteger(size)&&size>=0&&size<=10*1024*1024?{size}:{}),...(typeof item.mimeType==='string'&&/^[-a-z0-9.+]+\/[-a-z0-9.+]+$/i.test(item.mimeType)?{mimeType:item.mimeType}:{})}];}):[];
 const sameRoute=(a,b)=>a&&b&&['personId','accountId','peerId','generation'].every(key=>a[key]===b[key]);
@@ -93,6 +94,13 @@ const inputKeys={
   defer_member_notice:['personId','text','requestId','bindingGeneration'],deferred_member_notices:[],
   attention_configure:['enabled'],attention_update:['incidentId','status'],
   owner_conversation_open:[],
+  hearth_member_update:['personId','pinganEnabled','pinganTime','codeword'],
+  hearth_guard_update:['urgent','relay','ask','digest','quietHoursEnabled','quietStart','quietEnd'],
+  reminder_skip_once:['personId','reminderId','date','skip'],
+  defer_and_dismiss_relay:['relayId','personId','text','requestId','bindingGeneration'],
+  cancel_deferred_notice:['personId','id'],
+  hearth_habit_save:['personId','id','text'],
+  hearth_habit_delete:['personId','id'],
 };
 
 /** Kernel-reported start time of one process; used to tell a live owner from a
@@ -153,7 +161,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     if(/token|bearer|credential|https?:\/\//i.test(text))return'连接或模型暂时不可用，请检查工作台状态。';
     return text.slice(0,160)+(error?.sendOutcome==='failed'&&Number.isSafeInteger(error?.code)?`（接口代码 ${error.code}）`:'');
   };
-  let onboarding,deferredNotices;
+  let onboarding,deferredNotices,hearth;
   const channels=channelFactory({directory:join(directory,'channels'),api,now,...(transcribeVoice?{transcribeVoice}:{}),
     lookupInboundVoice:(personId,messageId)=>{const binding=store.binding(personId),row=store.messages(personId).find(value=>value.dir==='in'&&value.id===messageId&&recordMatchesBinding(value,binding));return row?{text:row.text,at:row.at,...(row.text==='[未能识别的语音]'?{voiceError:'failed'}:{})}:null;},
     onBound:(id,identity,options={})=>{const newBinding=!store.binding(id),wasSuspended=suspended(id);if(wasSuspended&&!reconnectArmed(id,options?.resumeToken))throw new Error('这位成员的微信已手动断开，只有本人当前这次恢复连接或重新扫码成功后才会接回。');const binding=store.bindPerson(id,identity);if(wasSuspended)suspensions.clear(id);reconnectAttempt.delete(id);onboarding?.markBound(id,identity,{newBinding});return binding;},
@@ -198,9 +206,17 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     for(const row of store.snapshot().outbox.filter(row=>row.status==='pending'&&(['harness_result','harness_notice'].includes(row.kind)||row.sourceKey.includes(':native-owner-')||/^(?:workbench:|request-reply:|family-dot:)/.test(row.sourceKey))))store.transition(row.id,'cancelled','上次投递未结束，没有自动续发。');
     onboarding=createMemberOnboarding({directory,store,toolbox,access,presentations,now,projectExecutorAvailable:Boolean(familyProjectExecutor),generalAgentAvailable:Boolean(memberAgent)});
     deferredNotices=createDeferredMemberNotices({directory,store,flush,now});
+    hearth=createHearthPreferences({directory:realpathSync(directory),now});
     attention=createRuntimeAttention({directory,store,classify:classifyImportantEvent,channels,flush,sendOwnerMessage,now,running:()=>!closed&&!store.snapshot().config.paused,signal:()=>lifecycle.signal});
   }catch(error){void gateway?.close();void channels.close();unlock();throw error;}
   runtimeReady=true;
+  const ownerAllowedPush=category=>{
+    const g=hearth.guard();
+    if(category==='urgent')return Boolean(g.pushRules.urgent);
+    if(!g.pushRules[category])return false;
+    const owner=store.snapshot().people.find(p=>p.role==='owner');
+    return !hearth.inQuietHours(now(),owner?.timeZone);
+  };
   const serial=(map,key,work)=>{
     const previous=map.get(key)??Promise.resolve();const task=previous.catch(()=>{}).then(work);
     map.set(key,task);task.finally(()=>{if(map.get(key)===task)map.delete(key);}).catch(()=>{});return task;
@@ -251,7 +267,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       requestOwnerHelp:async args=>{
         if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted||!canRequestMemberOwnerHelp({text,evidence:args.evidence,requestText:args.text}))throw new Error('没有获得这次转告的明确同意。');        const sourceNotice=await attention.ownerNoticeForSource(person.id,message.id);
         if(!authorize()||await args.authorize()!==true||!authorize()||signal.aborted)throw new Error('当前连接已改变。');
-        const request=toolbox.requestWorkflow({personId:person.id,requestId:args.requestId,text:args.text}),notification=sourceNotice??await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal});
+        const request=toolbox.requestWorkflow({personId:person.id,requestId:args.requestId,text:args.text}),notification=sourceNotice??(ownerAllowedPush('ask')?await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal}):null);
         const reply=sourceNotice?sourceNotice.status==='api_accepted'?'已向微信接口提交这件事的提醒，实际收到仍待确认。':sourceNotice.status==='failed'?'这件事已记录，提醒发送失败，没有重复发送。':sourceNotice.status==='pendingOwner'?'这件事已记录，提醒正在等待投递。':'这件事已记录，提醒投递尚未确认，没有重复发送。':'已记录这次求助，家庭联系人可在同一需求中继续处理。';
         return{status:notification?.status??'recorded',requestId:request.requestId,reply};
       },
@@ -408,6 +424,55 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     }),relay:(()=>{const rows=state.outbox.filter(row=>row.kind==='undeliverable_notice'&&row.status==='pending'&&row.personId===state.people.find(p=>p.role==='owner')?.id);
       return rows.map(row=>{const source=state.outbox.find(item=>row.sourceKey===`undeliverable:${item.id}`);return{id:row.id,at:row.createdAt,text:row.text,personId:source?.personId??null,personLabel:source?.personId?store.person(source.personId)?.label??null:null};});})(),lastBrief,lastError,attention:attention.snapshot(),runtimeWork:{attention:attention.snapshot().active,responses:peopleWork.size,ownerMessages:ownerMessageWork.size,presentations:presentationWork.size,tools:toolWork.size,members:memberQueued.size,deliveries:flushWork.size,ownerObservers:ownerObservers.size},memberAgent:{available:Boolean(memberAgent),...(memberAgent?.snapshot?.()??{}),active:Math.max(memberAgent?.snapshot?.().active??0,memberQueued.size)},workbench:workbench.snapshot(),presentations:presentations.snapshot(),serviceSetup:state.people.some(person=>person.role==='owner')?serviceSetup.snapshotForOwner({actorId:state.people.find(person=>person.role==='owner').id}):[],harness:{tasks:gateway.snapshotForOwner(),familyExecution:familyProjectExecutor?'scoped_project_agent':'protected_executor_required',familyWriteScope:'family-output/<personId>/*.{md,txt,csv,json}'}};
     result.ownerConversation=ownerConversationView();
+    const ownerPerson=state.people.find(p=>p.role==='owner')??null;
+    let ownerBound=false;try{ownerBound=Boolean(ownerPerson&&store.route(ownerPerson.id));}catch{}
+    const hearthSnapshot=hearth.snapshot(),rawGuard=hearthSnapshot.guard,attnSnap=attention.snapshot();
+    const elderPeople=state.people.filter(p=>p.role==='elder');
+    const outboxStatusLabel=s=>s==='api_accepted'?'已提交微信接口':s==='failed'||s==='expired'?'未完成':s==='uncertain'||s==='blocked'?'结果待核对':'待发出';
+    result.hearth={
+      guard:{
+        ...rawGuard,
+        pushRules:{
+          ...rawGuard.pushRules,
+          digest:Boolean(rawGuard.pushRules.digest&&state.config.ownerBriefEnabled),
+          urgent:attnSnap.available&&ownerBound?attnSnap.enabled:rawGuard.pushRules.urgent,
+        },
+        importantAvailable:Boolean(attnSnap.available&&ownerBound),
+        inQuietHours:hearth.inQuietHours(now(),ownerPerson?.timeZone),
+      },
+      deferredNotices:ownerPerson?deferredNotices.list().notices:[],
+      workflowRequests:ownerPerson?toolbox.listRequests({actorId:ownerPerson.id}):[],
+      skippedReminders:hearthSnapshot.skippedReminders,
+      members:Object.fromEntries(elderPeople.map(p=>{
+        const pref=hearthSnapshot.members[p.id]??hearth.member(p.id),privacyProtected=p.shareWithOwner==='none',binding=store.binding(p.id);
+        let accessEntry=null;try{accessEntry=ownerPerson?access.list({actorId:ownerPerson.id}).find(a=>a.personId===p.id)??null:null;}catch{}
+        let assignments=[];try{assignments=ownerPerson?toolbox.assignments({actorId:ownerPerson.id,personId:p.id}):[];}catch{}
+        let diaryCount=0;try{const r=store.route(p.id);diaryCount=library.query({personId:p.id,route:r,kind:'diary',limit:200}).entries.length;}catch{}
+        const recentMessages=privacyProtected?[]:store.messages(p.id).filter(m=>recordMatchesBinding(m,binding)).slice(-6).map(m=>({
+          id:m.id,dir:m.dir,kind:m.kind,at:m.at,
+          text:p.shareWithOwner==='summary'?String(m.text??'').slice(0,120):String(m.text??'').slice(0,500),
+        }));
+        return[p.id,{
+          ...pref,
+          tools:toolbox.catalog({personId:p.id}),
+          assignments,
+          access:accessEntry,
+          presentationEnabled:presentations.snapshot().people.find(x=>x.personId===p.id)?.enabled??false,
+          onboarding:onboarding.describe(p.id),
+          diaryCount,
+          privacyProtected,
+          recentMessages,
+        }];
+      })),
+      recentActivity:elderPeople.flatMap(p=>{
+        const rows=state.outbox.filter(row=>row.personId===p.id&&row.status!=='cancelled').slice(-8).map(row=>({
+          id:row.id,personId:p.id,personLabel:p.label,at:row.createdAt,dir:'out',kind:row.kind,status:row.status,
+          statusLabel:outboxStatusLabel(row.status),
+          summary:p.shareWithOwner==='none'?'已向微信提交一次消息（隐私设置不展示原文）':String(row.text??'').replace(/^提醒：/,'').replace(/\s+/g,' ').trim().slice(0,72),
+        }));
+        return rows;
+      }).sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)).slice(0,12),
+    };
     if(personId){const person=store.person(personId);if(!person)throw new Error('没有找到这位家人。');result.selectedPersonId=personId;result.messages=store.messages(personId,{limit:100});}
     return result;
   }
@@ -562,10 +627,20 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         return;
       }
       if(suspended(personId))return;
+      const ownerRow=store.snapshot().people.find(p=>p.role==='owner');
       for(const row of store.pending().filter(x=>x.personId===personId&&(!onlyId||x.id===onlyId))){
         if(suspended(personId))return;
         if(row.kind===deferredNoticeKind&&!deferredNotices.canDeliver(row))continue;
         if(['important_event','important_clarify'].includes(row.kind)&&channels.status(personId)?.status!=='connected')continue;
+        if(ownerRow&&personId===ownerRow.id){
+          if(row.kind==='undeliverable_notice'&&!ownerAllowedPush('relay'))continue;
+          if(['family_request','family_response','workflow_request','workflow_followup'].includes(row.kind)&&!ownerAllowedPush('ask'))continue;
+          if(row.kind==='important_event'&&!ownerAllowedPush('urgent'))continue;
+          if(row.kind==='owner_brief'&&row.sourceKey.startsWith('owner-brief:')){
+            if(!hearth.guard().pushRules.digest){store.transition(row.id,'cancelled','自动简报微信推送已关闭，未发送。');continue;}
+            if(hearth.inQuietHours(now(),ownerRow.timeZone))continue;
+          }
+        }
         if(extraAuthorize&&extraAuthorize()!==true){store.transition(row.id,'cancelled','当前指令授权已改变，没有发送。');continue;}
         if(cancelUnauthorized(row))continue;
         // Anything whose own window closed while waiting must not arrive late.
@@ -659,14 +734,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   }
   async function notifyRequest(request){
     const owner=store.snapshot().people.find(p=>p.role==='owner');
-    if(!owner||!request.ownerRoute||!current(request.ownerRoute)||channels.status(owner.id)?.status!=='connected')return false;
+    if(!owner||!request.ownerRoute||!current(request.ownerRoute)||channels.status(owner.id)?.status!=='connected'||!ownerAllowedPush('ask'))return false;
     const label=store.person(request.personId).label;
     const row=store.enqueue({personId:owner.id,text:withOwnerPushHeader('family_request',label,`${label}请家庭助手转告你：\n${request.text}\n\n你可以在家庭助手的“待我回应”里回复，也可以在微信告诉我如何回复这件事。`),kind:'family_request',authorizationRoute:request.route,sourceKey:`family-request:${request.id}`});
     await flush(owner.id,{onlyId:row.id});return store.snapshot().outbox.find(r=>r.id===row.id)?.status==='api_accepted';
   }
   async function notifyRequestResponse(request,response,messageId){
     const owner=store.snapshot().people.find(p=>p.role==='owner');
-    if(!owner||!request.ownerRoute||!current(request.ownerRoute)||!current(request.route))return;
+    if(!owner||!request.ownerRoute||!current(request.ownerRoute)||!current(request.route)||!ownerAllowedPush('ask'))return;
     const label=store.person(request.personId).label;
     const row=store.enqueue({personId:owner.id,text:withOwnerPushHeader('family_response',label,`${label}回应了先前转告的事项：\n${response}\n\n关于：${request.text.slice(0,180)}\n已记录这次回应；不代表外部事项已完成。`),kind:'family_response',authorizationRoute:request.route,sourceKey:`family-response:${request.id}:${messageId}`});
     await flush(owner.id,{onlyId:row.id});
@@ -695,7 +770,24 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           onboarding.markEnqueued({personId:person.id,sourceKey:welcome.sourceKey,outboxId:row.id});
         }
       }
-      await attention.tick();scheduleTick(store,{now:now(),hasDiary});await gateway.tick();await notifyOwnerTaskStatus();
+      await attention.tick();scheduleTick(store,{now:now(),hasDiary,isReminderSkipped:(id,date)=>hearth.isReminderSkipped(id,date)});
+      for(const person of store.snapshot().people.filter(person=>person.role==='elder')){
+        if(suspended(person.id))continue;
+        let route;try{route=store.route(person.id);}catch{continue;}
+        if(!current(route))continue;
+        const pref=hearth.member(person.id);
+        if(!pref.pinganEnabled)continue;
+        const reach=reachOf(person.id),inboundAt=lastInboundOf(person.id),today=localDate(now(),person.timeZone);
+        if(reach.state==='open'&&reach.remainingMs>0&&reach.remainingMs<=4*3600000&&inboundAt&&pref.lastPinganDate!==today&&pref.lastPinganInboundAt!==inboundAt){
+          const sourceKey=`pingan:${person.id}:${route.generation}:${today}`;
+          if(!store.snapshot().outbox.some(row=>row.sourceKey===sourceKey)){
+            const expiresAt=new Date(Date.parse(now())+Math.min(reach.remainingMs,4*3600000)).toISOString();
+            store.enqueue({personId:person.id,kind:'pingan_keepalive',sourceKey,text:`${person.label}，跟您问声平安。最近一切都顺心吗？有什么需要我帮忙带话或记录的，随时回我一句就行。`,expiresAt});
+            hearth.updateMember(person.id,{lastPinganInboundAt:inboundAt,lastPinganDate:today});
+          }
+        }
+      }
+      await gateway.tick();await notifyOwnerTaskStatus();
       for(const due of toolbox.due()){
         let route;try{route=store.route(due.personId);}catch{continue;}
         void serial(toolWork,due.personId,()=>runTool({personId:due.personId,toolId:due.toolId,requestId:due.requestId,expectedRevision:due.expectedRevision},route,{notify:true,scheduled:true})).catch(error=>{lastError=safeError(error);});
@@ -880,6 +972,11 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     alive();
     if(openingConversation)return openingConversation;
     openingConversation=(async()=>{
+      const existingPeople=store.snapshot().people;
+      if(!existingPeople.some(person=>person.role==='owner')){
+        const defaultId=existingPeople.some(person=>person.id==='owner')?'owner-'+randomUUID().slice(0,8):'owner';
+        store.addPerson({id:defaultId,role:'owner',label:'我'});
+      }
       const personId=ownerId();
       if(typeof ownerAgent?.ensureControlWorkspace!=='function'||typeof ownerAgent?.ensureSession!=='function')throw Object.assign(new Error('owner_agent_unavailable'),{code:'owner_agent_unavailable'});
       const signal=managementLifecycle.signal;
@@ -1448,7 +1545,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const rows=toolbox.catalog({personId:person.id});if(memberAgent&&person.role!=='owner')return{reply:'直接说你想办什么就好。我可以帮你解释、写稿、改稿、整理自己收到的材料、查公开信息、记事和安排提醒。'+(rows.some(row=>row.ready)?'\n已为你预设的快捷服务：'+rows.filter(row=>row.ready).map(row=>row.title).join('、'):'')};return{reply:rows.length?rows.map(row=>`${row.title}：${row.ready?'可调用，数据源运行时检查':row.reason==='not_assigned'?'尚未分配给你':'执行服务尚未接通'}`).join('\n'):'还没有为你开通工具。告诉我想做什么，我可以把需求交给 Owner。'};
     }
     const workflow=value.match(/^(?:申请(?:新)?工具|申请工作流|我想要一个工具)[：:]\s*([\s\S]+)$/);
-    if(workflow){const request=toolbox.requestWorkflow({personId:person.id,requestId,text:workflow[1]});const notification=origin==='wechat'&&person.role==='elder'?await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal:lifecycle.signal}):null;return{reply:'已记下工具需求。'+(notification?.status==='api_accepted'?'已向 Owner 的微信接口提交这项请求；实际收信待本人确认。':'Owner 可在需求列表接续；微信通知尚未确认。')+'现在尚未创建或开通新工具。'};}
+    if(workflow){const request=toolbox.requestWorkflow({personId:person.id,requestId,text:workflow[1]});const notification=origin==='wechat'&&person.role==='elder'&&ownerAllowedPush('ask')?await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal:lifecycle.signal}):null;return{reply:'已记下工具需求。'+(notification?.status==='api_accepted'?'已向 Owner 的微信接口提交这项请求；实际收信待本人确认。':'Owner 可在需求列表接续；微信通知尚未确认。')+'现在尚未创建或开通新工具。'};}
     const toolId=/^(?:AI\s*(?:精选)?(?:日报|digest)|看(?:一下)?AI日报|今天的AI精选)[。！!？?\s]*$/i.test(value)?'ai_digest':/^(?:天气|查天气|天气日报)[。！!？?\s]*$/.test(value)?'weather':null;
     if(toolId){
       if(memberAgent&&person.role!=='owner'&&!toolbox.catalog({personId:person.id}).some(row=>row.toolId===toolId&&row.ready))return null;
@@ -1480,7 +1577,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         if(op.recipientPersonId&&op.recipientPersonId!==recipientIn(value))throw new Error('没有确认这位成果接收人，尚未执行。');
         const result=await gateway.submit({personId:person.id,route,origin,workspaceId:op.workspaceId,prompt:value,requestId,...(recipientPersonId?{deliveryTarget:captureDeliveryTarget(recipientPersonId)}:{})});return{taskId:result.id,reply:`任务已登记：${result.id}。${recipientPersonId?'结果将发给'+store.person(recipientPersonId).label:'结果会在这里返回'}；执行范围以你当前获得的权限为准。`};
       }
-      if(op.type==='workflow_request'){const request=toolbox.requestWorkflow({personId:person.id,requestId,text:value});const notification=origin==='wechat'&&person.role==='elder'?await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal:lifecycle.signal}):null;return{reply:'已记下工具需求，'+(notification?.status==='api_accepted'?'已向 Owner 微信接口提交请求；实际收信待本人确认。':'Owner 可以在需求列表里查看，微信通知尚未确认。')+'尚未创建或开通新工具。'};}
+      if(op.type==='workflow_request'){const request=toolbox.requestWorkflow({personId:person.id,requestId,text:value});const notification=origin==='wechat'&&person.role==='elder'&&ownerAllowedPush('ask')?await workflowNotifications.notify({personId:person.id,requestId:request.requestId,expectedRoute:route,signal:lifecycle.signal}):null;return{reply:'已记下工具需求，'+(notification?.status==='api_accepted'?'已向 Owner 微信接口提交请求；实际收信待本人确认。':'Owner 可以在需求列表里查看，微信通知尚未确认。')+'尚未创建或开通新工具。'};}
       if(op.type==='invoke_tool'){
         if(!targets.some(target=>target.personId===op.personId&&target.tools.includes(op.toolId))||person.role!=='owner'&&op.personId!==person.id)throw new Error('未获准使用这项工具。');
         const target=store.person(op.personId);if(target.id!==person.id&&!value.includes(target.label))throw new Error('请明确接收这项工具结果的家人。');
@@ -1724,14 +1821,14 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     alive();if(!input||typeof input!=='object'||Array.isArray(input)||!Object.hasOwn(inputKeys,input.action)||Object.keys(input).some(k=>k!=='action'&&!inputKeys[input.action].includes(k)))throw new Error('不支持的操作或参数。');
     const{action:op,...args}=input;
     if(op==='owner_conversation_open')return openOwnerConversation();
-    if(op==='attention_configure'){attention.configure(args.enabled);return status();}
+    if(op==='attention_configure'){attention.configure(args.enabled);hearth.updateGuard({pushRules:{urgent:Boolean(args.enabled)}});return status();}
     if(op==='attention_update'){attention.mark(args.incidentId,args.status);return status();}
     if(op==='resume_owner_native_message')return resumeOwnerNativeMessage(args.messageId);
     if(op==='owner_send_message')return sendOwnerMessage(args);
     if(op==='defer_member_notice'){ownerId();return deferredNotices.register(args);}
     if(op==='deferred_member_notices'){ownerId();return deferredNotices.list();}
     if(op==='owner_chat'&&args.requestId===undefined)args.requestId=randomUUID();
-    if(['login','verify_login','connect','disconnect','update_person','add_reminder','cancel_reminder','send_message'].includes(op)&&!store.person(args.personId))throw new Error('请先选择一位家人。');
+    if(['login','verify_login','connect','disconnect','update_person','add_reminder','cancel_reminder','send_message','hearth_member_update','reminder_skip_once','hearth_habit_save','hearth_habit_delete'].includes(op)&&!store.person(args.personId))throw new Error('请先选择一位家人。');
     if(op==='owner_chat'&&!args.profileIntake&&!args.profileEdit&&!args.draftOnly&&!args.contextId&&!args.taskId){
       const dialogue=args.workspaceId?null:await ownerMessageDialogue(store.person(ownerId()),null,{id:args.requestId},args.text??'',{origin:'console'});if(dialogue){if(!workbench.snapshot().messages.some(row=>row.role==='user'&&row.requestId===args.requestId))await workbench.external({text:args.text,requestId:args.requestId},async()=>({reply:dialogue.reply}));return status();}
       if(helpIntent(args.text??'')){await workbench.external(args,async()=>({reply:capabilityHelp(store.person(ownerId()))}));return status();}
@@ -1819,6 +1916,71 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       case'send_message':if(store.snapshot().config.paused)throw new Error('服务已暂停，请先开始服务。');if(suspended(args.personId))throw new Error('这位成员的微信已手动断开，恢复连接前不会发送。');store.enqueue({personId:args.personId,text:args.text,kind:'manual',sourceKey:`manual:${randomUUID()}`});await flush(args.personId);break;
       case'start':await start();break;
       case'pause':await pause();break;
+      case'hearth_member_update':{
+        ownerId();
+        const patch={};
+        for(const key of ['pinganEnabled','pinganTime','codeword']){if(args[key]!==undefined)patch[key]=args[key];}
+        hearth.updateMember(args.personId,patch);
+        break;
+      }
+      case'hearth_guard_update':{
+        ownerId();
+        const pushRules={};
+        for(const key of ['urgent','relay','ask','digest']){if(args[key]!==undefined)pushRules[key]=args[key];}
+        const patch={...(Object.keys(pushRules).length?{pushRules}:{}),...(args.quietHoursEnabled!==undefined?{quietHoursEnabled:args.quietHoursEnabled}:{}),...(args.quietStart!==undefined?{quietStart:args.quietStart}:{}),...(args.quietEnd!==undefined?{quietEnd:args.quietEnd}:{})};
+        hearth.updateGuard(patch);
+        if(args.digest!==undefined){
+          store.configure({ownerBriefEnabled:Boolean(args.digest)});
+          if(args.digest===false)for(const row of store.pending().filter(r=>r.kind==='owner_brief'&&r.sourceKey?.startsWith('owner-brief:')))store.transition(row.id,'cancelled','自动简报微信推送已关闭，未发送。');
+        }
+        if(args.urgent!==undefined){
+          let bound=false;try{bound=Boolean(store.route(ownerId()));}catch{}
+          if(args.urgent===false||attention.snapshot().available&&bound){try{attention.configure(Boolean(args.urgent));}catch{}}
+        }
+        break;
+      }
+      case'reminder_skip_once':{
+        ownerId();
+        const rem=store.reminders(args.personId).find(r=>r.id===args.reminderId);
+        if(!rem)throw new Error('没有找到这条提醒。');
+        const date=args.date??localDate(rem.dueAt,rem.timeZone);
+        if(args.skip===false)hearth.unskipReminder(args.reminderId);
+        else hearth.skipReminder(args.reminderId,date);
+        break;
+      }
+      case'defer_and_dismiss_relay':{
+        ownerId();
+        const relayRow=args.relayId?store.snapshot().outbox.find(item=>item.id===args.relayId):null;
+        const sourceRow=relayRow?store.snapshot().outbox.find(item=>relayRow.sourceKey===`undeliverable:${item.id}`):null;
+        const targetPersonId=args.personId??sourceRow?.personId;
+        if(!targetPersonId)throw new Error('请指定待补发的家人。');
+        const route=store.route(targetPersonId);
+        deferredNotices.register({
+          personId:targetPersonId,
+          requestId:args.requestId??(args.relayId?`relay-${args.relayId}`:`relay-${randomUUID()}`),
+          bindingGeneration:args.bindingGeneration??route.generation,
+          text:args.text,
+        });
+        if(relayRow?.kind==='undeliverable_notice'&&relayRow.status==='pending')store.transition(relayRow.id,'cancelled','已改记为待对方来信后补发');
+        break;
+      }
+      case'cancel_deferred_notice':{
+        ownerId();
+        deferredNotices.cancel({personId:args.personId,id:args.id});
+        break;
+      }
+      case'hearth_habit_save':{
+        ownerId();
+        const existing=args.id&&hearth.member(args.personId).ownerHabits.some(item=>item.id===args.id);
+        if(existing)hearth.updateHabit(args.personId,{id:args.id,text:args.text});
+        else hearth.addHabit(args.personId,{...(args.id?{id:args.id}:{}),text:args.text});
+        break;
+      }
+      case'hearth_habit_delete':{
+        ownerId();
+        hearth.deleteHabit(args.personId,{id:args.id});
+        break;
+      }
     }
     return status({personId:args.personId});
   }

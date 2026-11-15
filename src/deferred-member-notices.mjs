@@ -42,7 +42,7 @@ export function createDeferredMemberNotices({directory,store,flush,now=()=>new D
  function owner(){const p=snapshot().people.find(x=>x.role==='owner');if(!p)fail('请先登记 Owner。');return p;}
  function scopeCurrent(e){const s=snapshot(),p=s.people.find(x=>x.id===e.personId),o=s.people.find(x=>x.id===e.ownerId),b=s.bindings.find(x=>x.personId===e.personId);return p?.role==='elder'&&p.createdAt===e.personCreatedAt&&o?.role==='owner'&&o.createdAt===e.ownerCreatedAt&&sameRoute(b,e.route);}
  function delivery(e){return snapshot().outbox.find(x=>x.sourceKey===prefix+e.id);}
- function view(e){const row=delivery(e);return{id:e.id,personId:e.personId,requestId:e.requestId,createdAt:e.createdAt,status:row?.status??(scopeCurrent(e)?'waiting':'cancelled'),...(row?{outboxId:row.id}:{})};}
+ function view(e){const row=delivery(e);return{id:e.id,personId:e.personId,requestId:e.requestId,text:e.text,createdAt:e.createdAt,status:row?.status??(scopeCurrent(e)?'waiting':'cancelled'),...(row?{outboxId:row.id}:{})};}
  function canDeliver(row){
   if(row.kind!==deferredNoticeKind||!row.sourceKey.startsWith(prefix))return false;
   const e=load().entries.find(x=>prefix+x.id===row.sourceKey);return Boolean(e&&active.has(e.id)&&scopeCurrent(e)&&row.personId===e.personId&&row.text===e.text&&sameRoute(row.route,e.route)&&sameRoute(row.authorizationRoute,e.route));
@@ -55,6 +55,19 @@ export function createDeferredMemberNotices({directory,store,flush,now=()=>new D
    const loaded=load(),id=hash([o.id,o.createdAt,requestId]),previous=loaded.entries.find(x=>x.id===id);
    if(previous){if(previous.personId!==personId||previous.personCreatedAt!==p.createdAt||previous.text!==text||!sameRoute(previous.route,route))fail('同一通知请求已对应其他内容或绑定。');return view(previous);}
    const entry={id,requestId,ownerId:o.id,ownerCreatedAt:o.createdAt,personId,personCreatedAt:p.createdAt,route,text,createdAt:clock()};save([...loaded.entries,entry],loaded.stat);return view(entry);
+  },
+  cancel({personId,id}={}){
+   owner();
+   const cleanId=typeof id==='string'?id.trim():'';
+   if(!validId(cleanId))fail('请提供要撤回的补发记录标识。');
+   const loaded=load(),cleanPerson=typeof personId==='string'?personId.trim():'';
+   const e=loaded.entries.find(x=>x.id===cleanId&&(!cleanPerson||x.personId===cleanPerson));
+   if(!e)fail('没有找到这条待补发记录，可能已撤回或不在当前列表。');
+   const row=delivery(e);
+   if(active.has(e.id)||row&&!['pending','cancelled'].includes(row.status))fail('这条补发通知已在投递或已提交，不能撤回。');
+   if(row?.status==='pending')store.transition(row.id,'cancelled','本人已撤回补发安排');
+   save(loaded.entries.filter(x=>x.id!==e.id),loaded.stat);
+   return{cancelled:true,id:e.id,personId:e.personId};
   },
   async onInbound({personId,route,message}){
    const s=snapshot();if(s.config.paused||!sameRoute(s.bindings.find(x=>x.personId===personId),route))return;

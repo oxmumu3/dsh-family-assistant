@@ -124,6 +124,39 @@ window.__ModuleLoader__.load({
         const [relay, setRelay] = React.useState([]);
         const [relayNote, setRelayNote] = React.useState('');
         const [bandNote, setBandNote] = React.useState('');
+        const [controlState, setControlState] = React.useState(null);
+        const [dockOpen, setDockOpen] = React.useState(false);
+        const [whisperOpen, setWhisperOpen] = React.useState(false);
+        const [nudgeDismissed, setNudgeDismissed] = React.useState(false);
+        const [activeTab, setActiveTab] = React.useState('home');
+        const [selectedPersonId, setSelectedPersonId] = React.useState('');
+        const [expandedInboxId, setExpandedInboxId] = React.useState('');
+        const [replyDrafts, setReplyDrafts] = React.useState({});
+        const [whisperInput, setWhisperInput] = React.useState('');
+        const [reminderFormOpen, setReminderFormOpen] = React.useState(false);
+        const [reminderDraft, setReminderDraft] = React.useState({ personId: '', date: '', time: '09:00', repeat: 'once', text: '' });
+        const [habitDraft, setHabitDraft] = React.useState('');
+        const [onboardOpen, setOnboardOpen] = React.useState(false);
+        const [onboardStep, setOnboardStep] = React.useState(1);
+        const [onboardPersonId, setOnboardPersonId] = React.useState('');
+        const [onboardForm, setOnboardForm] = React.useState({ label: '', timeZone: 'Asia/Shanghai', dailyEnabled: true, dailyTime: '08:30', shareWithOwner: 'summary', pinganEnabled: true });
+        const [safetyOpen, setSafetyOpen] = React.useState(false);
+        const [safetyCodeword, setSafetyCodeword] = React.useState('');
+        const [qrSvgs, setQrSvgs] = React.useState({});
+        const [toast, setToast] = React.useState(null);
+        const [briefPreview, setBriefPreview] = React.useState('');
+        const [darkTheme, setDarkTheme] = React.useState(false);
+        const [busyAction, setBusyAction] = React.useState(false);
+        const [actionError, setActionError] = React.useState('');
+        const applyControlState = state => {
+          if (!state || typeof state !== 'object') return;
+          setControlState(state);
+          setHealth(state.health ?? null);
+          setHealthError('');
+          setRequests(openRequestsOf(state));
+          setRelay(Array.isArray(state.relay) ? state.relay : []);
+          if (state.lastBrief?.text) setBriefPreview(state.lastBrief.text);
+        };
         React.useEffect(() => {
           let active = true;
           const previousFetch = window.__FamilyHostFetch;
@@ -171,10 +204,12 @@ window.__ModuleLoader__.load({
           window.__FamilyVoice = voice;
           window.__FamilyOwnerAgent = ownerAgent;
           setError('');
-          Promise.resolve().then(() => globalThis.fetch('/api/family/workbench', { credentials: 'same-origin' }))
-            .then(response => { if (!response.ok) throw new Error('unavailable'); return response.text(); })
-            .then(source => { if (active) setPage({ source, theme: readHostTheme() }); })
-            .catch(() => { if (active) setError('家庭助手暂时无法载入，请确认插件已启用后重试。'); });
+          if (!nativeCapable) {
+            Promise.resolve().then(() => globalThis.fetch('/api/family/workbench', { credentials: 'same-origin' }))
+              .then(response => { if (!response.ok) throw new Error('unavailable'); return response.text(); })
+              .then(source => { if (active) setPage({ source, theme: readHostTheme() }); })
+              .catch(() => { if (active) setError('家庭助手暂时无法载入，请确认插件已启用后重试。'); });
+          }
           return () => {
             active = false;
             ownerAbort.abort();
@@ -199,16 +234,14 @@ window.__ModuleLoader__.load({
             .then(response => { if (!response.ok) throw new Error('status'); return response.json(); })
             .then(state => {
               if (!active) return;
-              setHealth(state && state.health ? state.health : null);
-              setHealthError('');
-              setRequests(openRequestsOf(state));
-              setRelay(Array.isArray(state?.relay) ? state.relay : []);
+              applyControlState(state);
             })
             .catch(() => { if (active) setHealthError('暂时读不到家庭状态'); });
           load();
+          window.addEventListener?.('focus', load);
           const timer = setInterval(load, 30000);
           if (typeof timer?.unref === 'function') timer.unref();
-          return () => { active = false; clearInterval(timer); };
+          return () => { active = false; window.removeEventListener?.('focus', load); clearInterval(timer); };
         }, [attempt]);
         // Open (or create once) the Owner's desktop conversation and retain it.
         // Opening never sends a message. Any failure falls back to the iframe chat.
@@ -216,7 +249,7 @@ window.__ModuleLoader__.load({
           if (!nativeCapable) return undefined;
           let live = true, reference = null;
           const previousShow = window.__FamilyShowNativeChat;
-          const show = () => { if (live) setView('chat'); };
+          const show = () => { if (live) { setDockOpen(true); setView('chat'); } };
           window.__FamilyShowNativeChat = show;
           const previousHandoff = window.__FamilyHandoffChanged;
           const syncHandoff = () => { if (live) setHandoff(collectNativeHandoff()); };
@@ -227,6 +260,7 @@ window.__ModuleLoader__.load({
             const response = await globalThis.fetch('/api/family/control', { credentials: 'same-origin' });
             if (!response.ok) return 'unknown';
             const state = await response.json();
+            if (live && Array.isArray(state?.people)) applyControlState(state);
             return state?.ownerConversation?.sessionId === sessionId ? state.ownerConversation.policy : 'unknown';
           };
           setConversation({ status: 'opening' });
@@ -268,6 +302,92 @@ window.__ModuleLoader__.load({
               else window.__FamilyHandoffChanged = previousHandoff;
             }
           };
+        }, [attempt]);
+        React.useEffect(() => {
+          if (!toast?.message) return undefined;
+          const timer = setTimeout(() => setToast(null), toast.undoAction ? 6000 : 3500);
+          if (typeof timer?.unref === 'function') timer.unref();
+          return () => clearTimeout(timer);
+        }, [toast?.key]);
+        React.useEffect(() => {
+          if (!nativeCapable || typeof document === 'undefined' || typeof document.getElementById !== 'function') return undefined;
+          const cleanups = [];
+          for (const [id, openFlag, setOpenFlag] of [
+            ['hearth-onboard-dialog', onboardOpen, setOnboardOpen],
+            ['hearth-safety-dialog', safetyOpen, setSafetyOpen],
+          ]) {
+            const dlg = document.getElementById(id);
+            if (!dlg) continue;
+            try {
+              if (openFlag && !dlg.open && typeof dlg.showModal === 'function') dlg.showModal();
+              else if (!openFlag && dlg.open && typeof dlg.close === 'function') dlg.close();
+            } catch { /* host environment without modal top-layer */ }
+            const onClose = () => setOpenFlag(false);
+            dlg.addEventListener?.('close', onClose);
+            cleanups.push(() => dlg.removeEventListener?.('close', onClose));
+            if (typeof HTMLDialogElement === 'undefined' || !('closedBy' in HTMLDialogElement.prototype)) {
+              const onBackdrop = event => {
+                if (event.target !== dlg || typeof dlg.getBoundingClientRect !== 'function') return;
+                const r = dlg.getBoundingClientRect();
+                const inside = r.top <= event.clientY && event.clientY <= r.bottom && r.left <= event.clientX && event.clientX <= r.right;
+                if (!inside && typeof dlg.close === 'function') dlg.close();
+              };
+              dlg.addEventListener?.('click', onBackdrop);
+              cleanups.push(() => dlg.removeEventListener?.('click', onBackdrop));
+            }
+          }
+          return () => { for (const fn of cleanups) fn(); };
+        }, [nativeCapable, onboardOpen, safetyOpen]);
+        const scanningSignature = (controlState?.people || [])
+          .filter(p => ['connecting', 'awaiting_scan', 'scanned'].includes(p?.binding?.status))
+          .map(p => `${p.id}:${p.binding.status}`).join(',');
+        React.useEffect(() => {
+          if (!nativeCapable) return undefined;
+          const scanIds = new Set((controlState?.people || [])
+            .filter(p => ['connecting', 'awaiting_scan', 'scanned'].includes(p?.binding?.status))
+            .map(p => p.id));
+          if (onboardOpen && onboardStep === 2 && onboardPersonId) scanIds.add(onboardPersonId);
+          if (!scanIds.size) return undefined;
+          let live = true;
+          const poll = async () => {
+            for (const id of scanIds) {
+              try {
+                const res = await globalThis.fetch(`/api/family/qr?personId=${encodeURIComponent(id)}`, { credentials: 'same-origin' });
+                if (live && res.ok) {
+                  const svg = await res.text();
+                  if (svg && svg.includes('<svg')) setQrSvgs(prev => prev[id] === svg ? prev : { ...prev, [id]: svg });
+                }
+              } catch { /* ignore transient qr fetch failures */ }
+            }
+            try {
+              const ctl = await globalThis.fetch('/api/family/control', { credentials: 'same-origin' });
+              if (live && ctl.ok) applyControlState(await ctl.json());
+            } catch { /* ignore transient poll failures */ }
+          };
+          void poll();
+          const timer = setInterval(poll, 2000);
+          if (typeof timer?.unref === 'function') timer.unref();
+          return () => { live = false; clearInterval(timer); };
+        }, [nativeCapable, onboardOpen, onboardStep, onboardPersonId, scanningSignature]);
+        React.useEffect(() => {
+          if (typeof document === 'undefined') return undefined;
+          const detectDark = () => {
+            try {
+              const docTheme = document.documentElement?.getAttribute?.('data-theme');
+              const bodyDark = document.body?.getAttribute?.('data-ds-dark-theme') === 'true';
+              if (docTheme === 'dark' || bodyDark || document.documentElement?.classList?.contains?.('dark')) return true;
+              if (docTheme === 'light') return false;
+              return Boolean(readHostTheme().dark);
+            } catch { return false; }
+          };
+          setDarkTheme(detectDark());
+          let observer;
+          if (typeof MutationObserver === 'function' && document.documentElement) {
+            observer = new MutationObserver(() => setDarkTheme(detectDark()));
+            observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class'] });
+            if (document.body) observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'data-theme', 'class'] });
+          }
+          return () => observer?.disconnect?.();
         }, [attempt]);
         const nativeOn = ['opening', 'ready'].includes(conversation?.status);
         const html = page ? applyHostTheme(page.source, page.theme, { nativeChat: nativeOn }) : '';
@@ -339,7 +459,54 @@ window.__ModuleLoader__.load({
               React.createElement('button', { type: 'button', onClick: () => { clearNativeHandoff(handoff); setHandoff(''); setHandoffNote('已丢弃这段旧草稿。'); }, style: { fontSize: '12px' } }, '不要了')) : null,
             handoffNote ? React.createElement('p', { style: { margin: '4px 0 0', opacity: 0.8 } }, handoffNote) : null)
           : null;
+        const showToast = (message, undoAction = null) => {
+          setToast({ key: Date.now() + '-' + Math.random().toString(16).slice(2, 6), message, undoAction });
+        };
+        const runControl = async (payload, successToast = '') => {
+          setBusyAction(true);
+          setActionError('');
+          try {
+            const response = await globalThis.fetch('/api/family/control', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'X-Family-Action': '1' },
+              body: JSON.stringify(payload),
+            });
+            const body = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(body?.error || '操作没能完成，请稍后再试');
+            if (body && typeof body === 'object') applyControlState(body);
+            if (successToast) showToast(successToast);
+            return body || true;
+          } catch (err) {
+            setActionError(err?.message || '操作没能完成，请稍后再试');
+            return null;
+          } finally {
+            setBusyAction(false);
+          }
+        };
+        const requestQr = async personId => {
+          if (!personId) return;
+          try {
+            const response = await globalThis.fetch(`/api/family/qr?personId=${encodeURIComponent(personId)}`, { credentials: 'same-origin' });
+            if (response.ok) {
+              const svg = await response.text();
+              if (svg && svg.includes('<svg')) setQrSvgs(prev => ({ ...prev, [personId]: svg }));
+            }
+          } catch { /* poll effect retries */ }
+        };
+        const copyQuote = quote => {
+          try {
+            if (navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(quote).then(() => showToast('已复制这句话，粘贴到微信发给她就行'), () => showToast('复制没成功，可手动选中'));
+            } else showToast('这台设备不让自动复制，请手动选中');
+          } catch { showToast('复制没成功，可手动选中'); }
+        };
+        const discardHandoff = () => {
+          clearNativeHandoff(handoff);
+          setHandoff('');
+          setHandoffNote('已丢弃这段旧草稿。');
+        };
         const startWith = prompt => {
+          setDockOpen(true);
           try {
             const status = putInComposer(prompt);
             setBandNote(status === 'applied' ? '已放进下方输入框，补全后按回车发送。'
@@ -348,6 +515,71 @@ window.__ModuleLoader__.load({
             setBandNote('输入框暂时不可用，直接在下方输入也可以。');
           }
         };
+        if (nativeCapable) {
+          return renderHearthWorkbench(React, {
+            cssText: HEARTH_CSS,
+            controlState,
+            health,
+            healthError,
+            requests,
+            relay,
+            conversation,
+            handoff,
+            handoffNote,
+            dockOpen,
+            setDockOpen,
+            whisperOpen,
+            setWhisperOpen,
+            nudgeDismissed,
+            setNudgeDismissed,
+            activeTab,
+            setActiveTab,
+            selectedPersonId,
+            setSelectedPersonId,
+            expandedInboxId,
+            setExpandedInboxId,
+            replyDrafts,
+            setReplyDrafts,
+            whisperInput,
+            setWhisperInput,
+            reminderFormOpen,
+            setReminderFormOpen,
+            reminderDraft,
+            setReminderDraft,
+            habitDraft,
+            setHabitDraft,
+            onboardOpen,
+            setOnboardOpen,
+            onboardStep,
+            setOnboardStep,
+            onboardForm,
+            setOnboardForm,
+            onboardPersonId,
+            setOnboardPersonId,
+            safetyOpen,
+            setSafetyOpen,
+            safetyCodeword,
+            setSafetyCodeword,
+            qrSvgs,
+            toast,
+            briefPreview,
+            darkTheme,
+            busyAction,
+            actionError,
+            bandNote,
+            relayNote,
+            SessionProvider: props.SessionProvider,
+            renderSlot: props.renderSlot,
+            placeHandoff,
+            discardHandoff,
+            startWith,
+            runControl,
+            copyQuote,
+            requestQr,
+            showToast,
+            retryConversation: () => setAttempt(value => value + 1),
+          });
+        }
         // Family chips and requests open the same records in the workbench.
         const openInWorkbench = action => {
           setView('workbench');
