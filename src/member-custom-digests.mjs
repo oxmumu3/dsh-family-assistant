@@ -125,6 +125,24 @@ function utf8Truncate(text, maxBytes) {
   return sliced + '\n\n（正文已按微信投递长度上限自动截断）';
 }
 
+function formatWechatPlainText(text) {
+  const lines = String(text ?? '').split('\n').map(line => {
+    let s = line;
+    if (/^#{1,3}\s+/u.test(s)) {
+      s = s.replace(/^#{1,3}\s+/u, '').trim();
+      if (s && !s.startsWith('【') && !s.startsWith('▍')) s = `▍${s}`;
+    } else if (/^-{3,}\s*$/u.test(s)) {
+      s = '──────────────';
+    } else if (s.startsWith('> ')) {
+      s = '📌 ' + s.slice(2);
+    } else if (s.startsWith('- ')) {
+      s = '• ' + s.slice(2);
+    }
+    return s.replace(/\*\*(.+?)\*\*/gu, '$1');
+  });
+  return utf8Truncate(lines.join('\n'), MAX_OUTPUT_BYTES);
+}
+
 function extractHeadlines(text, today) {
   const lines = String(text ?? '')
     .split('\n')
@@ -323,7 +341,9 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
         finalText = utf8Truncate(drafted, MAX_OUTPUT_BYTES);
       }
 
-      writeAtomicReport(reportDir, `${today}-wechat.txt`, finalText + '\n');
+      writeAtomicReport(reportDir, `${today}.md`, finalText + '\n');
+      const wechatReady = formatWechatPlainText(finalText);
+      writeAtomicReport(reportDir, `${today}-wechat.txt`, wechatReady + '\n');
       const headlines = extractHeadlines(finalText, today);
       mutateItem(personId, slug, row => {
         row.lastGeneratedDate = today;
@@ -333,7 +353,7 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
         row.recentHeadlines = [...(row.recentHeadlines ?? []), ...headlines].slice(-28);
         row.updatedAt = row.lastRunAt;
       });
-      return { skipped: false, relativePath, bytes: Buffer.byteLength(finalText + '\n', 'utf8'), text: finalText };
+      return { skipped: false, relativePath, bytes: Buffer.byteLength(wechatReady + '\n', 'utf8'), text: wechatReady };
     } catch (error) {
       const message = String(error?.message ?? '日报生成失败').slice(0, 240);
       try {

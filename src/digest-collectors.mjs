@@ -8,37 +8,37 @@ import { join } from 'node:path';
  */
 export function buildCrossBorderMaCollectorSource() {
   return `#!/usr/bin/env node
-// 跨境并购日报 · 多源公开实盘采集器（自动去重 + 近72小时时效过滤 + 原始媒体归属）
+// 跨境并购项目与并购贷商机 · 多源公开实盘采集器（中英双源 + 近5日时效过滤 + 媒体归属）
 const FEEDS = [
   {
-    bucket: '全球跨境与大型并购交易',
-    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("acquires" OR "to acquire" OR "acquisition of" OR "takeover" OR "buyout" OR "stake in") ("billion" OR "million") ("cross-border" OR "Japanese" OR "European" OR "British" OR "German" OR "Chinese" OR "Canadian" OR "Australian" OR "Singapore" OR "Middle East" OR "French" OR "Swiss" OR "Korean" OR "Indian" OR "global") when:3d') + '&hl=en-US&gl=US&ceid=US:en',
-    limit: 24,
-  },
-  {
-    bucket: '全球重要并购签约与交割动态',
-    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("announces acquisition" OR "agrees to acquire" OR "completes acquisition" OR "definitive agreement" OR "tender offer") ("billion" OR "million") when:2d') + '&hl=en-US&gl=US&ceid=US:en',
+    bucket: '中资出海与A股港股境外收购公告（中文一手线索）',
+    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('(收购境外 OR 海外并购 OR 跨境并购 OR 境外子公司 OR 收购股权 OR 要约收购 OR 私有化) (公告 OR 拟收购 OR 签署 OR 交割 OR 港元 OR 美元 OR 欧元) when:5d') + '&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
     limit: 20,
   },
   {
-    bucket: '反垄断与外国投资监管审批（CFIUS / 欧盟 / SAMR / CMA / FTC）',
-    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("CFIUS" OR "European Commission" OR "antitrust" OR "CMA" OR "FTC" OR "DOJ" OR "foreign investment" OR "regulatory approval") ("acquisition" OR "merger" OR "takeover" OR "deal") when:4d') + '&hl=en-US&gl=US&ceid=US:en',
-    limit: 16,
+    bucket: '港股要约收购与红筹跨境并购动态（中文源）',
+    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('(港股 OR 港交所 OR 香港) (要约收购 OR 私有化 OR 控股权收购 OR 收购资产 OR 并购贷款 OR 银团贷款) when:5d') + '&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
+    limit: 15,
   },
   {
-    bucket: '中资出海与涉华跨境并购（英文源）',
-    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("China" OR "Chinese" OR "Hong Kong") ("acquires" OR "to acquire" OR "buyout" OR "takeover" OR "merger" OR "stake in" OR "overseas") when:4d') + '&hl=en-US&gl=US&ceid=US:en',
-    limit: 16,
+    bucket: '涉华及亚太跨境并购交易（英文权威财经源）',
+    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("China" OR "Chinese" OR "Hong Kong" OR "Singapore" OR "Asian" OR "Middle East" OR "Japanese") ("acquires" OR "to acquire" OR "acquisition of" OR "takeover" OR "buyout" OR "stake in") ("billion" OR "million") when:4d') + '&hl=en-US&gl=US&ceid=US:en',
+    limit: 20,
   },
   {
-    bucket: '中国跨境并购与上市公司境外收购公告（中文源）',
-    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('(跨境并购 OR 境外收购 OR 出海并购 OR 收购境外 OR 海外并购 OR 外资收购 OR 港股要约收购) when:4d') + '&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
-    limit: 18,
+    bucket: '全球大型跨境并购与并购融资/过桥银团线索（英文源）',
+    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("acquires" OR "to acquire" OR "acquisition of" OR "takeover" OR "buyout") ("billion" OR "million") when:3d') + '&hl=en-US&gl=US&ceid=US:en',
+    limit: 20,
   },
   {
-    bucket: '中国反垄断经营者集中与并购融资动态（中文源）',
-    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('((市场监管总局 OR 经营者集中 OR 反垄断 OR 并购贷款 OR 银团贷款) (收购 OR 并购)) when:5d') + '&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
+    bucket: '跨境反垄断与外国投资审查（SAMR / 商务部 / CFIUS / 欧盟 / CMA）',
+    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('("CFIUS" OR "European Commission" OR "CMA" OR "foreign investment" OR "antitrust") ("acquisition" OR "merger" OR "takeover") when:4d') + '&hl=en-US&gl=US&ceid=US:en',
     limit: 12,
+  },
+  {
+    bucket: '中国市场监管总局经营者集中与跨境审批（中文源）',
+    url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('((市场监管总局 OR 经营者集中 OR 发改委备案 OR 商务部) (收购 OR 并购 OR 股权)) when:6d') + '&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
+    limit: 10,
   },
 ];
 
@@ -70,11 +70,9 @@ function normalizeKey(title) {
 }
 
 async function fetchFeed(feed) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
     const res = await fetch(feed.url, {
-      signal: ctrl.signal,
+      signal: AbortSignal.timeout(10000),
       headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
     });
     if (!res.ok) return { bucket: feed.bucket, error: 'HTTP ' + res.status, items: [] };
@@ -86,17 +84,16 @@ async function fetchFeed(feed) {
       const link = extractTag(raw, 'link');
       const pubDate = extractTag(raw, 'pubDate');
       const source = extractTag(raw, 'source') || (title.includes(' - ') ? title.split(' - ').at(-1) : '');
-      const desc = extractTag(raw, 'description').slice(0, 360);
+      const desc = extractTag(raw, 'description').slice(0, 320);
       if (!title || !link) continue;
       const pubMs = Date.parse(pubDate);
-      if (Number.isFinite(pubMs) && Date.now() - pubMs > 6 * 86400_000) continue;
+      if (Number.isFinite(pubMs) && Date.now() - pubMs > 7 * 86400_000) continue;
       items.push({
         bucket: feed.bucket,
         title: title.replace(/\\s+-\\s+[^-]+$/, '').trim(),
         source: source.trim(),
-        pubDate,
+        pubDate: pubDate.slice(0, 22),
         pubIso: Number.isFinite(pubMs) ? new Date(pubMs).toISOString() : null,
-        url: link,
         summary: desc,
       });
       if (items.length >= feed.limit) break;
@@ -104,8 +101,6 @@ async function fetchFeed(feed) {
     return { bucket: feed.bucket, items };
   } catch (err) {
     return { bucket: feed.bucket, error: String(err?.message || err), items: [] };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -120,14 +115,13 @@ for (const group of results) {
     deduped.push(item);
   }
 }
-deduped.sort((a, b) => (Date.parse(b.pubIso || '') || 0) - (Date.parse(a.pubIso || '') || 0));
 
 const payload = {
   collectedAt: new Date().toISOString(),
   today: process.env.TODAY || new Date().toISOString().slice(0, 10),
   totalCandidates: deduped.length,
   feedStats: results.map(r => ({ bucket: r.bucket, count: r.items.length, ...(r.error ? { error: r.error } : {}) })),
-  items: deduped.slice(0, 65),
+  items: deduped.slice(0, 58),
 };
 process.stdout.write(JSON.stringify(payload, null, 2));
 `;

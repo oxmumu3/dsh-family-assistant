@@ -61,7 +61,7 @@ import {installCollectorTemplate} from './digest-collectors.mjs';
 
 const displayAttachments=items=>Array.isArray(items)?items.slice(0,4).flatMap(item=>{if(typeof item?.name!=='string'||!item.name.trim())return[];const name=item.name.replace(/[\\/\x00-\x1f\x7f]/g,'_').slice(0,180),size=Number(item.size??item.len);return[{name,...(Number.isSafeInteger(size)&&size>=0&&size<=10*1024*1024?{size}:{}),...(typeof item.mimeType==='string'&&/^[-a-z0-9.+]+\/[-a-z0-9.+]+$/i.test(item.mimeType)?{mimeType:item.mimeType}:{})}];}):[];
 const sameRoute=(a,b)=>a&&b&&['personId','accountId','peerId','generation'].every(key=>a[key]===b[key]);
-const messageParts=text=>{const chunks=[];while(text.length){let end=Math.min(3000,text.length);if(end<text.length&&/[\uD800-\uDBFF]/.test(text[end-1]))end--;chunks.push(text.slice(0,end));text=text.slice(end);}return chunks.length?chunks:['（工具返回了空内容）'];};
+const messageParts=text=>{const chunks=[];while(text.length){let end=Math.min(3000,text.length);if(end<text.length){const para=text.lastIndexOf('\n\n',end),line=text.lastIndexOf('\n',end);if(para>=1400)end=para;else if(line>=1600)end=line;else if(/[\uD800-\uDBFF]/.test(text[end-1]))end--;}chunks.push(text.slice(0,end).replace(/^\n+/,''));text=text.slice(end).replace(/^\n+/,'');}return chunks.length?chunks:['（工具返回了空内容）'];};
 const personalIntent=text=>/记住|记下|便笺|记事|我的笔记|我记(?:的|下的)|忘掉|忘记刚才|(?:今天|明天|这周|本周|下周)(?:我)?(?:有|要|的).{0,12}(?:事|日程|安排)/.test(text);
 const ownerExactRelativeReminder=text=>parseOwnerRelativeReminder(text)!==null;
 const ownerPersonalIntent=text=>personalIntent(text)||/(?:提醒我(?!爸|妈|父亲|母亲)|我的.*提醒|我(?:有|设置|安排).{0,12}提醒|(?:查看|列出|取消).{0,12}我的)/.test(text);
@@ -1027,7 +1027,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       for(const[index,part]of parts.entries()){
         if(!authorize()||!toolbox.isCurrent({personId:args.personId,toolId:args.toolId,requestId:args.requestId,revision:result.revision}))return{...result,result:undefined,deliveryStatus:'suppressed'};
         const sourceKey='family-tool:'+Buffer.from(JSON.stringify([args.personId,args.toolId,args.requestId,result.revision,index])).toString('base64url');
-        const row=store.enqueue({personId:args.personId,text:`${parts.length>1?`工具结果（${index+1}/${parts.length}）\n`:''}${part}`,kind:'tool_result',sourceKey,...(authorityRoute?{authorizationRoute:authorityRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+        const partPrefix=parts.length>1?(args.toolId==='ai_digest'?`（${index+1}/${parts.length}）\n`:`工具结果（${index+1}/${parts.length}）\n`):'';
+        const row=store.enqueue({personId:args.personId,text:`${partPrefix}${part}`,kind:'tool_result',sourceKey,...(authorityRoute?{authorizationRoute:authorityRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
         await flush(args.personId,{onlyId:row.id});deliveryStatus=store.snapshot().outbox.find(item=>item.id===row.id)?.status;
         if(deliveryStatus!=='api_accepted')break;
       }
