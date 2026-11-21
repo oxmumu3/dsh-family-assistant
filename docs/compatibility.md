@@ -1,6 +1,6 @@
 # 宿主兼容与版本维护
 
-0.2.0-preview.35 保留精确验证的 Harness 0.2.1-rc.2、rc.3、rc.4、rc.5，并新增 0.2.2-rc.1；0.2.0-preview.51 纳入 0.2.2-rc.2 与 rc.3。Host `engines.dsh` 与 `@deepseek-ai/dsh` peer 必须使用同一组精确版本，不使用兼容豁免。SDK `devDependencies` 是本地单版本快照，只需要各钉一个矩阵内版本，不应被要求等于整张矩阵。个人账号、微信手机实收和家庭权限不属于 SDK 兼容证明。
+0.2.0-preview.35 保留精确验证的 Harness 0.2.1-rc.2、rc.3、rc.4、rc.5，并新增 0.2.2-rc.1；0.2.0-preview.51 纳入 0.2.2-rc.2 与 rc.3；0.2.1 纳入 0.2.2-rc.4 与 rc.5。Host `engines.dsh` 与 `@deepseek-ai/dsh` peer 必须使用同一组精确版本，不使用兼容豁免。SDK `devDependencies` 是本地单版本快照，只需要各钉一个矩阵内版本，不应被要求等于整张矩阵。个人账号、微信手机实收和家庭权限不属于 SDK 兼容证明。
 
 `node scripts/compatibility.mjs --latest` 分别读取官方 npm latest 与官方 mac-arm64 Desktop 发行 feed；两者均须在已验清单中。随后取得 Desktop 对应的准确 SDK 元数据：npm 已发布时读取该精确版本，npm 返回 404 时回退到同一官方版本 tag 的 `apps/cli/package.json`，仍校验包名、版本和 Node 要求。不能因 npm latest 落后就忽略 Desktop。无法读取、重复版本、未知版本及实验 alpha 均阻断发布，不自动改清单。三个受支持的 0.2.2 RC 官方 SDK 要求 Node >=24.9.0；CI 与打包使用固定 Node 24.22.1，保留旧宿主的插件运行支持。
 
