@@ -650,4 +650,22 @@ test('pro_sandbox permanent seat, anti-clobber bind_qr, QR expiry auth fallback,
   });
   assert.equal(updated.scheduleDays, 'workdays');
   assert.match(updated.editorialPrompt, /5000万美元以下不进速览/);
+
+  // 5. CCB banker talking about "并购贷款 / 授信额度 / 跨境汇款交割" NEVER triggers elder scam safety_card!
+  let bankerPromptSeen = '';
+  host.setOnPrompt(async ctx => {
+    runtime.memberElevatedHost.attachAgent(ctx.agent);
+    bankerPromptSeen = ctx.text;
+    ctx.pushEvent('assistant/message', { turn: ctx.turn, message: { content: [{ type: 'text', text: '已按跨境并购贷款口径收录。' }] } });
+    ctx.pushEvent('turn/end', { turn: ctx.turn, reason: { kind: 'completed' } });
+  });
+  await runtime.receive('wkb', {
+    id: 'msg-ccb-loan-1',
+    peerId: 'wkb@im.wechat',
+    text: '我是银行国际业务从业者，主要看有没有发放跨境并购贷款、授信额度和跨境转账交割的机会',
+    at: new Date(currentTimeMs + 1000).toISOString(),
+  });
+  await waitFor(() => sentTexts.some(m => m.peerId === 'wkb@im.wechat' && m.text.includes('已按跨境并购贷款口径收录')));
+  assert.equal(sentTexts.some(m => m.text.includes('先别转账') || m.text.includes('110')), false);
+  assert.match(bankerPromptSeen, /跨境并购贷款/);
 });

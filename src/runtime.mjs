@@ -1681,19 +1681,13 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   /** 拥有 Owner 临时开启高权限的成员来信：跳过老正则拦截，直连受沙箱约束的原生自主会话。 */
   async function elevatedDirect(person,route,message,text){
     const requestId=sourceRequest(route,message);
-    const importantAdmission=attention.admit(person,message,text);
+    const isElderPersona=(hearth.member(person.id)?.persona??'elder_care')==='elder_care';
+    const importantAdmission=isElderPersona?attention.admit(person,message,text):null;
     const accepted=store.recordInbound(person.id,{id:message.id,peerId:route.peerId,text:text.slice(0,6000),...(message.attachments?.length?{attachments:displayAttachments(message.attachments)}:{}),...(message.at?{at:message.at}:{})});
     if(!accepted.accepted)return accepted;
     if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
     if(importantAdmission?.id)void attention.run(importantAdmission.id);
     await deliverDeferredNotice(person.id,route,message);
-    const safety=safetyCard(text);
-    if(safety){
-      if(!current(route))return{accepted:true,archived:true};
-      store.enqueue({personId:person.id,text:safety.reply,kind:'safety_card',sourceKey:'safety:'+requestId});
-      await flush(person.id);
-      return{accepted:true,safety:safety.category};
-    }
     if(message.unsupported){
       if(current(route)){
         store.enqueue({personId:person.id,text:'这条消息格式我暂时打不开，请发文字或常见文档（TXT、Markdown、DOCX、PDF、CSV）。',kind:'reply',sourceKey:'elevated-unsupported:'+requestId});
@@ -1988,7 +1982,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
       if(importantAdmission?.id)void attention.run(importantAdmission.id);
       if(accepted.accepted)await deliverDeferredNotice(personId,route,message);
-      if(accepted.accepted&&person.role==='elder'){
+      if(accepted.accepted&&person.role==='elder'&&(hearth.member(personId)?.persona??'elder_care')==='elder_care'){
         const safety=safetyCard(text);
         if(safety){
           if(!current(route))return{accepted:true,archived:true};
