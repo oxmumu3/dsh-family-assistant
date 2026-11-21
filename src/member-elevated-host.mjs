@@ -3,7 +3,11 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
 import { installCollectorTemplate } from './digest-collectors.mjs';
-import { readWorkspaceAgentsMd, summarizeWorkspaceSkills } from './member-skill-packs.mjs';
+import {
+  autoSyncWorkspaceSharedSkills,
+  readWorkspaceAgentsMd,
+  summarizeWorkspaceSkills,
+} from './member-skill-packs.mjs';
 
 const DEFAULT_TIMEOUT_MS = 480_000;
 const WAITING_NOTICE_MS = 45_000;
@@ -250,7 +254,7 @@ function inspectWorkspaceRelativeFile(workspacePath, relativePath, { maxBytes = 
   return { relativePath: clean, absolutePath: realFile, name, isImage, bytes: readFileSync(realFile) };
 }
 
-function buildElevatedPrompt({ person, grant, text, attachments = [] }) {
+function buildElevatedPrompt({ person, grant, persona = 'pro_peer', sharedSkillsDir = null, text, attachments = [] }) {
   const tz = person.timeZone || 'Asia/Shanghai';
   const localNow = new Date().toLocaleString('zh-CN', { timeZone: tz, hour12: false });
   const attachedNote = attachments.length
@@ -260,12 +264,15 @@ function buildElevatedPrompt({ person, grant, text, attachments = [] }) {
     ? '常驻独立沙箱专业席位（长期有效）'
     : `独立沙箱自助高权限（有效期至 ${grant.expiresAt}）`;
   const agentsMd = grant.workspacePath ? readWorkspaceAgentsMd(grant.workspacePath).trim() : '';
-  const installedSkills = grant.workspacePath ? summarizeWorkspaceSkills(grant.workspacePath) : [];
+  const installedSkills = grant.workspacePath ? summarizeWorkspaceSkills(grant.workspacePath, { sharedSkillsDir }) : [];
   const blocks = [
     `【乐乐 · 专属独立沙箱 Agent 席位】你正在微信上直接服务「${person.label}」（${tz}，当前当地时间 ${localNow}，当前模式：${modeDesc}）。`,
     `你的能力边界与武器库：你可以直接读写专属工作区「${grant.workspacePath}」、联网深度检索与抓取中英文公开权威资讯/公告、在 scripts/ 中编写或安装多源采集脚本、用 member_digest_service（支持内置模板 template="crossborder_ma" 跨境并购多源采集或 "topic_radar" 行业雷达、save_schedule 建定时、update_preferences 随时追加修改偏好口径、run_now 立即试跑推送）搭建和持续调教每日自动简报、用 member_send_workspace_file 直接把生成的 Word/Excel/CSV/PDF/HTML/Markdown 报告或 PNG/JPG 图表图片发到他微信、用 member_reminder_service 为他安排或管理微信提醒。`,
     `重要大管家原则：\n1. 只给结果、绝不甩锅或讲内部黑话：微信那头的「${person.label}」不需要知道任何终端、脚本、工具名、sessionId 或权限分层；绝不要让他自己去电脑执行操作，也不要回复空洞的框架敷衍——他要日报或调研，你就当场拉取真实可核实信源把干货做出来并配好定时。\n2. 真实溯源与持续调教：所有交易、数据、监管动态必须标注真实来源媒体，拿不到的如实写“未获取到可核实公开披露”，严禁编造；当对方回复修改意见（如调整金额门槛、重点区域、工作日/每日推送时间）时，立即调用 member_digest_service(op="update_preferences") 落盘生效。\n3. 微信阅读友好与去重：分段清晰、重点突出、不用冗余代码块；若已通过 member_digest_service(deliverNow=true) 或 member_send_workspace_file 将完整正文/文档发至微信，本轮回复只需简洁说明亮点与可微调项，不要把几千字全文重复粘第二遍（不要调用阻塞式弹窗提问工具，如需确认 1-2 个偏好直接在微信文字末尾轻问一句）。\n4. 严禁访问或提及工作区之外的宿主或主人私人目录、密钥与配置。`,
   ];
+  if (persona === 'elder_care') {
+    blocks.push('【长辈服务沟通风格提示】面对长辈回复请用温暖、耐心、大白话、分步讲清重点的口吻（避免生硬英文缩写与技术术语）；但底层查资料、算数据、做简报、画图、做文档等全部满血工具与技能包请照常全力使用，绝不降档敷衍。');
+  }
   if (agentsMd) {
     blocks.push(`【专属背景与工作口径（AGENTS.md）】\n${agentsMd.slice(0, 3500)}`);
   }
@@ -374,6 +381,8 @@ export function createMemberElevatedHost({
   getWorkspaceController,
   getSessionController,
   getAgents,
+  sharedSkillsDir = null,
+  getPersona = null,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   waitingNoticeMs = WAITING_NOTICE_MS,
   pollMs = POLL_MS,
@@ -772,6 +781,7 @@ export function createMemberElevatedHost({
 
     const workspace = await ensureWorkspace(grant, { signal });
     await ensureSession(grant, workspace, { signal });
+    try { autoSyncWorkspaceSharedSkills({ workspacePath: grant.workspacePath, sharedSkillsDir }); } catch {}
 
     let beforeMaxTurn = 0;
     try {
@@ -785,7 +795,8 @@ export function createMemberElevatedHost({
     const sc = typeof getSessionController === 'function' ? getSessionController() : null;
     if (!sc?.prompt) throw new Error('宿主 sessionController.prompt 不可用。');
     const rpcId = randomUUID();
-    const promptText = buildElevatedPrompt({ person, grant, text, attachments });
+    const persona = typeof getPersona === 'function' ? (getPersona(person.id) || 'elder_care') : 'pro_peer';
+    const promptText = buildElevatedPrompt({ person, grant, persona, sharedSkillsDir, text, attachments });
 
     const receipt = await sc.prompt({
       sessionId: grant.sessionId,

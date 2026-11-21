@@ -58,7 +58,16 @@ import {createMemberElevatedAccess} from './member-elevated-access.mjs';
 import {createMemberCustomDigests} from './member-custom-digests.mjs';
 import {createMemberElevatedHost} from './member-elevated-host.mjs';
 import {installCollectorTemplate} from './digest-collectors.mjs';
-import {listSkillPackCatalog,syncWorkspaceSkillPacks,readWorkspaceSkillPacks,writeWorkspaceAgentsMd,readWorkspaceAgentsMd} from './member-skill-packs.mjs';
+import {
+  autoSyncWorkspaceSharedSkills,
+  ensureSharedSkillsDir,
+  listSkillPackCatalog,
+  readWorkspaceAgentsMd,
+  readWorkspaceSkillPacks,
+  syncAllSharedSkills,
+  syncWorkspaceSkillPacks,
+  writeWorkspaceAgentsMd,
+} from './member-skill-packs.mjs';
 
 const displayAttachments=items=>Array.isArray(items)?items.slice(0,4).flatMap(item=>{if(typeof item?.name!=='string'||!item.name.trim())return[];const name=item.name.replace(/[\\/\x00-\x1f\x7f]/g,'_').slice(0,180),size=Number(item.size??item.len);return[{name,...(Number.isSafeInteger(size)&&size>=0&&size<=10*1024*1024?{size}:{}),...(typeof item.mimeType==='string'&&/^[-a-z0-9.+]+\/[-a-z0-9.+]+$/i.test(item.mimeType)?{mimeType:item.mimeType}:{})}];}):[];
 const sameRoute=(a,b)=>a&&b&&['personId','accountId','peerId','generation'].every(key=>a[key]===b[key]);
@@ -110,8 +119,9 @@ const inputKeys={
   member_elevated_list:['personId'],
   member_elevated_grant:['personId','permanent','durationHours','note','skillPacks','agentsMd'],
   member_elevated_revoke:['personId'],
-  member_skill_packs_set:['personId','packIds'],
+  member_skill_packs_set:['personId','packIds','mode'],
   member_workspace_agents_set:['personId','content'],
+  member_shared_skills_sync:['personId'],
   member_custom_digest_list:['personId'],
   member_custom_digest_save:['personId','slug','title','scheduleTime','scheduleDays','timeZone','template','keywords','collectorScript','editorialPrompt','model','deliverNow'],
   member_custom_digest_run:['personId','slug','deliverNow'],
@@ -176,7 +186,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     if(/token|bearer|credential|https?:\/\//i.test(text))return'连接或模型暂时不可用，请检查工作台状态。';
     return text.slice(0,160)+(error?.sendOutcome==='failed'&&Number.isSafeInteger(error?.code)?`（接口代码 ${error.code}）`:'');
   };
-  let onboarding,deferredNotices,hearth,memberElevated,customDigests,memberElevatedHost;
+  let onboarding,deferredNotices,hearth,memberElevated,customDigests,memberElevatedHost,sharedSkillsDir=null;
   const channels=channelFactory({directory:join(directory,'channels'),api,now,...(transcribeVoice?{transcribeVoice}:{}),
     lookupInboundVoice:(personId,messageId)=>{const binding=store.binding(personId),row=store.messages(personId).find(value=>value.dir==='in'&&value.id===messageId&&recordMatchesBinding(value,binding));return row?{text:row.text,at:row.at,...(row.text==='[未能识别的语音]'?{voiceError:'failed'}:{})}:null;},
     onBound:(id,identity,options={})=>{const previous=store.binding(id),newBinding=!previous,changed=Boolean(previous&&(previous.accountId!==identity.accountId||previous.peerId!==identity.peerId)),wasSuspended=suspended(id);if(wasSuspended&&!reconnectArmed(id,options?.resumeToken))throw new Error('这位成员的微信已手动断开，只有本人当前这次恢复连接或重新扫码成功后才会接回。');const binding=store.bindPerson(id,identity);if(wasSuspended)suspensions.clear(id);reconnectAttempt.delete(id);try{memberElevated?.bindPending?.(id,binding.generation);}catch{}onboarding?.markBound(id,identity,{newBinding});if(runtimeReady&&(newBinding||changed)&&store.person(id)?.role==='elder'){const owner=store.snapshot().people.find(p=>p.role==='owner');if(owner&&!suspended(owner.id)){try{store.route(owner.id);const label=store.person(id).label;store.enqueue({personId:owner.id,kind:'harness_notice',sourceKey:`member-bound:${id}:${binding.generation}:${Date.now()}`,text:`✅ 「${label}」已完成微信扫码绑定，状态已变为已连接，现在可以直接给他发消息或配置日报/报表了。`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});void flush(owner.id).catch(err=>{lastError=safeError(err);});}catch{}}}return binding;},
@@ -221,6 +231,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     for(const row of store.snapshot().outbox.filter(row=>row.status==='pending'&&(['harness_result','harness_notice'].includes(row.kind)||row.sourceKey.includes(':native-owner-')||/^(?:workbench:|request-reply:|family-dot:)/.test(row.sourceKey))))store.transition(row.id,'cancelled','上次投递未结束，没有自动续发。');
     deferredNotices=createDeferredMemberNotices({directory,store,flush,now});
     hearth=createHearthPreferences({directory:realpathSync(directory),now});
+    sharedSkillsDir=ensureSharedSkillsDir(join(realpathSync(directory),'shared-skills'));
     memberElevated=createMemberElevatedAccess({directory:realpathSync(directory),now});
     customDigests=createMemberCustomDigests({directory:realpathSync(directory),synthesize:llmSynthesize,now});
     onboarding=createMemberOnboarding({
@@ -300,6 +311,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       getWorkspaceController:elevatedControllers.getWorkspaceController,
       getSessionController:elevatedControllers.getSessionController,
       getAgents:elevatedControllers.getAgents,
+      sharedSkillsDir,
+      getPersona:personId=>hearth.member(personId)?.persona??'elder_care',
       nowMs:()=>Date.parse(now()),
       now,
     }):null);
@@ -528,7 +541,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const elderPeople=state.people.filter(p=>p.role==='elder');
     const outboxStatusLabel=s=>s==='api_accepted'?'已提交微信接口':s==='failed'||s==='expired'?'未完成':s==='uncertain'||s==='blocked'?'结果待核对':'待发出';
     result.hearth={
-      skillPackCatalog:listSkillPackCatalog(),
+      sharedSkillsDir,
+      skillPackCatalog:listSkillPackCatalog({sharedSkillsDir}),
       guard:{
         ...rawGuard,
         pushRules:{
@@ -558,7 +572,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           assignments,
           access:accessEntry,
           elevated,
-          skillPacks:elevated?.workspacePath?readWorkspaceSkillPacks(elevated.workspacePath):{installed:[],custom:[],updatedAt:null},
+          skillPacks:elevated?.workspacePath?readWorkspaceSkillPacks(elevated.workspacePath,{sharedSkillsDir}):{mode:'all',installed:[],custom:[],updatedAt:null},
           hasAgentsMd:Boolean(elevated?.workspacePath&&readWorkspaceAgentsMd(elevated.workspacePath)),
           customDigests:customDigests.list({personId:p.id}),
           presentationEnabled:presentations.snapshot().people.find(x=>x.personId===p.id)?.enabled??false,
@@ -1709,6 +1723,15 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       }
       return{accepted:true,unsupported:true};
     }
+    if(isElderPersona){
+      const safety=safetyCard(text);
+      if(safety){
+        if(!current(route))return{accepted:true,archived:true};
+        store.enqueue({personId:person.id,text:safety.reply,kind:'safety_card',sourceKey:'safety:'+requestId});
+        await flush(person.id);
+        return{accepted:true,safety:safety.category};
+      }
+    }
     const trimmed=text.trim();
     if(/^(?:请|帮我|麻烦)?(?:停止|取消|停下|停一下|别做了)[。！!\s]*$/u.test(trimmed)){
       const res=await memberElevatedHost.cancel(person.id);
@@ -2086,6 +2109,15 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     alive();if(lifecycle.signal.aborted)lifecycle=new AbortController();
     try{
       await Promise.all(store.snapshot().people.filter(p=>{const binding=store.binding(p.id);return binding&&!suspended(p.id);}).map(async p=>{try{await channels.connect(p.id);}catch(error){lastError=safeError(error);}}));
+      try{
+        for(const p of store.snapshot().people.filter(x=>x.role==='elder')){
+          const b=store.binding(p.id);
+          const g=memberElevated.get(p.id,{at:now(),bindingGeneration:b?.generation??null});
+          if(g?.active&&g.workspacePath){
+            try{autoSyncWorkspaceSharedSkills({workspacePath:g.workspacePath,sharedSkillsDir});}catch{}
+          }
+        }
+      }catch{}
       await resumeMemberAdmissions();
       void attention.resume();
       // Recover existing native intents only after channel initialization. Never
@@ -2196,7 +2228,18 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       case'attention_respond':return respondImportant({incidentId:args.incidentId,status:args.status,text:args.text});
       case'owner_reminder':return ownerReminder(args);
       case'service_request':return serviceRequest({text:args.text,requestId:args.requestId});
-      case'add_person':{const added=store.addPerson(args);return status({personId:added.id});}
+      case'add_person':{
+        const added=store.addPerson(args);
+        if(added.role==='elder'&&memberElevatedHost){
+          try{
+            const b=store.binding(added.id);
+            const g=memberElevated.grant({personId:added.id,bindingGeneration:b?.generation??null,permanent:true,note:'默认独立沙箱满血 Agent',at:now()});
+            autoSyncWorkspaceSharedSkills({workspacePath:g.workspacePath,sharedSkillsDir});
+            await memberElevatedHost.ensureWorkspace(g,{signal:managementLifecycle.signal});
+          }catch(error){lastError=safeError(error);}
+        }
+        return status({personId:added.id});
+      }
       case'update_person':{const{personId,...patch}=args;store.updatePerson(personId,patch);break;}
       case'configure':{const{paused,...patch}=args;store.configure(patch);if(paused===true)await pause();else if(paused===false)await start();break;}
       case'login':{const token=beginReconnect(args.personId,300000);try{await channels.login(args.personId,{resumeToken:token});}catch(error){endReconnect(args.personId,token);throw error;}break;}
@@ -2298,7 +2341,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         }catch(error){lastError=safeError(error);}
         let skillPacks=null;
         if(grant?.workspacePath){
-          if(Array.isArray(args.skillPacks))skillPacks=syncWorkspaceSkillPacks({workspacePath:grant.workspacePath,packIds:args.skillPacks});
+          if(Array.isArray(args.skillPacks))skillPacks=syncWorkspaceSkillPacks({workspacePath:grant.workspacePath,packIds:args.skillPacks,sharedSkillsDir});
+          else if(args.skillPacks!=='skip')skillPacks=syncAllSharedSkills({workspacePath:grant.workspacePath,sharedSkillsDir});
           if(typeof args.agentsMd==='string')writeWorkspaceAgentsMd({workspacePath:grant.workspacePath,content:args.agentsMd});
         }
         return{status:'completed',grant,...(skillPacks?{skillPacks}:{})};
@@ -2320,8 +2364,27 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         const binding=store.binding(args.personId);
         const grant=memberElevated.get(args.personId,{at:now(),bindingGeneration:binding?.generation??null});
         if(!grant?.workspacePath)throw new Error('该成员尚未开通独立沙箱工作区，请先开启独立沙箱满血 Agent。');
-        const skillPacks=syncWorkspaceSkillPacks({workspacePath:grant.workspacePath,packIds:Array.isArray(args.packIds)?args.packIds:[]});
+        const skillPacks=syncWorkspaceSkillPacks({
+          workspacePath:grant.workspacePath,
+          packIds:args.packIds,
+          ...(args.mode?{mode:args.mode}:{}),
+          sharedSkillsDir,
+        });
         return{...status({personId:args.personId}),skillPacks};
+      }
+      case'member_shared_skills_sync':{
+        ownerId();
+        const targets=args.personId?[store.person(args.personId)].filter(Boolean):store.snapshot().people.filter(p=>p.role==='elder');
+        const synced=[];
+        for(const p of targets){
+          if(p.role!=='elder')continue;
+          const g=memberElevated.get(p.id,{at:now(),bindingGeneration:store.binding(p.id)?.generation??null});
+          if(g?.workspacePath){
+            const info=autoSyncWorkspaceSharedSkills({workspacePath:g.workspacePath,sharedSkillsDir});
+            synced.push({personId:p.id,label:p.label,mode:info.mode,count:info.installed.length});
+          }
+        }
+        return{...status(args.personId?{personId:args.personId}:{}),synced};
       }
       case'member_workspace_agents_set':{
         ownerId();

@@ -238,37 +238,154 @@ description: Use when drafting deep research memos, industry analysis articles, 
 
 export const SKILL_PACK_IDS = Object.freeze(SKILL_PACKS.map(p => p.id));
 
-export function listSkillPackCatalog() {
-  return SKILL_PACKS.map(({ id, title, summary }) => ({ id, title, summary }));
+const SHARED_README = `# 亲友共享技能库（shared-skills）
+
+将已经去除私人路径与密钥的通用能力文件夹放到本目录下（结构为 \`<技能名>/SKILL.md\`），例如：
+
+\`\`\`
+shared-skills/
+  my-workflow/
+    SKILL.md
+\`\`\`
+
+- 放进本目录的每个合法技能（目录名仅含小写字母/数字/连字符/下划线），会自动热同步给所有开启独立沙箱、且处于「全套自动同步」模式的亲友席位（包括新开席位）。
+- 同名目录可覆盖内置能力包模板，方便主人随时升级方法论。
+- 安全提醒：切勿把含本机私人路径、账号令牌或个人隐私项目名的内容放入本目录。
+`;
+
+function validSkillId(name) {
+  return typeof name === 'string' && /^[a-z0-9][a-z0-9_-]{1,60}$/i.test(name);
 }
 
-function readManagedList(skillsDirReal) {
+/**
+ * 初始化主人数据目录下的 `shared-skills/` 热加载共享技能库目录与说明文档。
+ */
+export function ensureSharedSkillsDir(sharedSkillsDir) {
+  if (typeof sharedSkillsDir !== 'string' || !sharedSkillsDir.trim()) return null;
+  const abs = resolve(sharedSkillsDir);
+  if (existsSync(abs)) {
+    const st = lstatSync(abs);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      fail('shared-skills 目录不能是符号链接。', 'member_skill_packs_unsafe_path');
+    }
+  } else {
+    mkdirSync(abs, { recursive: true, mode: 0o700 });
+  }
+  const realDir = realpathSync(abs);
+  const readmePath = join(realDir, 'README.md');
+  if (!existsSync(readmePath)) {
+    writeAtomicPrivateFile(realDir, 'README.md', SHARED_README);
+  }
+  return realDir;
+}
+
+function parseSharedSkillMeta(id, body) {
+  const fm = body.match(/^---\n([\s\S]*?)\n---/);
+  const field = k => fm?.[1]?.match(new RegExp(`^${k}:\\s*(.+)$`, 'm'))?.[1]?.trim().replace(/^["']|["']$/g, '');
+  const heading = body.replace(/^---\n[\s\S]*?\n---\n*/, '').match(/^#\s+(.+)$/m)?.[1]?.trim();
+  const title = field('title') || heading || id;
+  const summary = field('summary') || field('description') || heading || id;
+  return { id, title: title.slice(0, 80), summary: summary.slice(0, 220) };
+}
+
+/**
+ * 合并内置 5 套方法论能力包与 `<sharedSkillsDir>` 中主人投放的通用共享技能。
+ */
+export function resolveSharedSkillCatalog({ sharedSkillsDir } = {}) {
+  const byId = new Map(
+    SKILL_PACKS.map(p => [p.id, { ...p, source: 'builtin' }]),
+  );
+
+  if (typeof sharedSkillsDir === 'string' && sharedSkillsDir.trim() && existsSync(sharedSkillsDir)) {
+    let realShared;
+    try {
+      const st = lstatSync(sharedSkillsDir);
+      if (!st.isSymbolicLink() && st.isDirectory()) realShared = realpathSync(sharedSkillsDir);
+    } catch {}
+
+    if (realShared) {
+      for (const entry of readdirSync(realShared, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.name.startsWith('.') || !validSkillId(entry.name)) continue;
+        const sub = join(realShared, entry.name);
+        let subStat;
+        try { subStat = lstatSync(sub); } catch { continue; }
+        if (subStat.isSymbolicLink() || !subStat.isDirectory()) continue;
+        const skillPath = join(sub, 'SKILL.md');
+        if (!existsSync(skillPath)) continue;
+        let skillMd = '';
+        try {
+          skillMd = readSafePrivateFile(skillPath, 64 * 1024) ?? '';
+        } catch {
+          continue;
+        }
+        if (!skillMd.trim()) continue;
+        const meta = parseSharedSkillMeta(entry.name, skillMd);
+        byId.set(entry.name, {
+          id: entry.name,
+          title: meta.title,
+          summary: meta.summary,
+          skillMd,
+          source: 'shared',
+        });
+      }
+    }
+  }
+
+  return [...byId.values()];
+}
+
+export function listSkillPackCatalog({ sharedSkillsDir } = {}) {
+  return resolveSharedSkillCatalog({ sharedSkillsDir }).map(({ id, title, summary, source }) => ({
+    id,
+    title,
+    summary,
+    source,
+  }));
+}
+
+function readPackManifest(skillsDirReal) {
   const manifestPath = join(skillsDirReal, MANIFEST_NAME);
-  if (!existsSync(manifestPath)) return [];
+  if (!existsSync(manifestPath)) return { mode: 'all', installed: [], updatedAt: null };
   try {
     const parsed = JSON.parse(readSafePrivateFile(manifestPath) || '{}');
-    if (Array.isArray(parsed.installed)) {
-      return parsed.installed.filter(id => SKILL_PACK_IDS.includes(id));
-    }
-  } catch {}
-  return [];
+    const mode = parsed.mode === 'custom' ? 'custom' : 'all';
+    const installed = Array.isArray(parsed.installed)
+      ? parsed.installed.filter(id => validSkillId(id))
+      : [];
+    const updatedAt = typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null;
+    return { mode, installed, updatedAt };
+  } catch {
+    return { mode: 'all', installed: [], updatedAt: null };
+  }
 }
 
 /**
  * 同步某成员独立沙箱 `skills/` 目录内托管的能力包，不触碰任何成员自建技能目录。
+ * 支持 `mode: 'all'`（同步全部内置+共享目录技能）或 `mode: 'custom'` + 指定 `packIds`。
  */
-export function syncWorkspaceSkillPacks({ workspacePath, packIds = [] } = {}) {
+export function syncWorkspaceSkillPacks({ workspacePath, packIds, mode, sharedSkillsDir } = {}) {
   const wsReal = assertSafeRealDir(workspacePath);
-  if (!Array.isArray(packIds)) fail('packIds 必须为数组。');
-  const requested = [];
-  for (const rawId of packIds) {
-    const id = String(rawId ?? '').trim();
-    if (!SKILL_PACK_IDS.includes(id)) fail(`不支持的能力包标识：${id}`);
-    if (!requested.includes(id)) requested.push(id);
+  const catalog = resolveSharedSkillCatalog({ sharedSkillsDir });
+  const byId = new Map(catalog.map(item => [item.id, item]));
+
+  const wantsAll = mode === 'all' || packIds === 'all' || packIds === null || (packIds === undefined && mode !== 'custom');
+  const resolvedMode = wantsAll ? 'all' : 'custom';
+
+  let requested;
+  if (wantsAll) {
+    requested = catalog.map(p => p.id);
+  } else {
+    if (!Array.isArray(packIds)) fail('packIds 必须为数组。');
+    requested = [];
+    for (const rawId of packIds) {
+      const id = String(rawId ?? '').trim();
+      if (!byId.has(id)) fail(`不支持的能力包标识：${id}`);
+      if (!requested.includes(id)) requested.push(id);
+    }
   }
 
   const skillsDirReal = ensureSafeSubdir(wsReal, 'skills');
-  const previouslyManaged = readManagedList(skillsDirReal);
+  const previouslyManaged = readPackManifest(skillsDirReal).installed;
 
   // Clean up only packs previously managed by us that are no longer selected
   for (const oldId of previouslyManaged) {
@@ -284,7 +401,7 @@ export function syncWorkspaceSkillPacks({ workspacePath, packIds = [] } = {}) {
   }
 
   for (const packId of requested) {
-    const pack = SKILL_PACKS.find(p => p.id === packId);
+    const pack = byId.get(packId);
     const packDirReal = ensureSafeSubdir(skillsDirReal, pack.id);
     writeAtomicPrivateFile(packDirReal, 'SKILL.md', pack.skillMd);
   }
@@ -293,41 +410,62 @@ export function syncWorkspaceSkillPacks({ workspacePath, packIds = [] } = {}) {
   writeAtomicPrivateFile(
     skillsDirReal,
     MANIFEST_NAME,
-    JSON.stringify({ version: 1, installed: requested, updatedAt }, null, 2) + '\n',
+    JSON.stringify({ version: 1, mode: resolvedMode, installed: requested, updatedAt }, null, 2) + '\n',
   );
 
-  return readWorkspaceSkillPacks(wsReal);
+  return readWorkspaceSkillPacks(wsReal, { sharedSkillsDir });
+}
+
+/**
+ * 为指定成员独立沙箱全量同步全部内置+共享能力包，并开启全量自动跟随模式。
+ */
+export function syncAllSharedSkills({ workspacePath, sharedSkillsDir } = {}) {
+  return syncWorkspaceSkillPacks({ workspacePath, mode: 'all', sharedSkillsDir });
+}
+
+/**
+ * 若该成员处于默认全量模式（或尚未建立托管清单），自动热同步全部最新共享能力包；
+ * 若主人已显式切换为自定义勾配（`mode === 'custom'`），保留定制配置不动。
+ */
+export function autoSyncWorkspaceSharedSkills({ workspacePath, sharedSkillsDir } = {}) {
+  const wsReal = assertSafeRealDir(workspacePath);
+  const skillsDir = join(wsReal, 'skills');
+  if (existsSync(skillsDir)) {
+    const st = lstatSync(skillsDir);
+    if (!st.isSymbolicLink() && st.isDirectory()) {
+      const manifest = readPackManifest(realpathSync(skillsDir));
+      if (manifest.mode === 'custom') {
+        return readWorkspaceSkillPacks(wsReal, { sharedSkillsDir });
+      }
+    }
+  }
+  return syncAllSharedSkills({ workspacePath: wsReal, sharedSkillsDir });
 }
 
 /**
  * 盘点某成员工作区 `skills/` 下当前已激活的托管能力包与成员自建技能目录。
  */
-export function readWorkspaceSkillPacks(workspacePath) {
+export function readWorkspaceSkillPacks(workspacePath, { sharedSkillsDir } = {}) {
   if (typeof workspacePath !== 'string' || !workspacePath.trim() || !existsSync(workspacePath)) {
-    return { installed: [], custom: [], updatedAt: null };
+    return { mode: 'all', installed: [], custom: [], updatedAt: null };
   }
   let wsReal;
   try {
     wsReal = assertSafeRealDir(workspacePath);
   } catch {
-    return { installed: [], custom: [], updatedAt: null };
+    return { mode: 'all', installed: [], custom: [], updatedAt: null };
   }
   const skillsDir = join(wsReal, 'skills');
-  if (!existsSync(skillsDir)) return { installed: [], custom: [], updatedAt: null };
+  if (!existsSync(skillsDir)) return { mode: 'all', installed: [], custom: [], updatedAt: null };
   const dirStat = lstatSync(skillsDir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return { installed: [], custom: [], updatedAt: null };
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return { mode: 'all', installed: [], custom: [], updatedAt: null };
 
   const skillsReal = realpathSync(skillsDir);
+  const manifest = readPackManifest(skillsReal);
+  const catalogIds = new Set(resolveSharedSkillCatalog({ sharedSkillsDir }).map(p => p.id));
+  const managedIds = new Set([...catalogIds, ...manifest.installed]);
   const installed = [];
   const custom = [];
-  let updatedAt = null;
-  const manifestPath = join(skillsReal, MANIFEST_NAME);
-  if (existsSync(manifestPath)) {
-    try {
-      const parsed = JSON.parse(readSafePrivateFile(manifestPath) || '{}');
-      if (typeof parsed.updatedAt === 'string') updatedAt = parsed.updatedAt;
-    } catch {}
-  }
 
   for (const entry of readdirSync(skillsReal, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.name.startsWith('.')) continue;
@@ -336,19 +474,19 @@ export function readWorkspaceSkillPacks(workspacePath) {
     if (subStat.isSymbolicLink() || !subStat.isDirectory()) continue;
     const skillFile = join(sub, 'SKILL.md');
     if (!existsSync(skillFile)) continue;
-    if (SKILL_PACK_IDS.includes(entry.name)) {
+    if (managedIds.has(entry.name)) {
       installed.push(entry.name);
     } else {
       custom.push(entry.name);
     }
   }
-  return { installed, custom, updatedAt };
+  return { mode: manifest.mode, installed, custom, updatedAt: manifest.updatedAt };
 }
 
 /**
  * 提取成员工作区 skills 子目录中各 SKILL.md 的名称与简要描述，供原生会话上下文注入。
  */
-export function summarizeWorkspaceSkills(workspacePath) {
+export function summarizeWorkspaceSkills(workspacePath, { sharedSkillsDir } = {}) {
   if (typeof workspacePath !== 'string' || !workspacePath.trim() || !existsSync(workspacePath)) return [];
   let wsReal;
   try {
@@ -361,6 +499,8 @@ export function summarizeWorkspaceSkills(workspacePath) {
   const dirStat = lstatSync(skillsDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return [];
   const skillsReal = realpathSync(skillsDir);
+  const catalog = resolveSharedSkillCatalog({ sharedSkillsDir });
+  const catalogMap = new Map(catalog.map(p => [p.id, p]));
   const items = [];
   for (const entry of readdirSync(skillsReal, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.name.startsWith('.')) continue;
@@ -377,7 +517,7 @@ export function summarizeWorkspaceSkills(workspacePath) {
     }
     const fm = body.match(/^---\n([\s\S]*?)\n---/);
     const descMatch = fm?.[1]?.match(/^description:\s*(.+)$/m);
-    const packMeta = SKILL_PACKS.find(p => p.id === entry.name);
+    const packMeta = catalogMap.get(entry.name);
     items.push({
       id: entry.name,
       title: packMeta?.title ?? entry.name,

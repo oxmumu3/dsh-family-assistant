@@ -3099,6 +3099,8 @@ function renderHearthWorkbench(React, model) {
     const proSandboxActive = Boolean(elevated?.active);
     const skillCatalog = Array.isArray(hearth.skillPackCatalog) ? hearth.skillPackCatalog : [];
     const installedPacks = Array.isArray(selectedHearth.skillPacks?.installed) ? selectedHearth.skillPacks.installed : [];
+    const packMode = selectedHearth.skillPacks?.mode || 'all';
+    const sharedSkillsDir = hearth.sharedSkillsDir || '';
     const hasAgentsMd = Boolean(selectedHearth.hasAgentsMd);
     const customDigests = Array.isArray(selectedHearth.customDigests) ? selectedHearth.customDigests : [];
 
@@ -3181,11 +3183,20 @@ function renderHearthWorkbench(React, model) {
                     className: 'seg-btn' + (persona === val ? ' active' : ''),
                     disabled: busyAction,
                     onClick: () => void runControl({ action: 'hearth_member_update', personId: pid, persona: val, ...(val !== 'elder_care' ? { pinganEnabled: false } : {}) }, `已设为「${lbl}」`),
-                  }, lbl))),
+                  }, lbl)))),
             proSandboxActive && skillCatalog.length > 0 && h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border-subtle, #e6dfd5)' } },
-              h('div', { className: 'section-head', style: { marginBottom: '6px' } },
-                h('span', { className: 'section-sub' }, '精准赋能能力包（只共享方法论，绝不穿透主人数据）：'),
-                hasAgentsMd && h('span', { className: 'pill pill-open' }, '专属背景卡 AGENTS.md 已生效')),
+              h('div', { className: 'section-head', style: { marginBottom: '6px', flexWrap: 'wrap', gap: '6px' } },
+                h('span', { className: 'section-sub' }, '共享技能库（全员默认全开，只共享方法论，绝不碰主人隐私）：'),
+                h('div', { className: 'btn-row', style: { gap: '6px' } },
+                  h('span', { className: 'pill ' + (packMode === 'all' ? 'pill-open' : 'pill-muted') },
+                    packMode === 'all' ? '全套自动同步中' : '自定义勾选'),
+                  hasAgentsMd && h('span', { className: 'pill pill-open' }, '专属背景卡 AGENTS.md 已生效'),
+                  packMode === 'custom' && h('button', {
+                    type: 'button',
+                    className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
+                    disabled: busyAction,
+                    onClick: () => void runControl({ action: 'member_skill_packs_set', personId: pid, mode: 'all' }, `已恢复${selectedElder.label}全套共享技能自动同步`),
+                  }, '恢复全套同步'))),
               h('div', { className: 'btn-row', style: { flexWrap: 'wrap', gap: '6px' } },
                 skillCatalog.map(pack => {
                   const active = installedPacks.includes(pack.id);
@@ -3199,10 +3210,17 @@ function renderHearthWorkbench(React, model) {
                       const next = active
                         ? installedPacks.filter(id => id !== pack.id)
                         : [...installedPacks, pack.id];
-                      void runControl({ action: 'member_skill_packs_set', personId: pid, packIds: next }, active ? `已停用「${pack.title}」` : `已装备「${pack.title}」`);
+                      const allSelected = next.length === skillCatalog.length && skillCatalog.every(p => next.includes(p.id));
+                      void runControl(
+                        allSelected
+                          ? { action: 'member_skill_packs_set', personId: pid, mode: 'all' }
+                          : { action: 'member_skill_packs_set', personId: pid, mode: 'custom', packIds: next },
+                        active ? `已停用「${pack.title}」` : `已装备「${pack.title}」`
+                      );
                     },
-                  }, (active ? '✓ ' : '+ ') + pack.title);
-                }))))),
+                  }, (active ? '✓ ' : '+ ') + (pack.source === 'shared' ? '★ ' : '') + pack.title);
+                })),
+              sharedSkillsDir && h('div', { className: 'feed-desc', style: { marginTop: '6px' } }, `以后把新 Skill 放入 ${sharedSkillsDir}，所有自动同步席位无需重启即生效。`))),
 
           h('div', { className: 'cap-card' },
             h('div', { className: 'section-head', style: { marginBottom: '6px' } },
@@ -3625,9 +3643,9 @@ function renderHearthWorkbench(React, model) {
                   }));
                 },
               },
-                h('option', { value: 'elder_care' }, '长辈关怀（父母长辈 · 贴心问候与防诈守护）'),
-                h('option', { value: 'pro_peer' }, '专业伙伴席位（室友/同窗/同事 · 默认开启独立沙箱满血 Agent）'),
-                h('option', { value: 'partner' }, '伴侣家人（独立沙箱满血 Agent · 共享生活与订阅）'))),
+                h('option', { value: 'elder_care' }, '长辈关怀（满血沙箱+全套技能 · 保留防诈守护与大白话口吻）'),
+                h('option', { value: 'pro_peer' }, '同窗/专业伙伴（满血沙箱+全套技能 · 免除防诈误拦截）'),
+                h('option', { value: 'partner' }, '伴侣家人（满血沙箱+全套技能 · 共享生活与定制订阅）'))),
             h('label', { className: 'field-label' },
               '平时怎么称呼她 / 他',
               h('input', {
@@ -3656,7 +3674,7 @@ function renderHearthWorkbench(React, model) {
                   h('option', { value: 'none' }, '完全不看原文（最私密）'),
                   h('option', { value: 'summary' }, '只看简要小结（推荐）'),
                   h('option', { value: 'full' }, '允许看近期对话')))),
-            h('p', { className: 'feed-desc' }, '先记下名片，下一步会生成微信登录二维码。')),
+            h('p', { className: 'feed-desc' }, '所有席位默认开启独立沙箱满血 Agent 与全套共享技能；角色仅决定防诈提醒与问候偏好。先记下名片，下一步生成微信二维码。')),
 
           onboardStep === 2 && h('div', { className: 'qr-card' },
             h('strong', null, onboardConnected ? `${onboardElderObj?.label || '家人'}已连上微信！` : `请用${onboardElderObj?.label || '家人'}的微信扫码绑定`),
@@ -3711,7 +3729,7 @@ function renderHearthWorkbench(React, model) {
                     setOnboardStep(2);
                     const pickedPersona = onboardForm.persona || 'elder_care';
                     void runControl({ action: 'hearth_member_update', personId: cid, persona: pickedPersona, pinganEnabled: pickedPersona === 'elder_care' })
-                      .then(() => pickedPersona !== 'elder_care' ? runControl({ action: 'member_elevated_grant', personId: cid, permanent: true, note: '新开专业沙箱席位' }) : null)
+                      .then(() => runControl({ action: 'member_elevated_grant', personId: cid, permanent: true, note: '默认独立沙箱满血 Agent' }))
                       .then(() => runControl({ action: 'login', personId: cid }))
                       .then(() => requestQr(cid));
                   }

@@ -814,3 +814,95 @@ test('skill packs privacy hygiene, private plugin blocklist, AGENTS.md injection
   assert.match(capturedPrompt, /skills\/executive-reporting\/SKILL\.md/);
   assert.match(capturedPrompt, /skills\/my-custom\/SKILL\.md/);
 });
+
+test('all new seats default to permanent full sandbox + shared-skills hot-sync while keeping elder_care scam guard', async t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'family-all-seats-027-')));
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir + '-member-workspaces', { recursive: true, force: true });
+  });
+
+  const sentTexts = [];
+  const host = createFakeHostControllers();
+  const runtime = createRuntime({
+    directory: dir,
+    api: createFakeApi(sentTexts),
+    intervalMs: 600_000,
+    elevatedControllers: {
+      getWorkspaceController: () => host.workspaceController,
+      getSessionController: () => host.sessionController,
+      getAgents: () => host.agentsRegistry,
+    },
+  });
+  t.after(() => runtime.close());
+
+  setupConnectedPerson(dir, runtime, {
+    id: 'owner-1', role: 'owner', label: '我',
+    accountId: 'owner@im.bot', peerId: 'owner@im.wechat', token: 'tok-owner',
+  });
+  await runtime.start();
+
+  // Drop a new shared skill into <dir>/shared-skills BEFORE onboarding mom
+  const sharedSkillDir = join(dir, 'shared-skills', 'custom-finance-review');
+  mkdirSync(sharedSkillDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(sharedSkillDir, 'SKILL.md'),
+    '---\nname: custom-finance-review\ndescription: General contract and fee review helper.\n---\n# Custom Review\n',
+  );
+
+  // Add elder_care member ("妈妈") via add_person -> MUST default to permanent sandbox + all 6 skills (5 builtin + 1 shared)
+  const afterAdd = await runtime.action({ action: 'add_person', role: 'elder', label: '妈妈', timeZone: 'Asia/Shanghai' });
+  const mom = afterAdd.people.find(p => p.label === '妈妈');
+  assert.ok(mom);
+  const momHearth = afterAdd.hearth.members[mom.id];
+  assert.equal(momHearth.elevated.permanent, true);
+  assert.equal(momHearth.elevated.expiresAt, null);
+  assert.equal(momHearth.skillPacks.mode, 'all');
+  assert.equal(momHearth.skillPacks.installed.length, 6);
+  assert.equal(momHearth.skillPacks.installed.includes('custom-finance-review'), true);
+  assert.equal(momHearth.skillPacks.installed.includes('executive-reporting'), true);
+
+  // Bind WeChat for mom
+  runtime.store.bindPerson(mom.id, { accountId: 'mom@im.bot', peerId: 'mom@im.wechat' });
+  const momChanDir = join(dir, 'channels', mom.id);
+  mkdirSync(momChanDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(momChanDir, 'auth.json'), JSON.stringify({
+    token: 'tok-mom',
+    baseUrl: 'https://ilinkai.weixin.qq.com',
+    accountId: 'mom@im.bot',
+    peerId: 'mom@im.wechat',
+    cursor: '',
+    contextToken: 'mom-ctx',
+  }), { mode: 0o600 });
+  await runtime.action({ action: 'connect', personId: mom.id });
+
+  // Drop a SECOND shared skill live at runtime WITHOUT restart -> mom's next turn picks it up automatically!
+  const sharedSkill2 = join(dir, 'shared-skills', 'travel-helper');
+  mkdirSync(sharedSkill2, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(sharedSkill2, 'SKILL.md'),
+    '---\nname: travel-helper\ndescription: Plan elder-friendly accessible itineraries.\n---\n# Travel Helper\n',
+  );
+
+  let momPromptSeen = '';
+  let sandboxTurns = 0;
+  host.setOnPrompt(async ctx => {
+    runtime.memberElevatedHost.attachAgent(ctx.agent);
+    sandboxTurns += 1;
+    momPromptSeen = ctx.text;
+    ctx.pushEvent('assistant/message', { turn: ctx.turn, message: { content: [{ type: 'text', text: '阿姨好，我已经帮你查好了出行规划和注意事项。' }] } });
+    ctx.pushEvent('turn/end', { turn: ctx.turn, reason: { kind: 'completed' } });
+  });
+
+  await runtime.receive(mom.id, { id: 'mom-msg-1', peerId: 'mom@im.wechat', text: '帮我查下下周去杭州天气和坐高铁注意事项' });
+  await waitFor(() => sentTexts.some(m => m.peerId === 'mom@im.wechat' && m.text.includes('出行规划')));
+  assert.equal(sandboxTurns, 1);
+  assert.match(momPromptSeen, /skills\/travel-helper\/SKILL\.md/);
+  assert.match(momPromptSeen, /skills\/custom-finance-review\/SKILL\.md/);
+  assert.match(momPromptSeen, /长辈服务沟通风格提示/);
+
+  // elder_care scam protection MUST STILL block transfer scams even when full sandbox is active!
+  await runtime.receive(mom.id, { id: 'mom-msg-scam', peerId: 'mom@im.wechat', text: '对方让我把5万块钱立刻转账汇款到安全账户配合调查' });
+  await waitFor(() => sentTexts.some(m => m.peerId === 'mom@im.wechat' && m.text.includes('先别转账')));
+  assert.equal(sandboxTurns, 1, 'scam message must be stopped by safetyCard before hitting sandbox agent');
+});
