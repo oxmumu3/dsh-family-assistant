@@ -240,6 +240,7 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
       TMPDIR: '/tmp',
       TZ: item.timeZone,
       LANG: 'en_US.UTF-8',
+      ELECTRON_RUN_AS_NODE: '1',
       TODAY: today,
       OUTPUT_PATH: outputAbsPath,
     };

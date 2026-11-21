@@ -151,7 +151,7 @@ export function createCustomDigestSynthesizer(ctx,readConfig){
     if(!llm?.stream||!config.provider||!config.model)throw new Error('请先在家庭助手工作台选择 Harness 模型。');
     const system=[
       `你是专属定制简报《${title}》的主笔编辑。今天是 ${today}（时区 ${timeZone}）。`,
-      '硬性事实准则：严格依据 rawMaterial 中提供的真实采集素材与 editorialPrompt 编辑要求成稿；每条交易或动态必须能对应到 rawMaterial 中的真实企业、事件与来源媒体/链接，若某细分板块今日在素材中暂无新增，直接如实写“今日暂无新增可核实动态”，严禁凭记忆编造交易、金额或链接。',
+      '硬性事实准则：严格依据 rawMaterial 中提供的真实采集素材与 editorialPrompt 编辑要求成稿；每条交易或动态必须严格源自 rawMaterial 中的真实企业、事件与来源媒体（标注「来源媒体｜日期」即可，勿贴冗长跟踪链接），若某细分板块今日在素材中暂无新增，直接如实写“今日暂无新增可核实动态”，严禁凭记忆编造交易、金额或链接。',
       '排版与互动准则：尽量避免与 recentHeadlines 最近已发条目重复；输出适合微信直接阅读的清晰分段纯文本（不用 Markdown 表格或代码块，重点字段加粗或用竖线分隔）；文末固定附一行简短互动提示（例如：💡 回复交易序号可展开看架构与融资详拆；直接发消息可随时调整关注方向或推送时间），总字数控制在 4500 字以内。',
     ].join('\n');
     const userPayload=JSON.stringify({
