@@ -976,31 +976,54 @@ export function renderHearthWorkbench(React, model) {
               h('span', { className: 'pill ' + (customDigests.some(d => d.enabled) ? 'pill-open' : 'pill-muted') },
                 customDigests.some(d => d.enabled) ? `${customDigests.filter(d => d.enabled).length} 项运行中` : '待订阅')),
             customDigests.length === 0
-              ? h('p', { className: 'cap-desc' }, '本人可直接在微信跟乐乐口述想订的简报（如“每日跨境并购日报”），乐乐会自动搭建多源采集并定时推送；此处只看运行状态，不窥探私聊。')
+              ? h('p', { className: 'cap-desc' }, '本人可直接在微信跟乐乐口述想订的任意多份简报（如早 8 点“跨境并购日报” + 晚 6 点“汇率监管快报”），乐乐会自动搭建多源采集并各自按时推送；此处只看运行状态，不窥探私聊。')
               : h('div', { className: 'feed-list' },
-                customDigests.map(dig => h('div', { key: dig.slug, className: 'feed-item' },
-                  h('div', { className: 'feed-left' },
-                    h('span', { className: 'feed-time tabular' }, dig.scheduleTime || '08:00'),
-                    h('div', null,
-                      h('div', { className: 'feed-title' },
-                        dig.title,
-                        ' ',
-                        h('span', { className: 'pill ' + (dig.lastStatus === 'failed' ? 'pill-danger' : dig.enabled ? 'pill-open' : 'pill-muted') },
-                          !dig.enabled ? '已暂停' : dig.lastStatus === 'succeeded' ? `已生成 ${dig.lastGeneratedDate || ''}` : dig.lastStatus === 'failed' ? '上次异常' : '待生成')),
-                      h('div', { className: 'feed-desc' }, `${dig.scheduleDays === 'workdays' ? '工作日' : '每日'}推送 · ${dig.collectorScript ? '多源实盘采集' : '智能合成'}${dig.lastError ? ' · ' + dig.lastError : ''}`))),
-                  h('div', { className: 'btn-row' },
-                    h('button', {
-                      type: 'button',
-                      className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
-                      disabled: busyAction,
-                      onClick: () => void runControl({ action: 'member_custom_digest_run', personId: pid, slug: dig.slug, deliverNow: false }, `已重新采集生成《${dig.title}》`),
-                    }, '重跑生成'),
-                    h('button', {
-                      type: 'button',
-                      className: 'hearth-btn hearth-btn-primary hearth-btn-sm',
-                      disabled: busyAction || !connected,
-                      onClick: () => void runControl({ action: 'member_custom_digest_run', personId: pid, slug: dig.slug, deliverNow: true }, `已重跑并向${selectedElder.label}微信提交《${dig.title}》`),
-                    }, '重跑并推微信'))))))),
+                customDigests.map(dig => {
+                  const statusPill = !dig.enabled
+                    ? { cls: 'pill-muted', txt: '已暂停' }
+                    : dig.lastStatus === 'failed'
+                      ? { cls: 'pill-danger', txt: '生成异常' }
+                      : dig.lastDeliveryStatus === 'api_accepted' && dig.lastDeliveredDate
+                        ? { cls: 'pill-open', txt: `已推微信 ${dig.lastDeliveredDate}` }
+                        : dig.lastDeliveryStatus === 'deferred_window_closed'
+                          ? { cls: 'pill-warn', txt: '待对方发言重开窗口' }
+                          : dig.lastStatus === 'succeeded'
+                            ? { cls: 'pill-open', txt: `已生成 ${dig.lastGeneratedDate || ''}` }
+                            : { cls: 'pill-muted', txt: '待生成' };
+                  return h('div', { key: dig.slug, className: 'feed-item' },
+                    h('div', { className: 'feed-left' },
+                      h('span', { className: 'feed-time tabular' }, dig.scheduleTime || '08:00'),
+                      h('div', null,
+                        h('div', { className: 'feed-title' },
+                          dig.title,
+                          ' ',
+                          h('span', { className: 'pill ' + statusPill.cls }, statusPill.txt)),
+                        h('div', { className: 'feed-desc' }, `${dig.scheduleDays === 'workdays' ? '工作日' : '每日'} · ${dig.slug} · ${dig.collectorScript ? '多源实盘采集' : '智能合成'}${dig.lastError ? ' · ' + dig.lastError : ''}`))),
+                    h('div', { className: 'btn-row' },
+                      h('button', {
+                        type: 'button',
+                        className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
+                        disabled: busyAction,
+                        onClick: () => void runControl(
+                          dig.enabled
+                            ? { action: 'member_custom_digest_pause', personId: pid, slug: dig.slug }
+                            : { action: 'member_custom_digest_resume', personId: pid, slug: dig.slug },
+                          dig.enabled ? `已暂停《${dig.title}》` : `已恢复《${dig.title}》`
+                        ),
+                      }, dig.enabled ? '暂停' : '恢复'),
+                      h('button', {
+                        type: 'button',
+                        className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
+                        disabled: busyAction,
+                        onClick: () => void runControl({ action: 'member_custom_digest_run', personId: pid, slug: dig.slug, deliverNow: false }, `已重新采集生成《${dig.title}》`),
+                      }, '重跑生成'),
+                      h('button', {
+                        type: 'button',
+                        className: 'hearth-btn hearth-btn-primary hearth-btn-sm',
+                        disabled: busyAction || !connected,
+                        onClick: () => void runControl({ action: 'member_custom_digest_run', personId: pid, slug: dig.slug, deliverNow: true }, `已重跑并向${selectedElder.label}微信提交《${dig.title}》`),
+                      }, '重跑并推微信')));
+                })))),
 
         isElderCare && h('div', { className: 'split-cards' },
           h('div', { className: 'cap-card' },

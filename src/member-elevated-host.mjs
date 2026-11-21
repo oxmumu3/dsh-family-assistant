@@ -267,7 +267,7 @@ function buildElevatedPrompt({ person, grant, persona = 'pro_peer', sharedSkills
   const installedSkills = grant.workspacePath ? summarizeWorkspaceSkills(grant.workspacePath, { sharedSkillsDir }) : [];
   const blocks = [
     `【乐乐 · 专属独立沙箱 Agent 席位】你正在微信上直接服务「${person.label}」（${tz}，当前当地时间 ${localNow}，当前模式：${modeDesc}）。`,
-    `你的能力边界与武器库：你可以直接读写专属工作区「${grant.workspacePath}」、联网深度检索与抓取中英文公开权威资讯/公告、在 scripts/ 中编写或安装多源采集脚本、用 member_digest_service（支持内置模板 template="crossborder_ma" 跨境并购多源采集或 "topic_radar" 行业雷达、save_schedule 建定时、update_preferences 随时追加修改偏好口径、run_now 立即试跑推送）搭建和持续调教每日自动简报、用 member_send_workspace_file 直接把生成的 Word/Excel/CSV/PDF/HTML/Markdown 报告或 PNG/JPG 图表图片发到他微信、用 member_reminder_service 为他安排或管理微信提醒。`,
+    `你的能力边界与武器库：你可以直接读写专属工作区「${grant.workspacePath}」、联网深度检索与抓取中英文公开权威资讯/公告、在 scripts/ 中编写或安装多源采集脚本、用 member_digest_service（支持任意多份彼此独立的定制简报，按不同 slug 区分各自定时采集与推送、内置模板 template="crossborder_ma"|"topic_radar"、save_schedule 新建/修改排期、update_preferences 随时追加修改偏好、run_now 立即试跑推送）搭建和持续调教每日/工作日自动简报、用 member_send_workspace_file 直接把生成的 Word/Excel/CSV/PDF/HTML/Markdown 报告或 PNG/JPG 图表图片发到他微信、用 member_reminder_service 为他安排或管理微信提醒。`,
     `重要大管家原则：\n1. 只给结果、绝不甩锅或讲内部黑话：微信那头的「${person.label}」不需要知道任何终端、脚本、工具名、sessionId 或权限分层；绝不要让他自己去电脑执行操作，也不要回复空洞的框架敷衍——他要日报或调研，你就当场拉取真实可核实信源把干货做出来并配好定时。\n2. 真实溯源与持续调教：所有交易、数据、监管动态必须标注真实来源媒体，拿不到的如实写“未获取到可核实公开披露”，严禁编造；当对方回复修改意见（如调整金额门槛、重点区域、工作日/每日推送时间）时，立即调用 member_digest_service(op="update_preferences") 落盘生效。\n3. 微信阅读友好与去重：分段清晰、重点突出、不用冗余代码块；若已通过 member_digest_service(deliverNow=true) 或 member_send_workspace_file 将完整正文/文档发至微信，本轮回复只需简洁说明亮点与可微调项，不要把几千字全文重复粘第二遍（不要调用阻塞式弹窗提问工具，如需确认 1-2 个偏好直接在微信文字末尾轻问一句）。\n4. 严禁访问或提及工作区之外的宿主或主人私人目录、密钥与配置。`,
   ];
   if (persona === 'elder_care') {
@@ -405,7 +405,7 @@ export function createMemberElevatedHost({
     const tools = [];
     tools.push({
       name: 'member_digest_service',
-      description: '配置、持续调教偏好、立即试跑推送、查看或暂停当前成员的专属定制简报（如跨境并购日报）。支持一键安装内置多源实盘采集器（template="crossborder_ma" 或 "topic_radar"）或指定自写脚本，并支持随时用 update_preferences 追加或修改口径、时间与工作日排期。',
+      description: '配置、持续调教偏好、立即试跑推送、查看或暂停当前成员的专属定制简报。同一成员可以同时创建和管理任意多份彼此独立的定时简报（以不同 slug 区分，各自独立定时采集与推送到微信，互不覆盖）。支持内置多源实盘采集模板（template="crossborder_ma"|"topic_radar"）或自写脚本，支持 update_preferences 随时修改口径、推送时间与每日/工作日排期。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -444,10 +444,10 @@ export function createMemberElevatedHost({
 
         if (args.op === 'pause') {
           const paused = customDigests.pause({ personId, ...(args.slug ? { slug: args.slug } : {}) });
-          if (typeof disableMemberDigestSchedule === 'function') {
+          if (typeof disableMemberDigestSchedule === 'function' && (!args.slug || customDigests.list({ personId }).every(d => !d.enabled))) {
             await disableMemberDigestSchedule({ personId });
           }
-          const payload = { status: 'completed', pausedCount: paused.length, text: paused.length ? `已暂停 ${paused.length} 项定制日报的每日自动生成与推送。` : '当前没有启用的定制日报。' };
+          const payload = { status: 'completed', pausedCount: paused.length, text: paused.length ? `已暂停 ${paused.length} 项定制日报的自动生成与推送（其他简报不受影响）。` : '当前没有启用的定制日报。' };
           return payload;
         }
 
@@ -477,7 +477,7 @@ export function createMemberElevatedHost({
           if (args.deliverNow === true) {
             regenerated = await customDigests.runDigest({ personId, slug: updated.slug, force: true, signal: execution?.signal });
             if (typeof deliverMemberDigestNow === 'function') {
-              delivery = await deliverMemberDigestNow({ personId, requestId: 'elevated-upd-' + randomUUID() });
+              delivery = await deliverMemberDigestNow({ personId, slug: updated.slug, requestId: 'elevated-upd-' + randomUUID() });
             }
           }
           return {
@@ -495,7 +495,7 @@ export function createMemberElevatedHost({
           const runResult = await customDigests.runDigest({ personId, slug, force: true, signal: execution?.signal });
           let delivery = null;
           if (args.deliverNow === true && typeof deliverMemberDigestNow === 'function') {
-            delivery = await deliverMemberDigestNow({ personId, requestId: 'elevated-run-' + randomUUID() });
+            delivery = await deliverMemberDigestNow({ personId, slug, requestId: 'elevated-run-' + randomUUID() });
           }
           const delivered = delivery?.deliveryStatus === 'api_accepted';
           return {
@@ -554,7 +554,7 @@ export function createMemberElevatedHost({
           }
           let delivery = null;
           if (args.deliverNow === true && typeof deliverMemberDigestNow === 'function') {
-            delivery = await deliverMemberDigestNow({ personId, requestId: 'elevated-sample-' + randomUUID() });
+            delivery = await deliverMemberDigestNow({ personId, slug: saved.slug, requestId: 'elevated-sample-' + randomUUID() });
           }
           const delivered = delivery?.deliveryStatus === 'api_accepted';
           return {

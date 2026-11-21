@@ -126,6 +126,7 @@ const inputKeys={
   member_custom_digest_save:['personId','slug','title','scheduleTime','scheduleDays','timeZone','template','keywords','collectorScript','editorialPrompt','model','deliverNow'],
   member_custom_digest_run:['personId','slug','deliverNow'],
   member_custom_digest_pause:['personId','slug'],
+  member_custom_digest_resume:['personId','slug'],
 };
 
 /** Kernel-reported start time of one process; used to tell a live owner from a
@@ -252,28 +253,31 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       getPerson:personId=>store.person(personId),
       getBindingGeneration:personId=>store.binding(personId)?.generation??null,
       isRouteCurrent:route=>current(route),
-      assignMemberDigest:async({personId,workspaceId,relativePath,scheduleTime,timeZone})=>{
-        const owner=store.snapshot().people.find(p=>p.role==='owner');
-        if(!owner)throw new Error('请先登记家庭联系人（Owner）。');
-        return assignTool({actorId:owner.id,personId,toolId:'ai_digest',resource:{workspaceId,relativePath,selection:'latest',sourceTimeZone:timeZone},allowInvoke:true,schedule:{enabled:true,time:scheduleTime,timeZone}});
+      assignMemberDigest:async({personId})=>{
+        clearCustomDigestLegacySchedule(personId);
+        return customDigests.list({personId});
       },
       disableMemberDigestSchedule:async({personId})=>{
-        const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)return null;
-        const existing=toolbox.assignments({actorId:owner.id,personId}).find(row=>row.toolId==='ai_digest');
-        if(!existing)return null;
-        return assignTool({actorId:owner.id,personId,toolId:'ai_digest',resource:existing.resource,allowInvoke:existing.allowInvoke,schedule:null});
+        clearCustomDigestLegacySchedule(personId);
+        return customDigests.list({personId});
       },
-      currentDigestSchedule:personId=>{
-        const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)return null;
-        const row=toolbox.assignments({actorId:owner.id,personId}).find(item=>item.toolId==='ai_digest');
-        return row?{resource:row.resource,allowInvoke:row.allowInvoke,schedule:row.schedule,revision:row.revision}:null;
-      },
-      deliverMemberDigestNow:async({personId,requestId})=>{
-        const route=store.route(personId),owner=store.snapshot().people.find(p=>p.role==='owner');
-        if(!owner)throw new Error('请先登记 Owner。');
-        const existing=toolbox.assignments({actorId:owner.id,personId}).find(row=>row.toolId==='ai_digest');
-        if(!existing)throw new Error('尚未为该成员配置日报工具来源。');
-        return runTool({personId,toolId:'ai_digest',requestId,expectedRevision:existing.revision},route,{notify:false});
+      currentDigestSchedule:personId=>customDigests.list({personId}),
+      deliverMemberDigestNow:async({personId,slug,requestId})=>{
+        const items=customDigests.list({personId});
+        const targetSlug=slug||(items.length===1?items[0].slug:null);
+        const item=targetSlug?items.find(x=>x.slug===targetSlug):null;
+        if(!item)throw new Error('请指明要推送的定制简报 slug。');
+        const today=localDate(now(),item.timeZone||'Asia/Shanghai');
+        const reportFile=join(item.workspacePath,'reports',item.slug,`${today}-wechat.txt`);
+        let text='';
+        if(existsSync(reportFile)){
+          try{text=readFileSync(reportFile,'utf8').trim();}catch{}
+        }
+        if(!text){
+          const gen=await customDigests.runDigest({personId,slug:item.slug,force:false,signal:lifecycle.signal});
+          text=gen.text;
+        }
+        return deliverCustomDigestToMember({personId,slug:item.slug,title:item.title,text,today,scheduled:false,requestId});
       },
       deliverMemberFile:async({personId,name,bytes,caption,isImage,signal})=>{
         const sendAsImage=Boolean(isImage||/\.(?:png|jpg|jpeg|webp)$/iu.test(name??''))&&typeof channels.sendImage==='function';
@@ -707,6 +711,39 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const person=store.person(personId),live=channels.status(personId)??{};
     return reachFor({role:person?.role,connected:live.status==='connected',lastInboundAt:lastInboundOf(personId),now:now()});
   };
+  function clearCustomDigestLegacySchedule(personId){
+    try{
+      const owner=store.snapshot().people.find(p=>p.role==='owner');if(!owner)return;
+      const existing=toolbox.assignments({actorId:owner.id,personId}).find(row=>row.toolId==='ai_digest');
+      if(existing?.schedule?.enabled)assignTool({actorId:owner.id,personId,toolId:'ai_digest',resource:existing.resource,allowInvoke:existing.allowInvoke,schedule:null});
+    }catch{}
+  }
+  async function deliverCustomDigestToMember({personId,slug,title,text,today,scheduled=false,requestId}={}){
+    if(closed||store.snapshot().config.paused||suspended(personId))return{deliveryStatus:'offline'};
+    let route;
+    try{route=store.route(personId);}catch{return{deliveryStatus:'offline'};}
+    if(!current(route)||channels.status(personId)?.status!=='connected')return{deliveryStatus:'offline'};
+    const reach=reachOf(personId);
+    if(scheduled&&!canSendNow(reach))return{deliveryStatus:'deferred_window_closed'};
+    if(typeof text!=='string'||!text.trim())return{deliveryStatus:'empty'};
+    const parts=messageParts(text.trim());
+    const reqTag=requestId||randomUUID();
+    let finalStatus=null;
+    for(const[idx,part]of parts.entries()){
+      if(closed||store.snapshot().config.paused||suspended(personId)||!current(route)){finalStatus='cancelled';break;}
+      const body=parts.length>1?`（${idx+1}/${parts.length}）\n${part}`:part;
+      const sourceKey=scheduled
+        ?`custom-digest-sched:${personId}:${slug}:${today}:${idx}`
+        :`custom-digest-now:${personId}:${slug}:${reqTag}:${idx}`;
+      const row=store.enqueue({personId,text:body,kind:'custom_digest',sourceKey,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
+      await flush(personId,{onlyId:row.id});
+      finalStatus=store.snapshot().outbox.find(item=>item.id===row.id)?.status??null;
+      if(finalStatus!=='api_accepted')break;
+    }
+    const day=today||localDate(now(),store.person(personId)?.timeZone||'Asia/Shanghai');
+    customDigests.markDelivered({personId,slug,date:day,status:finalStatus||'unknown'});
+    return{deliveryStatus:finalStatus};
+  }
   const authorized=row=>{
     if(outboxAuthorities.has(row.id)&&outboxAuthorities.get(row.id)()!==true||row.sourceKey.includes(':native-owner-')&&!outboxAuthorities.has(row.id))return false;
     if(row.sourceKey.startsWith('family-dot:')&&!outboxAuthorities.has(row.id))return false;
@@ -923,8 +960,9 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         }
       }
       await gateway.tick();await notifyOwnerTaskStatus();
-      try{await customDigests.tick({now:now(),signal:lifecycle.signal});}catch(error){lastError=safeError(error);}
+      try{await customDigests.tick({now:now(),signal:lifecycle.signal,onDeliver:item=>deliverCustomDigestToMember({...item,scheduled:true})});}catch(error){lastError=safeError(error);}
       for(const due of toolbox.due()){
+        if(due.toolId==='ai_digest'&&customDigests.list({personId:due.personId}).some(x=>x.enabled===true))continue;
         let route;try{route=store.route(due.personId);}catch{continue;}
         void serial(toolWork,due.personId,()=>runTool({personId:due.personId,toolId:due.toolId,requestId:due.requestId,expectedRevision:due.expectedRevision},route,{notify:true,scheduled:true})).catch(error=>{lastError=safeError(error);});
       }
@@ -1713,6 +1751,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const importantAdmission=isElderPersona?attention.admit(person,message,text):null;
     const accepted=store.recordInbound(person.id,{id:message.id,peerId:route.peerId,text:text.slice(0,6000),...(message.attachments?.length?{attachments:displayAttachments(message.attachments)}:{}),...(message.at?{at:message.at}:{})});
     if(!accepted.accepted)return accepted;
+    try{customDigests.clearDeliveryCooldown?.(person.id);}catch{}
     if(store.snapshot().config.paused)return{accepted:true,archived:true,paused:true};
     if(importantAdmission?.id)void attention.run(importantAdmission.id);
     await deliverDeferredNotice(person.id,route,message);
@@ -2401,7 +2440,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
         return{items:customDigests.list({...(args.personId?{personId:args.personId}:{})})};
       }
       case'member_custom_digest_save':{
-        const actorId=ownerId();
+        ownerId();
         const target=store.person(args.personId);
         if(!target||target.role!=='elder')throw new Error('请选择一位成员配置定制简报。');
         const binding=store.binding(args.personId);
@@ -2432,64 +2471,40 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
           editorialPrompt:args.editorialPrompt??'',
           model:args.model??null,
         });
+        clearCustomDigestLegacySchedule(args.personId);
         const generated=await customDigests.runDigest({personId:args.personId,slug:saved.slug,force:true,signal:managementLifecycle.signal});
-        if(grant.workspaceId){
-          assignTool({actorId,personId:args.personId,toolId:'ai_digest',resource:{workspaceId:grant.workspaceId,relativePath:generated.relativePath,selection:'latest',sourceTimeZone:timeZone},allowInvoke:true,schedule:{enabled:true,time:saved.scheduleTime,timeZone}});
-        }
         let delivery=null;
         if(args.deliverNow===true&&binding){
-          const existing=toolbox.assignments({actorId,personId:args.personId}).find(r=>r.toolId==='ai_digest');
-          if(existing&&typeof toolExecutors?.ai_digest==='function'){
-            let authRoute;try{authRoute=store.route(actorId);}catch{}delivery=await runTool({personId:args.personId,toolId:'ai_digest',requestId:'owner-digest-sample-'+randomUUID(),expectedRevision:existing.revision},store.route(args.personId),{actorId,...(authRoute?{authorityRoute:authRoute}:{}),notify:false});
-          }else{
-            const parts=messageParts(generated.text);
-            let st=null;
-            for(const[idx,part]of parts.entries()){
-              let authRoute;try{authRoute=store.route(actorId);}catch{}const row=store.enqueue({personId:args.personId,text:parts.length>1?`（${idx+1}/${parts.length}）\n${part}`:part,kind:'manual',sourceKey:`custom-digest-direct:${args.personId}:${saved.slug}:${randomUUID()}:${idx}`,...(authRoute?{authorizationRoute:authRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
-              await flush(args.personId,{onlyId:row.id});
-              st=store.snapshot().outbox.find(item=>item.id===row.id)?.status??null;
-              if(st!=='api_accepted')break;
-            }
-            delivery={deliveryStatus:st};
-          }
+          delivery=await deliverCustomDigestToMember({personId:args.personId,slug:saved.slug,title:saved.title,text:generated.text,today:localDate(now(),timeZone),scheduled:false});
         }
         return{...status({personId:args.personId}),digestResult:{status:'completed',digest:saved,relativePath:generated.relativePath,bytes:generated.bytes,preview:generated.text.slice(0,6000),deliveryStatus:delivery?.deliveryStatus??null}};
       }
       case'member_custom_digest_run':{
-        const actorId=ownerId();
+        ownerId();
         const items=customDigests.list({personId:args.personId});
         const slug=args.slug||(items.length===1?items[0].slug:null);
         if(!slug)throw new Error('请指定要运行的定制简报 slug。');
         const generated=await customDigests.runDigest({personId:args.personId,slug,force:true,signal:managementLifecycle.signal});
         const saved=customDigests.get({personId:args.personId,slug});
-        if(saved?.workspaceId){
-          const existing=toolbox.assignments({actorId,personId:args.personId}).find(r=>r.toolId==='ai_digest');
-          assignTool({actorId,personId:args.personId,toolId:'ai_digest',resource:{workspaceId:saved.workspaceId,relativePath:generated.relativePath,selection:'latest',sourceTimeZone:saved.timeZone},allowInvoke:true,schedule:existing?.schedule??(saved.enabled?{enabled:true,time:saved.scheduleTime,timeZone:saved.timeZone}:null)});
-        }
+        clearCustomDigestLegacySchedule(args.personId);
         let delivery=null;
         if(args.deliverNow===true&&store.binding(args.personId)){
-          const existing=toolbox.assignments({actorId,personId:args.personId}).find(r=>r.toolId==='ai_digest');
-          if(existing&&typeof toolExecutors?.ai_digest==='function'){
-            let authRoute;try{authRoute=store.route(actorId);}catch{}delivery=await runTool({personId:args.personId,toolId:'ai_digest',requestId:'owner-digest-run-'+randomUUID(),expectedRevision:existing.revision},store.route(args.personId),{actorId,...(authRoute?{authorityRoute:authRoute}:{}),notify:false});
-          }else{
-            const parts=messageParts(generated.text);
-            let st=null;
-            for(const[idx,part]of parts.entries()){
-              let authRoute;try{authRoute=store.route(actorId);}catch{}const row=store.enqueue({personId:args.personId,text:parts.length>1?`（${idx+1}/${parts.length}）\n${part}`:part,kind:'manual',sourceKey:`custom-digest-run:${args.personId}:${slug}:${randomUUID()}:${idx}`,...(authRoute?{authorizationRoute:authRoute}:{}),expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});
-              await flush(args.personId,{onlyId:row.id});
-              st=store.snapshot().outbox.find(item=>item.id===row.id)?.status??null;
-              if(st!=='api_accepted')break;
-            }
-            delivery={deliveryStatus:st};
-          }
+          delivery=await deliverCustomDigestToMember({personId:args.personId,slug,title:saved?.title??slug,text:generated.text,today:localDate(now(),saved?.timeZone||'Asia/Shanghai'),scheduled:false});
         }
         return{...status({personId:args.personId}),digestResult:{status:'completed',slug,relativePath:generated.relativePath,bytes:generated.bytes,preview:generated.text.slice(0,6000),deliveryStatus:delivery?.deliveryStatus??null}};
       }
       case'member_custom_digest_pause':{
-        const actorId=ownerId();
+        ownerId();
         customDigests.pause({personId:args.personId,...(args.slug?{slug:args.slug}:{})});
-        const existing=toolbox.assignments({actorId,personId:args.personId}).find(r=>r.toolId==='ai_digest');
-        if(existing)assignTool({actorId,personId:args.personId,toolId:'ai_digest',resource:existing.resource,allowInvoke:existing.allowInvoke,schedule:null});
+        if(!args.slug||customDigests.list({personId:args.personId}).every(x=>!x.enabled)){
+          clearCustomDigestLegacySchedule(args.personId);
+        }
+        return status({personId:args.personId});
+      }
+      case'member_custom_digest_resume':{
+        ownerId();
+        customDigests.setEnabled({personId:args.personId,slug:args.slug,enabled:true});
+        clearCustomDigestLegacySchedule(args.personId);
         return status({personId:args.personId});
       }
     }

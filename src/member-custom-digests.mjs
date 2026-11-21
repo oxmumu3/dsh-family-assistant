@@ -154,12 +154,12 @@ function extractHeadlines(text, today) {
 }
 
 /**
- * 成员定制日报引擎（member-custom-digests.json）。
+ * 成员多路定制日报引擎（member-custom-digests.json）。
  *
- * 即使临时高权限后续被 Owner 收回或自然过期，只要此定制方案仍为启用状态，
- * runtime.tick() 就会在每日推送时间前（或补发窗口内）在成员工作区沙箱中运行脚本
- * 并通过宿主 LLM 整理为 `reports/<slug>/YYYY-MM-DD-wechat.txt`，再由 family-toolbox
- * 统一完成当日唯一一次微信推送。
+ * 每位成员可同时拥有任意多份彼此独立的定制日报（以 slug 区分），
+ * 即使临时权限变化，只要某项定制方案仍为启用状态，runtime.tick() 就会按各自排期
+ * 在成员沙箱生成 `reports/<slug>/YYYY-MM-DD-wechat.txt`，并按 (personId, slug, today)
+ * 独立幂等推送到微信，互不覆盖、互不串台。
  */
 export function createMemberCustomDigests({ directory, synthesize, now = () => new Date().toISOString() } = {}) {
   if (typeof directory !== 'string' || !directory.trim()) fail('需要有效的数据目录。');
@@ -169,6 +169,7 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
   const file = join(root, 'member-custom-digests.json');
   const rootStat = lstatSync(root);
   const inFlight = new Map();
+  const lastDeliveryAttempts = new Map();
 
   const clock = () => {
     const instant = new Date(now());
@@ -412,6 +413,9 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
         editorialPrompt: trimmedPrompt,
         model: cleanModel ?? existing?.model ?? null,
         lastGeneratedDate: existing?.lastGeneratedDate ?? null,
+        lastDeliveredDate: existing?.lastDeliveredDate ?? null,
+        lastDeliveryStatus: existing?.lastDeliveryStatus ?? null,
+        lastDeliveryAt: existing?.lastDeliveryAt ?? null,
         lastRunAt: existing?.lastRunAt ?? null,
         lastStatus: existing?.lastStatus ?? null,
         lastError: existing?.lastError ?? null,
@@ -424,12 +428,39 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
       return clone(record);
     },
 
+    markDelivered({ personId, slug, date, status } = {}) {
+      if (!validId(personId) || !validSlug(slug)) return null;
+      const instant = clock();
+      const updated = mutateItem(personId, slug, row => {
+        row.lastDeliveryStatus = typeof status === 'string' && status ? status.slice(0, 60) : 'unknown';
+        row.lastDeliveryAt = instant;
+        if (row.lastDeliveryStatus === 'api_accepted' && typeof date === 'string' && date) {
+          row.lastDeliveredDate = date;
+        }
+        row.updatedAt = instant;
+      });
+      return updated ? clone(updated) : null;
+    },
+
+    clearDeliveryCooldown(personId) {
+      if (!validId(personId)) return;
+      const prefix = `${personId}:`;
+      for (const key of [...lastDeliveryAttempts.keys()]) {
+        if (key.startsWith(prefix)) lastDeliveryAttempts.delete(key);
+      }
+    },
+
     updatePreferences({ personId, slug, appendNote, editorialPrompt, scheduleTime, scheduleDays, enabled, model } = {}) {
       if (!validId(personId)) fail('成员标识无效。');
       const state = loadState();
       const candidates = state.items.filter(row => row.personId === personId && (!slug || row.slug === slug));
       if (!candidates.length) fail('当前尚未建立定制简报方案，请先使用 save_schedule 创建。', 'custom_digest_not_found');
-      const target = candidates[0];
+      let target = candidates[0];
+      if (!slug && candidates.length > 1) {
+        const active = candidates.filter(r => r.enabled === true);
+        if (active.length === 1) target = active[0];
+        else fail(`当前有多份定制简报（${candidates.map(r => r.slug).join('、')}），请指定要修改哪一份的 slug。`, 'custom_digest_ambiguous_slug');
+      }
       if (scheduleTime !== undefined) {
         if (!validClock(scheduleTime)) fail('推送时间须为 HH:MM 24小时格式。');
         target.scheduleTime = scheduleTime;
@@ -469,6 +500,16 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
       return updated;
     },
 
+    setEnabled({ personId, slug, enabled = true } = {}) {
+      if (!validId(personId) || !validSlug(slug) || typeof enabled !== 'boolean') fail('成员或简报标识无效。');
+      const updated = mutateItem(personId, slug, row => {
+        row.enabled = enabled;
+        row.updatedAt = clock();
+      });
+      if (!updated) fail('未找到指定的定制简报。', 'custom_digest_not_found');
+      return clone(updated);
+    },
+
     get({ personId, slug } = {}) {
       if (!validId(personId) || !validSlug(slug)) return null;
       const row = loadState().items.find(item => item.personId === personId && item.slug === slug);
@@ -490,8 +531,9 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
       return task;
     },
 
-    async tick({ now: overrideNow, signal } = {}) {
+    async tick({ now: overrideNow, signal, onDeliver } = {}) {
       const instant = overrideNow ?? clock();
+      const nowMs = Date.parse(instant);
       const state = loadState();
       const results = [];
       for (const item of state.items.filter(row => row.enabled === true)) {
@@ -500,13 +542,41 @@ export function createMemberCustomDigests({ directory, synthesize, now = () => n
           if (item.scheduleDays === 'workdays' && !isWorkdayInZone(instant, item.timeZone)) continue;
           const today = dateInZone(instant, item.timeZone);
           const targetFile = join(item.workspacePath, 'reports', item.slug, `${today}-wechat.txt`);
-          if (item.lastGeneratedDate === today && existsSync(targetFile)) continue;
           const [hh, mm] = item.scheduleTime.split(':').map(Number);
           const scheduleMin = hh * 60 + mm;
           const nowMin = minutesInZone(instant, item.timeZone);
+
           if (nowMin >= scheduleMin - 5 && nowMin <= scheduleMin + 120) {
-            const outcome = await this.runDigest({ personId: item.personId, slug: item.slug, signal });
-            results.push({ personId: item.personId, slug: item.slug, status: 'succeeded', ...outcome });
+            if (item.lastGeneratedDate !== today || !existsSync(targetFile)) {
+              const outcome = await this.runDigest({ personId: item.personId, slug: item.slug, signal });
+              results.push({ personId: item.personId, slug: item.slug, phase: 'generate', status: 'succeeded', ...outcome });
+            }
+          }
+
+          if (nowMin >= scheduleMin && nowMin <= scheduleMin + 120 && typeof onDeliver === 'function') {
+            const latest = this.get({ personId: item.personId, slug: item.slug });
+            if (latest?.enabled === true && latest.lastDeliveredDate !== today && existsSync(targetFile)) {
+              const attemptKey = `${item.personId}:${item.slug}:${today}`;
+              const lastAttempt = lastDeliveryAttempts.get(attemptKey);
+              if (lastAttempt === undefined || nowMs < lastAttempt || nowMs - lastAttempt >= 10 * 60_000) {
+                const text = readFileSync(targetFile, 'utf8').trim();
+                if (text) {
+                  lastDeliveryAttempts.set(attemptKey, nowMs);
+                  const delivery = await onDeliver({
+                    personId: item.personId,
+                    slug: item.slug,
+                    title: latest.title,
+                    today,
+                    relativePath: `reports/${item.slug}/${today}-wechat.txt`,
+                    text,
+                  });
+                  const status = delivery?.deliveryStatus ?? 'unknown';
+                  this.markDelivered({ personId: item.personId, slug: item.slug, date: today, status });
+                  if (status === 'api_accepted') lastDeliveryAttempts.delete(attemptKey);
+                  results.push({ personId: item.personId, slug: item.slug, phase: 'deliver', deliveryStatus: status });
+                }
+              }
+            }
           }
         } catch (error) {
           results.push({ personId: item.personId, slug: item.slug, status: 'failed', error: String(error?.message ?? 'failed').slice(0, 160) });

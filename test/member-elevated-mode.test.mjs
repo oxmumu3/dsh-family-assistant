@@ -906,3 +906,116 @@ test('all new seats default to permanent full sandbox + shared-skills hot-sync w
   await waitFor(() => sentTexts.some(m => m.peerId === 'mom@im.wechat' && m.text.includes('先别转账')));
   assert.equal(sandboxTurns, 1, 'scam message must be stopped by safetyCard before hitting sandbox agent');
 });
+
+test('single member supports multiple independent scheduled custom digests without overwriting or cross-talk', async t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'family-multi-digest-028-')));
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir + '-member-workspaces', { recursive: true, force: true });
+  });
+
+  const sentTexts = [];
+  const host = createFakeHostControllers();
+  // Start Day 1 at 2026-11-21 15:00 CST (07:00 UTC)
+  let currentTimeMs = Math.max(Date.parse('2026-11-21T07:00:00Z'), Date.now() + 60_000);
+
+  const runtime = createRuntime({
+    directory: dir,
+    api: createFakeApi(sentTexts),
+    now: () => new Date(currentTimeMs).toISOString(),
+    intervalMs: 600_000,
+    llmSynthesize: async ({ title, today }) => `${title}｜${today} 实盘简报内容`,
+    elevatedControllers: {
+      getWorkspaceController: () => host.workspaceController,
+      getSessionController: () => host.sessionController,
+      getAgents: () => host.agentsRegistry,
+    },
+  });
+  t.after(() => runtime.close());
+
+  setupConnectedPerson(dir, runtime, {
+    id: 'owner-1', role: 'owner', label: '我',
+    accountId: 'owner@im.bot', peerId: 'owner@im.wechat', token: 'tok-owner',
+  });
+  setupConnectedPerson(dir, runtime, {
+    id: 'wkb', role: 'elder', label: '王凯伯',
+    accountId: 'wkb@im.bot', peerId: 'wkb@im.wechat', token: 'tok-wkb',
+  });
+  await runtime.start();
+  await runtime.action({ action: 'hearth_member_update', personId: 'wkb', persona: 'pro_peer', pinganEnabled: false });
+  await runtime.action({ action: 'member_elevated_grant', personId: 'wkb', permanent: true });
+
+  // Member creates TWO completely independent digests via member_digest_service
+  host.setOnPrompt(async ctx => {
+    runtime.memberElevatedHost.attachAgent(ctx.agent);
+    const tool = ctx.agent.registered.find(r => r.name === 'member_digest_service');
+    const r1 = await tool.execute({
+      op: 'save_schedule',
+      slug: 'crossborder-ma',
+      title: '跨境并购早报',
+      scheduleTime: '08:00',
+      editorialPrompt: '关注跨境并购贷款项目',
+      deliverNow: true,
+    }, { agent: ctx.agent, signal: new AbortController().signal });
+    const r2 = await tool.execute({
+      op: 'save_schedule',
+      slug: 'fx-rates',
+      title: '跨境汇率晚报',
+      scheduleTime: '18:00',
+      editorialPrompt: '关注美元欧元兑人民币掉期',
+      deliverNow: true,
+    }, { agent: ctx.agent, signal: new AbortController().signal });
+    assert.equal(r1.deliveredToWechat, true);
+    assert.equal(r2.deliveredToWechat, true);
+    ctx.pushEvent('assistant/message', { turn: ctx.turn, message: { content: [{ type: 'text', text: '已为你建好早晚两份独立简报，并各自推送过首刊。' }] } });
+    ctx.pushEvent('turn/end', { turn: ctx.turn, reason: { kind: 'completed' } });
+  });
+
+  await runtime.receive('wkb', { id: 'wkb-multi-1', peerId: 'wkb@im.wechat', text: '帮我同时订早8点并购早报和晚6点汇率晚报' });
+  await waitFor(() =>
+    sentTexts.some(m => m.text.includes('跨境并购早报｜'))
+    && sentTexts.some(m => m.text.includes('跨境汇率晚报｜'))
+    && sentTexts.some(m => m.text.includes('早晚两份独立简报')),
+  );
+  await runtime.settled();
+  assert.equal(runtime.customDigests.list({ personId: 'wkb' }).length, 2);
+
+  const countWith = substr => sentTexts.filter(m => m.peerId === 'wkb@im.wechat' && m.text.includes(substr)).length;
+  assert.equal(countWith('跨境并购早报｜'), 1);
+  assert.equal(countWith('跨境汇率晚报｜'), 1);
+
+  // Advance to Day +1 08:05 Asia/Shanghai (next UTC day at 00:05Z) while 24h inbound window stays open
+  const nextMorningMs = currentTimeMs + 17 * 3600_000;
+  const shanghaiParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(nextMorningMs));
+  // Compute exact 08:05 Asia/Shanghai on nextMorningMs's Shanghai date
+  const day2_0805 = Date.parse(`${shanghaiParts}T00:05:00Z`);
+  currentTimeMs = day2_0805;
+  runtime.store.setConnection('wkb', { lastInboundAt: new Date(currentTimeMs - 3600_000).toISOString() });
+
+  await runtime.tick();
+  await runtime.tick(); // second tick must be 100% idempotent
+  await runtime.settled();
+  assert.equal(countWith('跨境并购早报｜'), 2, '08:00 digest must deliver once on Day 2');
+  assert.equal(countWith('跨境汇率晚报｜'), 1, '18:00 digest must NOT deliver at 08:05');
+
+  // Advance to Day +1 18:05 Asia/Shanghai (10 hours later)
+  currentTimeMs = day2_0805 + 10 * 3600_000;
+  runtime.store.setConnection('wkb', { lastInboundAt: new Date(currentTimeMs - 3600_000).toISOString() });
+  await runtime.tick();
+  await runtime.tick();
+  await runtime.settled();
+  assert.equal(countWith('跨境并购早报｜'), 2, '08:00 digest must NOT repeat at 18:05');
+  assert.equal(countWith('跨境汇率晚报｜'), 2, '18:00 digest must deliver once on Day 2');
+
+  // Pause only fx-rates -> Day +2 08:05 still delivers crossborder-ma, while fx-rates stays paused
+  await runtime.action({ action: 'member_custom_digest_pause', personId: 'wkb', slug: 'fx-rates' });
+  currentTimeMs = day2_0805 + 24 * 3600_000;
+  runtime.store.setConnection('wkb', { lastInboundAt: new Date(currentTimeMs - 3600_000).toISOString() });
+  await runtime.tick();
+  assert.equal(countWith('跨境并购早报｜'), 3, 'unpaused digest keeps running independently');
+
+  currentTimeMs += 10 * 3600_000;
+  runtime.store.setConnection('wkb', { lastInboundAt: new Date(currentTimeMs - 3600_000).toISOString() });
+  await runtime.tick();
+  assert.equal(countWith('跨境汇率晚报｜'), 2, 'paused digest must remain silent');
+});
