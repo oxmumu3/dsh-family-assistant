@@ -31,7 +31,7 @@ function statOrNull(path) { try { return lstatSync(path); } catch (error) { if (
 /** Describes actual member capabilities and admits a first-binding welcome.
  * The runtime owns its single-process lock, outbox, transport and status changes.
  * No family notes, messages, project contents or executor results are read here. */
-export function createMemberOnboarding({ directory, store, toolbox, access, presentations, projectExecutorAvailable = false, generalAgentAvailable = false, now = () => new Date().toISOString() } = {}) {
+export function createMemberOnboarding({ directory, store, toolbox, access, presentations, isProSeat, projectExecutorAvailable = false, generalAgentAvailable = false, now = () => new Date().toISOString() } = {}) {
   if (typeof directory !== 'string' || !directory.trim() || directory.length > 4096 || directory.includes('\0') || typeof store?.snapshot !== 'function' || typeof now !== 'function' || typeof projectExecutorAvailable !== 'boolean' || typeof generalAgentAvailable !== 'boolean') fail('INVALID_ARGUMENT', '缺少有效的欢迎服务配置。');
   const supplied = resolve(directory), before = statOrNull(supplied);
   if (before && (before.isSymbolicLink() || !before.isDirectory())) fail('UNSAFE_PATH', '欢迎记录目录不能是链接或普通文件。');
@@ -151,6 +151,9 @@ export function createMemberOnboarding({ directory, store, toolbox, access, pres
     return { personId: id, text: lines.join('\n'), examples, tools, projects };
   }
   function shortWelcomeText(id) {
+    if (typeof isProSeat === 'function' && isProSeat(id) === true) {
+      return '我是乐乐，你的微信专属 AI 助理。直接告诉我想办什么即可：\n• 订阅专属每日简报（如跨境并购、行业动态、监管跟踪），随时一句话调整口径或推送时间；\n• 深度检索公开资讯与公告、拆解长文或外文材料；\n• 生成 Word / Excel / CSV / PDF / PPT 报告直接发回微信，以及安排日程提醒。';
+    }
     const help = describe(id), personalized = help.tools.find(item => item.allowInvoke);
     if (generalAgentAvailable) {
       const ppt = help.tools.some(item => item.toolId === 'presentation' && item.allowInvoke);

@@ -295,6 +295,7 @@ export function renderHearthWorkbench(React, model) {
     setOnboardPersonId('');
     setOnboardForm({
       label: '',
+      persona: 'elder_care',
       timeZone: owner?.timeZone || 'Asia/Shanghai',
       dailyEnabled: true,
       dailyTime: '08:30',
@@ -504,8 +505,10 @@ export function renderHearthWorkbench(React, model) {
         elders.map(p => {
           const pid = idOf(p);
           const connected = connectedOf(p);
+          const hasAuthBinding = Boolean(p.binding?.accountId || p.binding?.status);
           const rowTone = toneOfRow({ ...p, connected });
           const pref = hearthMembers[pid] ?? {};
+          const isPro = Boolean(pref.elevated?.active) || ['pro_peer', 'partner'].includes(pref.persona);
           return h('div', { key: pid, className: 'line-row' },
             h('button', {
               type: 'button',
@@ -516,7 +519,8 @@ export function renderHearthWorkbench(React, model) {
               h('span', { className: 'avatar-badge ' + rowTone.cls }, String(p.label || '家').slice(0, 1)),
               h('span', { style: { minWidth: 0 } },
                 h('span', { className: 'person-name' }, p.label),
-                h('span', { className: 'person-sub' }, connected ? rowTone.label : '离线'))),
+                h('span', { className: 'person-sub' },
+                  (isPro ? '独立沙箱 · ' : '') + (connected ? rowTone.label : (p.binding?.lastError || '离线 · 待恢复连接'))))),
             h('div', { className: 'track-wrap', 'aria-label': `${p.label} 24小时窗口` },
               h('div', { className: 'track-base' },
                 rowTone.barPct > 0 && h('div', {
@@ -524,17 +528,29 @@ export function renderHearthWorkbench(React, model) {
                   style: { width: `${rowTone.barPct}%` },
                 }),
                 rowTone.barPct > 0 && h('div', { className: 'track-pin', style: { left: `${rowTone.barPct}%` } },
-                  h('span', { className: 'track-tag tabular' }, pref.pinganEnabled ? '平安问候' : '窗口截至'),
+                  h('span', { className: 'track-tag tabular' }, pref.pinganEnabled && (pref.persona || 'elder_care') === 'elder_care' ? '平安问候' : '窗口截至'),
                   h('span', { className: 'track-dot' + (rowTone.cls === 'warn' ? ' warn' : '') })))),
             h('div', { className: 'row-action-col' },
-              h('button', {
-                type: 'button',
-                className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
-                onClick: () => {
-                  setDockOpen(true);
-                  startWith(`帮我给${p.label}带句话：`);
-                },
-              }, connected ? '带句话' : '去连微信')));
+              !connected && hasAuthBinding
+                ? h('button', {
+                  type: 'button',
+                  className: 'hearth-btn hearth-btn-warm hearth-btn-sm',
+                  disabled: busyAction,
+                  onClick: () => void runControl({ action: 'connect', personId: pid }, `正在恢复${p.label}的微信连接`),
+                }, '恢复连接')
+                : h('button', {
+                  type: 'button',
+                  className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
+                  onClick: () => {
+                    if (connected) {
+                      setDockOpen(true);
+                      startWith(`帮我给${p.label}带句话：`);
+                    } else {
+                      setSelectedPersonId(pid);
+                      setActiveTab('people');
+                    }
+                  },
+                }, connected ? '带句话' : '去连微信')));
         })),
       h('div', { className: 'timeline-foot' },
         h('span', null, '注意：显示「已提交微信接口」仅表示投递成功，不代表对方手机已收到或阅读。'),
@@ -574,9 +590,21 @@ export function renderHearthWorkbench(React, model) {
             }, '先绑定我的主微信'))));
     }
 
+    const disconnectedBound = elders.filter(p => !connectedOf(p) && Boolean(p.binding?.accountId || ['expired', 'error'].includes(p.binding?.status)));
+    const allCustomDigests = Array.isArray(controlState?.customDigests)
+      ? controlState.customDigests
+      : elders.flatMap(p => hearthMembers[idOf(p)]?.customDigests ?? []);
+    const failedDigests = allCustomDigests.filter(d => d && d.enabled && d.lastStatus === 'failed');
+
     const headTitle = inboxItems.length > 0
       ? `今天有 ${inboxItems.length} 件事等你拿主意`
-      : (paused ? '服务眼下暂停着，需要时再打开' : '家里一切安稳，按你的守则运转着');
+      : paused
+        ? '服务眼下暂停着，需要时再打开'
+        : disconnectedBound.length > 0
+          ? `有 ${disconnectedBound.length} 位成员微信通道待恢复（${disconnectedBound.map(p => p.label).join('、')}）`
+          : failedDigests.length > 0
+            ? `有 ${failedDigests.length} 份定制简报上次生成异常，建议重试`
+            : '家里一切安稳，各席位连接与定制服务正常运转';
 
     return h('div', { className: 'hearth-container' },
       h('section', { className: 'hearth-head' },
@@ -610,9 +638,23 @@ export function renderHearthWorkbench(React, model) {
       // Needs-You Focus-First Sheet OR Calm Banner
       inboxItems.length > 0
         ? h('section', { className: 'inbox-sheet', 'aria-label': '待你回应或处理' }, inboxItems.map(renderInboxRow))
-        : h('div', { className: 'calm-banner', role: 'status' },
-          h('span', null, '眼下没有需要你拍板的事，家人的日常提醒与问候都在稳稳照看。'),
-          h('span', { className: 'section-sub' }, guard.inQuietHours ? '当前在夜间勿扰时段' : '')),
+        : disconnectedBound.length > 0
+          ? h('div', { className: 'calm-banner', role: 'status' },
+            h('span', null, `${disconnectedBound.map(p => p.label).join('、')} 的微信连接暂时中断（本地已有登录凭据，无需重扫二维码）。`),
+            h('button', {
+              type: 'button',
+              className: 'hearth-btn hearth-btn-primary hearth-btn-sm',
+              disabled: busyAction,
+              onClick: () => {
+                const first = disconnectedBound[0];
+                if (first) void runControl({ action: 'connect', personId: idOf(first) }, `正在恢复${first.label}的微信连接`);
+              },
+            }, '一键恢复连接'))
+          : h('div', { className: 'calm-banner', role: 'status' },
+            h('span', null, allCustomDigests.filter(d => d?.enabled).length > 0
+              ? `眼下没有待拍板事项；已启用 ${allCustomDigests.filter(d => d?.enabled).length} 份定制订阅简报，日常提醒与守护均正常照看。`
+              : '眼下没有需要你拍板的事，家人的日常提醒与问候都在稳稳照看。'),
+            h('span', { className: 'section-sub' }, guard.inQuietHours ? '当前在夜间勿扰时段' : '')),
 
       // 24h Flat Reachability Timeline
       renderFamilyBand(),
@@ -799,11 +841,18 @@ export function renderHearthWorkbench(React, model) {
     const habits = Array.isArray(selectedHearth.ownerHabits) ? selectedHearth.ownerHabits : [];
     const privacyMode = selectedElder.shareWithOwner || 'none';
     const recentMsgs = Array.isArray(selectedHearth.recentMessages) ? selectedHearth.recentMessages : [];
+    const persona = selectedHearth.persona || 'elder_care';
+    const isElderCare = persona === 'elder_care';
+    const elevated = selectedHearth.elevated ?? null;
+    const proSandboxActive = Boolean(elevated?.active);
+    const customDigests = Array.isArray(selectedHearth.customDigests) ? selectedHearth.customDigests : [];
 
     return h('div', { className: 'hearth-container' },
       h('div', { className: 'member-strip', role: 'tablist', 'aria-label': '选择家人' },
         elders.map(p => {
           const id = idOf(p);
+          const mPref = hearthMembers[id] ?? {};
+          const mPro = Boolean(mPref.elevated?.active) || ['pro_peer', 'partner'].includes(mPref.persona);
           return h('button', {
             key: id,
             type: 'button',
@@ -815,7 +864,7 @@ export function renderHearthWorkbench(React, model) {
             h('span', { className: 'avatar-badge ' + (connectedOf(p) ? 'open' : 'closed') }, String(p.label || '家').slice(0, 1)),
             h('span', null,
               h('strong', { className: 'person-name' }, p.label),
-              h('span', { className: 'person-sub' }, connectedOf(p) ? '微信已连' : '待连微信')));
+              h('span', { className: 'person-sub' }, (mPro ? '满血沙箱 · ' : '') + (connectedOf(p) ? '微信已连' : '待恢复连接'))));
         }),
         h('button', {
           type: 'button',
@@ -854,7 +903,64 @@ export function renderHearthWorkbench(React, model) {
             h('img', { src: qrDataUrl(qrSvgs[pid]), alt: `${selectedElder.label}微信登录二维码`, width: 176, height: 176 })),
           h('span', { className: 'section-sub' }, '扫码完成后点一下「刷新状态」，连接会自动记住')),
 
-        h('div', { className: 'split-cards' },
+        h('div', { className: 'split-cards', style: { marginBottom: '12px' } },
+          h('div', { className: 'cap-card' },
+            h('div', { className: 'cap-top' },
+              h('div', null,
+                h('h3', { className: 'cap-title' }, '常驻独立沙箱满血 Agent（pro_sandbox）'),
+                h('p', { className: 'cap-desc' }, '开启后在专属隔离工作区内释放完整调研、写采集脚本、订阅定制行业简报与生成报告直推微信能力，100% 物理隔离不碰主人私人目录。')),
+              switchEl(proSandboxActive, `开启${selectedElder.label}独立沙箱满血Agent`, () =>
+                void runControl(
+                  proSandboxActive
+                    ? { action: 'member_elevated_revoke', personId: pid }
+                    : { action: 'member_elevated_grant', personId: pid, permanent: true, note: '桌面端开启常驻专业沙箱' },
+                  proSandboxActive ? '已切回关怀轻沙箱模式' : '已开启常驻独立沙箱满血 Agent'
+                ))),
+            h('div', { className: 'inline-reply-row', style: { marginTop: '8px' } },
+              h('span', { className: 'section-sub' }, '席位角色：'),
+              h('div', { className: 'segmented', role: 'radiogroup', 'aria-label': '席位角色定位' },
+                [['elder_care', '长辈关怀'], ['partner', '伴侣家人'], ['pro_peer', '同窗/专业伙伴']].map(([val, lbl]) =>
+                  h('button', {
+                    key: val,
+                    type: 'button',
+                    className: 'seg-btn' + (persona === val ? ' active' : ''),
+                    disabled: busyAction,
+                    onClick: () => void runControl({ action: 'hearth_member_update', personId: pid, persona: val, ...(val !== 'elder_care' ? { pinganEnabled: false } : {}) }, `已设为「${lbl}」`),
+                  }, lbl))))),
+
+          h('div', { className: 'cap-card' },
+            h('div', { className: 'section-head', style: { marginBottom: '6px' } },
+              h('h3', { className: 'cap-title' }, '专属定制订阅与投递健康度'),
+              h('span', { className: 'pill ' + (customDigests.some(d => d.enabled) ? 'pill-open' : 'pill-muted') },
+                customDigests.some(d => d.enabled) ? `${customDigests.filter(d => d.enabled).length} 项运行中` : '待订阅')),
+            customDigests.length === 0
+              ? h('p', { className: 'cap-desc' }, '本人可直接在微信跟乐乐口述想订的简报（如“每日跨境并购日报”），乐乐会自动搭建多源采集并定时推送；此处只看运行状态，不窥探私聊。')
+              : h('div', { className: 'feed-list' },
+                customDigests.map(dig => h('div', { key: dig.slug, className: 'feed-item' },
+                  h('div', { className: 'feed-left' },
+                    h('span', { className: 'feed-time tabular' }, dig.scheduleTime || '08:00'),
+                    h('div', null,
+                      h('div', { className: 'feed-title' },
+                        dig.title,
+                        ' ',
+                        h('span', { className: 'pill ' + (dig.lastStatus === 'failed' ? 'pill-danger' : dig.enabled ? 'pill-open' : 'pill-muted') },
+                          !dig.enabled ? '已暂停' : dig.lastStatus === 'succeeded' ? `已生成 ${dig.lastGeneratedDate || ''}` : dig.lastStatus === 'failed' ? '上次异常' : '待生成')),
+                      h('div', { className: 'feed-desc' }, `${dig.scheduleDays === 'workdays' ? '工作日' : '每日'}推送 · ${dig.collectorScript ? '多源实盘采集' : '智能合成'}${dig.lastError ? ' · ' + dig.lastError : ''}`))),
+                  h('div', { className: 'btn-row' },
+                    h('button', {
+                      type: 'button',
+                      className: 'hearth-btn hearth-btn-soft hearth-btn-sm',
+                      disabled: busyAction,
+                      onClick: () => void runControl({ action: 'member_custom_digest_run', personId: pid, slug: dig.slug, deliverNow: false }, `已重新采集生成《${dig.title}》`),
+                    }, '重跑生成'),
+                    h('button', {
+                      type: 'button',
+                      className: 'hearth-btn hearth-btn-primary hearth-btn-sm',
+                      disabled: busyAction || !connected,
+                      onClick: () => void runControl({ action: 'member_custom_digest_run', personId: pid, slug: dig.slug, deliverNow: true }, `已重跑并向${selectedElder.label}微信提交《${dig.title}》`),
+                    }, '重跑并推微信'))))))),
+
+        isElderCare && h('div', { className: 'split-cards' },
           h('div', { className: 'cap-card' },
             h('div', { className: 'cap-top' },
               h('div', null,
@@ -1228,11 +1334,30 @@ export function renderHearthWorkbench(React, model) {
         h('div', { className: 'dialog-body' },
           onboardStep === 1 && h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
             h('label', { className: 'field-label' },
+              '席位类型',
+              h('select', {
+                className: 'input-rect',
+                value: onboardForm.persona || 'elder_care',
+                onChange: e => {
+                  const nextP = e.target.value;
+                  setOnboardForm(f => ({
+                    ...f,
+                    persona: nextP,
+                    shareWithOwner: nextP === 'elder_care' ? 'summary' : 'none',
+                    pinganEnabled: nextP === 'elder_care',
+                    dailyEnabled: nextP === 'elder_care',
+                  }));
+                },
+              },
+                h('option', { value: 'elder_care' }, '长辈关怀（父母长辈 · 贴心问候与防诈守护）'),
+                h('option', { value: 'pro_peer' }, '专业伙伴席位（室友/同窗/同事 · 默认开启独立沙箱满血 Agent）'),
+                h('option', { value: 'partner' }, '伴侣家人（独立沙箱满血 Agent · 共享生活与订阅）'))),
+            h('label', { className: 'field-label' },
               '平时怎么称呼她 / 他',
               h('input', {
                 type: 'text',
                 className: 'input-rect',
-                placeholder: '例如：妈妈、爸爸、外婆',
+                placeholder: onboardForm.persona === 'pro_peer' ? '例如：王凯伯、老周' : '例如：妈妈、爸爸、外婆',
                 value: onboardForm.label,
                 onChange: e => setOnboardForm(f => ({ ...f, label: e.target.value })),
               })),
@@ -1308,7 +1433,11 @@ export function renderHearthWorkbench(React, model) {
                     setOnboardPersonId(cid);
                     setSelectedPersonId(cid);
                     setOnboardStep(2);
-                    void runControl({ action: 'login', personId: cid }).then(() => requestQr(cid));
+                    const pickedPersona = onboardForm.persona || 'elder_care';
+                    void runControl({ action: 'hearth_member_update', personId: cid, persona: pickedPersona, pinganEnabled: pickedPersona === 'elder_care' })
+                      .then(() => pickedPersona !== 'elder_care' ? runControl({ action: 'member_elevated_grant', personId: cid, permanent: true, note: '新开专业沙箱席位' }) : null)
+                      .then(() => runControl({ action: 'login', personId: cid }))
+                      .then(() => requestQr(cid));
                   }
                 });
               },

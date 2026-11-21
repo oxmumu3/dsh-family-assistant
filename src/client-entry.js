@@ -139,7 +139,7 @@ window.__ModuleLoader__.load({
         const [onboardOpen, setOnboardOpen] = React.useState(false);
         const [onboardStep, setOnboardStep] = React.useState(1);
         const [onboardPersonId, setOnboardPersonId] = React.useState('');
-        const [onboardForm, setOnboardForm] = React.useState({ label: '', timeZone: 'Asia/Shanghai', dailyEnabled: true, dailyTime: '08:30', shareWithOwner: 'summary', pinganEnabled: true });
+        const [onboardForm, setOnboardForm] = React.useState({ label: '', persona: 'elder_care', timeZone: 'Asia/Shanghai', dailyEnabled: true, dailyTime: '08:30', shareWithOwner: 'summary', pinganEnabled: true });
         const [safetyOpen, setSafetyOpen] = React.useState(false);
         const [safetyCodeword, setSafetyCodeword] = React.useState('');
         const [qrSvgs, setQrSvgs] = React.useState({});

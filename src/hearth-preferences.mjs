@@ -7,6 +7,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/u;
 const ID_RE = /^[A-Za-z0-9._:-]{1,120}$/u;
 const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u;
 const PUSH_RULE_KEYS = ['relay', 'ask', 'urgent', 'digest'];
+const PERSONA_VALUES = ['elder_care', 'partner', 'pro_peer'];
 
 function fail(message) {
   throw new Error(message);
@@ -40,6 +41,7 @@ function defaultState() {
 
 function defaultMember() {
   return {
+    persona: 'elder_care',
     pinganEnabled: false,
     pinganTime: '19:30',
     codeword: '',
@@ -79,15 +81,18 @@ function validateHabits(habits) {
 }
 
 function validateMember(member) {
-  if (!own(member, ['pinganEnabled', 'pinganTime', 'codeword', 'lastPinganInboundAt', 'lastPinganDate', 'ownerHabits'])) {
+  if (!own(member, ['persona', 'pinganEnabled', 'pinganTime', 'codeword', 'lastPinganInboundAt', 'lastPinganDate', 'ownerHabits'])) {
     fail('家人守护偏好格式无效。');
   }
+  const persona = member.persona ?? 'elder_care';
+  if (!PERSONA_VALUES.includes(persona)) fail('成员席位角色取值无效。');
   if (typeof member.pinganEnabled !== 'boolean') fail('平安问候开关取值无效。');
   if (!TIME_RE.test(member.pinganTime ?? '')) fail('问候时间须为 HH:MM 格式。');
   if (typeof member.codeword !== 'string' || member.codeword.length > 40 || CONTROL_RE.test(member.codeword)) fail('家庭暗号须在 40 字以内。');
   if (member.lastPinganInboundAt !== null && !validInstant(member.lastPinganInboundAt)) fail('上次问平安时间格式无效。');
   if (member.lastPinganDate !== null && !DATE_RE.test(member.lastPinganDate)) fail('上次问平安日期格式无效。');
   return {
+    persona,
     pinganEnabled: member.pinganEnabled,
     pinganTime: member.pinganTime,
     codeword: member.codeword.trim(),
@@ -198,7 +203,7 @@ export function createHearthPreferences({ directory, now = () => new Date().toIS
     },
     updateMember(personId, patch) {
       if (!ID_RE.test(personId ?? '')) fail('家人标识无效。');
-      if (!own(patch, ['pinganEnabled', 'pinganTime', 'codeword', 'lastPinganInboundAt', 'lastPinganDate'])) {
+      if (!own(patch, ['persona', 'pinganEnabled', 'pinganTime', 'codeword', 'lastPinganInboundAt', 'lastPinganDate'])) {
         fail('家人守护偏好参数无效。');
       }
       const saved = mutate(s => {

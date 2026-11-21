@@ -142,6 +142,21 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
       }
     }
   }
+  async function recoverExistingAuth(s, epoch, resumeToken) {
+    if (closed || s.epoch !== epoch) return false;
+    const file = authPath(s);
+    if (!fs.existsSync(file)) return false;
+    try {
+      const auth = validAuth(JSON.parse(fs.readFileSync(file, 'utf8')));
+      const nextEpoch = ++s.epoch;
+      const controller = s.controller = new AbortController();
+      if (await bind(s, auth, nextEpoch, controller.signal, resumeToken)) {
+        s.task = pollLoop(s, nextEpoch, controller.signal);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
   async function loginLoop(s, qrcode, epoch, signal, resumeToken) {
     const deadline = Date.now() + Math.min(Math.max(qrTimeoutMs, 1), 300_000);
     const expiry = setTimeout(() => {
@@ -162,7 +177,12 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
           if (await bind(s, validAuth(JSON.parse(fs.readFileSync(file, 'utf8'))), epoch, signal, resumeToken)) { clearTimeout(expiry); await pollLoop(s, epoch, signal); }
           return;
         }
-        if (result.status === 'expired' || result.status === 'verify_code_blocked') { status(s, 'expired', '二维码已失效，请重新扫码'); return; }
+        if (result.status === 'expired' || result.status === 'verify_code_blocked') {
+          clearTimeout(expiry);
+          if (await recoverExistingAuth(s, epoch, resumeToken)) return;
+          status(s, 'expired', '二维码已失效，请重新扫码');
+          return;
+        }
         if (result.status === 'need_verifycode') {
           s.verifyCode = undefined; status(s, 'need_verification', '请输入手机微信显示的数字');
           await new Promise(resolve => { s.wakeVerify = resolve; if (signal.aborted) resolve(); });
@@ -172,9 +192,17 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
         else if (result.status !== 'wait') throw new Error('微信登录状态暂不支持');
         await delay(qrIntervalMs, signal);
       }
-      if (s.epoch === epoch && !closed) status(s, 'expired', '二维码已超时，请重新扫码');
+      if (s.epoch === epoch && !closed) {
+        clearTimeout(expiry);
+        if (await recoverExistingAuth(s, epoch, resumeToken)) return;
+        status(s, 'expired', '二维码已超时，请重新扫码');
+      }
     } catch {
-      if (s.epoch === epoch && !closed) status(s, signal.aborted && Date.now() >= deadline ? 'expired' : 'error', '微信登录未完成，请重新扫码');
+      if (s.epoch === epoch && !closed) {
+        clearTimeout(expiry);
+        if (await recoverExistingAuth(s, epoch, resumeToken)) return;
+        status(s, signal.aborted && Date.now() >= deadline ? 'expired' : 'error', '微信登录未完成，请重新扫码');
+      }
     } finally { clearTimeout(expiry); s.verifyCode = undefined; s.wakeVerify = null; }
   }
   async function sendOutboundMedia(route, { clientId = randomUUID(), signal, authorize = () => true } = {}, { invalid, invalidMessage, dispatch }) {

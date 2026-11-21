@@ -119,16 +119,18 @@ function journalFor(directory){
 
 const operationKeys={status:['action'],preview_brief:['action'],history_page:['action','personId','before','limit','query'],library_query:['action','personId','before','limit','query','date','kind'],draft_management:['action','text','contextId'],send_message:['action','personId','text'],confirm_management:['action','cardId','revision'],
  important_update:['action','incidentId','status'],important_reply:['action','incidentId','text'],important_alert:['action','enabled'],family_reply:['action','requestId','text'],workflow_reply:['action','request','status','note'],dismiss_relay:['action','relayId'],service_request:['action','text','requestId'],service_confirm:['action','draftId','revision'],reminder:['action','op','text','dueAt','repeat','reminderId'],
- add_person:['action','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
+ add_person:['action','label','persona','proSandbox','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
  update_person:['action','personId','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
- bind_qr:['action','personId'],
+ bind_qr:['action','personId','forceRebind'],
  verify_login:['action','personId','code'],
  connect:['action','personId'],
  disconnect:['action','personId'],
  member_reminder:['action','personId','op','text','dueAt','repeat','time','reminderId','date','skip'],
  tool_manage:['action','op','personId','toolId','resource','allowInvoke','schedule','input','expectedRevision','workspaceId','query'],
  access_manage:['action','op','personId','workspaceIds','capabilities'],
- hearth_manage:['action','op','personId','pinganEnabled','pinganTime','codeword','urgent','relay','ask','digest','quietHoursEnabled','quietStart','quietEnd','habitId','text'],
+ elevated_manage:['action','op','personId','permanent','durationHours','note'],
+ custom_digest_manage:['action','op','personId','slug','title','scheduleTime','scheduleDays','timeZone','template','keywords','collectorScript','editorialPrompt','model','deliverNow'],
+ hearth_manage:['action','op','personId','persona','pinganEnabled','pinganTime','codeword','urgent','relay','ask','digest','quietHoursEnabled','quietStart','quietEnd','habitId','text'],
  system_manage:['action','op','ownerBriefEnabled','ownerBriefTime','timeZone','provider','model']};
 function checkArgs(args){
  if(!plain(args)||!Object.hasOwn(operationKeys,args.action)||Object.keys(args).some(key=>!operationKeys[args.action].includes(key)))fail('不支持的操作或参数。','owner_management_invalid');
@@ -148,7 +150,9 @@ function checkArgs(args){
  if(args.action==='member_reminder'&&(!['list','add','cancel','skip_once'].includes(args.op)||args.op==='add'&&(!content(args.text,1000)||!string(args.dueAt,80))||['cancel','skip_once'].includes(args.op)&&!string(args.reminderId,100)||args.repeat!==undefined&&!['once','daily'].includes(args.repeat)||args.time!==undefined&&!string(args.time,10)||args.skip!==undefined&&typeof args.skip!=='boolean'))fail('请说明成员提醒操作、内容、时间和提醒编号。','owner_management_invalid');
  if(args.action==='tool_manage'&&(!['catalog','assignments','assign','invoke','digest_sources'].includes(args.op)||['assignments','assign','invoke'].includes(args.op)&&!string(args.personId,100)||['assign','invoke'].includes(args.op)&&!string(args.toolId,80)||args.op==='assign'&&!plain(args.resource)||args.allowInvoke!==undefined&&typeof args.allowInvoke!=='boolean'||args.schedule!==undefined&&args.schedule!==null&&!plain(args.schedule)||args.input!==undefined&&!plain(args.input)||args.expectedRevision!==undefined&&(!Number.isSafeInteger(args.expectedRevision)||args.expectedRevision<1)||args.workspaceId!==undefined&&!string(args.workspaceId,240)))fail('请说明工具管理操作及完整参数。','owner_management_invalid');
  if(args.action==='access_manage'&&(!['list','grant','revoke'].includes(args.op)||['grant','revoke'].includes(args.op)&&!string(args.personId,100)||args.op==='grant'&&(!Array.isArray(args.workspaceIds)||!Array.isArray(args.capabilities))))fail('请说明项目权限操作（list/grant/revoke）、成员与权限范围。','owner_management_invalid');
- if(args.action==='hearth_manage'&&(!['member_update','guard_update','habit_save','habit_delete'].includes(args.op)||['member_update','habit_save','habit_delete'].includes(args.op)&&!string(args.personId,100)||args.op==='habit_save'&&!content(args.text,240)||args.op==='habit_delete'&&!string(args.habitId,120)))fail('请说明家庭守护操作及成员或规则参数。','owner_management_invalid');
+ if(args.action==='elevated_manage'&&(!['list','grant','revoke'].includes(args.op)||['grant','revoke'].includes(args.op)&&!string(args.personId,100)||args.op==='list'&&args.personId!==undefined&&!string(args.personId,100)||args.permanent!==undefined&&typeof args.permanent!=='boolean'||args.durationHours!==undefined&&(!Number.isSafeInteger(args.durationHours)||args.durationHours<1||args.durationHours>168)||args.note!==undefined&&!content(args.note,500)))fail('请说明独立沙箱权限操作（list/grant/revoke）、目标成员、常驻(permanent)或有效期小时数（1-168）与备注。','owner_management_invalid');
+ if(args.action==='custom_digest_manage'&&(!['list','save','run_now','pause'].includes(args.op)||['save','run_now','pause'].includes(args.op)&&!string(args.personId,100)||args.op==='save'&&(!string(args.slug,50)||!string(args.title,120))))fail('请说明定制简报操作（list/save/run_now/pause）、目标成员及必要参数。','owner_management_invalid');
+ if(args.action==='hearth_manage'&&(!['member_update','guard_update','habit_save','habit_delete'].includes(args.op)||['member_update','habit_save','habit_delete'].includes(args.op)&&!string(args.personId,100)||args.persona!==undefined&&!['elder_care','partner','pro_peer'].includes(args.persona)||args.op==='habit_save'&&!content(args.text,240)||args.op==='habit_delete'&&!string(args.habitId,120)))fail('请说明家庭守护操作及成员或规则参数。','owner_management_invalid');
  if(args.action==='system_manage'&&!['configure','start','pause','send_brief'].includes(args.op))fail('请说明系统操作（configure/start/pause/send_brief）。','owner_management_invalid');
  if(args.contextId!==undefined&&(!string(args.contextId,120)||!/^(?:card|person):[A-Za-z0-9_-]{1,100}$/.test(args.contextId)))fail('草稿对象参数无效。','owner_management_invalid');
  if(args.action==='confirm_management'&&(!string(args.cardId,100)||!Number.isSafeInteger(args.revision)||args.revision<1))fail('确认需要当前草稿标识和精确版本。','owner_management_invalid');
@@ -299,6 +303,10 @@ export function createOwnerManagementTool({runtime,directory}={}){
    const beforeIds=new Set((runtime.status()?.people??[]).map(p=>p.id));
    const state=await runtime.action({action:'add_person',role:'elder',label:args.label.trim(),...(args.timeZone?{timeZone:args.timeZone}:{}),...(args.interests?{interests:args.interests}:{}),...(args.notes!==undefined?{notes:args.notes}:{}),...(args.shareWithOwner?{shareWithOwner:args.shareWithOwner}:{}),...(args.dailyEnabled!==undefined?{dailyEnabled:args.dailyEnabled}:{}),...(args.dailyTime?{dailyTime:args.dailyTime}:{})});await guard();
    const person=(state?.people??[]).find(p=>!beforeIds.has(p.id))||(state?.people??[]).filter(p=>p.label===args.label.trim()).at(-1);
+   if(person?.id){
+    if(args.persona){await runtime.action({action:'hearth_member_update',personId:person.id,persona:args.persona});}
+    if(args.proSandbox===true||args.persona==='pro_peer'){await runtime.action({action:'member_elevated_grant',personId:person.id,permanent:true,note:'常驻独立沙箱专业席位'});}
+   }
    return{status:'completed',personId:person?.id??null,label:person?.label??args.label.trim(),text:`已新增成员「${person?.label??args.label.trim()}」（personId: ${person?.id??'unknown'}）。如需微信扫码绑定，请紧接着调用 bind_qr。`};
   }
   if(args.action==='update_person'){
@@ -308,7 +316,10 @@ export function createOwnerManagementTool({runtime,directory}={}){
   }
   if(args.action==='bind_qr'){
    if(typeof runtime.ownerBindQrForSession!=='function')fail('微信扫码绑定接口尚未就绪。');
-   const res=await runtime.ownerBindQrForSession({sessionId,callId,personId:args.personId,signal});await guard();
+   const res=await runtime.ownerBindQrForSession({sessionId,callId,personId:args.personId,forceRebind:args.forceRebind===true,signal});await guard();
+   if(res.status==='already_connected'||res.status==='reconnected'){
+    return{...res,text:res.text};
+   }
    const text=res.wechatImageStatus==='api_accepted'
     ?`已为「${res.label}」生成微信绑定二维码并直接发送到你的微信聊天图片中（5分钟内有效）。请转发给${res.label}或当面扫码确认；扫码成功后我会自动发消息通知你。若手机提示输入数字验证码，直接把数字发给我即可。`
     :`已为「${res.label}」启动微信扫码绑定（5分钟内有效），二维码地址：${res.qrUrl}（图片直推状态：${res.wechatImageStatus}）。`;
@@ -371,11 +382,41 @@ export function createOwnerManagementTool({runtime,directory}={}){
    const value=await runtime.action({action:'family_access_revoke',personId:args.personId});await guard();
    return{policy:value,text:'已收回该成员的项目访问权限。'};
   }
+  if(args.action==='elevated_manage'){
+   if(args.op==='list'){
+    const value=await runtime.action({action:'member_elevated_list',...(args.personId?{personId:args.personId}:{})});await guard();
+    return{...value,text:JSON.stringify(value)};
+   }
+   if(args.op==='grant'){
+    const value=await runtime.action({action:'member_elevated_grant',personId:args.personId,...(args.permanent!==undefined?{permanent:args.permanent}:{}),...(args.durationHours!==undefined?{durationHours:args.durationHours}:{}),...(args.note!==undefined?{note:args.note}:{})});await guard();
+    const g=value?.grant;
+    const durDesc=g?.permanent?'常驻专业沙箱模式（长期有效）':`有效期 ${g?.durationHours??args.durationHours??72} 小时，到期时间 ${g?.expiresAt??''}`;
+    return{...value,text:`已为该成员开启独立沙箱满血 Agent 席位（${durDesc}，隔离工作区 ${g?.workspacePath??''}）。他现在可以直接在微信里跟乐乐提业务需求、深度检索公开信源、建立并随时调教定制简报、生成报告文件直发微信；你随时可用 elevated_manage(op="revoke") 收回。`};
+   }
+   const value=await runtime.action({action:'member_elevated_revoke',personId:args.personId});await guard();
+   return{...value,text:'已收回该成员的独立沙箱满血权限，恢复关怀轻沙箱模式；此前已保存的每日定制简报仍会继续按计划运行。'};
+  }
+  if(args.action==='custom_digest_manage'){
+   if(args.op==='list'){
+    const value=await runtime.action({action:'member_custom_digest_list',...(args.personId?{personId:args.personId}:{})});await guard();
+    return{...value,text:JSON.stringify(value)};
+   }
+   if(args.op==='save'){
+    const value=await runtime.action({action:'member_custom_digest_save',personId:args.personId,slug:args.slug,title:args.title,...(args.scheduleTime?{scheduleTime:args.scheduleTime}:{}),...(args.scheduleDays?{scheduleDays:args.scheduleDays}:{}),...(args.timeZone?{timeZone:args.timeZone}:{}),...(args.template?{template:args.template}:{}),...(args.keywords?{keywords:args.keywords}:{}),...(args.collectorScript?{collectorScript:args.collectorScript}:{}),...(args.editorialPrompt?{editorialPrompt:args.editorialPrompt}:{}),...(args.model?{model:args.model}:{}),...(args.deliverNow!==undefined?{deliverNow:args.deliverNow}:{})});await guard();
+    return{...value.digestResult,text:`已保存并生成定制简报「${args.title}」（${value.digestResult?.bytes??0} 字节，推送状态：${value.digestResult?.deliveryStatus??'未立即推送'}）。`};
+   }
+   if(args.op==='run_now'){
+    const value=await runtime.action({action:'member_custom_digest_run',personId:args.personId,...(args.slug?{slug:args.slug}:{}),...(args.deliverNow!==undefined?{deliverNow:args.deliverNow}:{})});await guard();
+    return{...value.digestResult,text:`已重新采集并生成定制简报「${value.digestResult?.slug??''}」（${value.digestResult?.bytes??0} 字节，推送状态：${value.digestResult?.deliveryStatus??'未立即推送'}）。`};
+   }
+   await runtime.action({action:'member_custom_digest_pause',personId:args.personId,...(args.slug?{slug:args.slug}:{})});await guard();
+   return{status:'completed',personId:args.personId,text:'已暂停该成员的定制简报定时推送。'};
+  }
   if(args.action==='hearth_manage'){
    if(args.op==='member_update'){
-    const patch=Object.fromEntries(['pinganEnabled','pinganTime','codeword'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
+    const patch=Object.fromEntries(['persona','pinganEnabled','pinganTime','codeword'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
     await runtime.action({action:'hearth_member_update',personId:args.personId,...patch});await guard();
-    return{status:'completed',personId:args.personId,text:'已更新该成员的守护与平安问候设置。'};
+    return{status:'completed',personId:args.personId,text:'已更新该成员的角色画像与守护设置。'};
    }
    if(args.op==='guard_update'){
     const patch=Object.fromEntries(['urgent','relay','ask','digest','quietHoursEnabled','quietStart','quietEnd'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
@@ -399,7 +440,7 @@ export function createOwnerManagementTool({runtime,directory}={}){
    return{status:'completed',text:{start:'家庭助手服务已启动。',pause:'家庭助手服务已暂停。',send_brief:'已触发发送今日家庭简报。'}[args.op]};
   }
  }
- return{name:'family_assistant',description:'乐乐已验证 Owner 原生会话的家庭全权管理工具（与电脑端工作台 1:1 对齐最高权限）。先 status 获得成员ID。Owner可在当前微信直接完成电脑工作台的全部管理操作：add_person 新增家庭席位、update_person 修改成员资料与日报设置、bind_qr 生成微信绑定二维码并直接以聊天图片发回Owner微信（5分钟有效，对方扫码后会自动通知）、verify_login 提交登录数字验证码、connect/disconnect 重连或断开通道、member_reminder 管理家人提醒、tool_manage 查看目录/发现日报来源(digest_sources)/分配工具(assign)/调用工具(invoke)、access_manage 授权或收回成员项目权限、hearth_manage 设置平安问候/守护勿扰/照料习惯、system_manage 配置简报或启动暂停。原有能力全部保留：send_message 直发家人消息（仅限真实当前Owner原话授权；已有统一deliveryTarget时不得重复发送）、library_query 查家人资料库、history_page 查电脑保存的归档、draft_management/confirm_management 整理与确认安排、important_update/reply/alert 处理重要事项、family_reply 答复家人托问、workflow_reply 答复工具需求、dismiss_relay 销掉转告、service_request/service_confirm 开通或调整服务、reminder 管理主人自己的提醒。api_accepted 仅表示微信API接受，不代表手机收到；历史归档不等于微信全部历史。',parameters:{type:'object',additionalProperties:false,required:['action'],properties:{action:{type:'string',enum:Object.keys(operationKeys)},personId:{type:'string',maxLength:100},text:{type:'string',maxLength:6000},contextId:{type:'string',maxLength:120},cardId:{type:'string',maxLength:100},draftId:{type:'string',maxLength:100},revision:{type:'integer',minimum:1},date:{type:'string',maxLength:40},kind:{type:'string',enum:['diary','fact','preference','task','file']},before:{type:'string',pattern:'^(?:fh1_[A-Za-z0-9_-]{43}|entry-[a-f0-9]{48})$'},limit:{type:'integer',minimum:1,maximum:100},query:{type:'string',maxLength:200},incidentId:{type:'string',maxLength:100},status:{type:'string',maxLength:20},enabled:{type:'boolean'},requestId:{type:'string',maxLength:512},request:{type:'string',pattern:'^wf-[a-f0-9]{12}$'},relayId:{type:'string',maxLength:100},note:{type:'string',maxLength:2000},op:{type:'string',enum:['list','add','cancel','skip_once','catalog','assignments','assign','invoke','digest_sources','grant','revoke','member_update','guard_update','habit_save','habit_delete','configure','start','pause','send_brief']},dueAt:{type:'string',maxLength:80},repeat:{type:'string',enum:['once','daily']},reminderId:{type:'string',maxLength:100},label:{type:'string',maxLength:80},timeZone:{type:'string',maxLength:100},interests:{type:'array',maxItems:20,items:{type:'string',maxLength:100}},notes:{type:'string',maxLength:2000},shareWithOwner:{type:'string',enum:['none','summary','full']},dailyEnabled:{type:'boolean'},dailyTime:{type:'string',maxLength:10},code:{type:'string',maxLength:20},time:{type:'string',maxLength:10},skip:{type:'boolean'},toolId:{type:'string',maxLength:80},resource:{type:'object',additionalProperties:true},allowInvoke:{type:'boolean'},schedule:{type:'object',additionalProperties:true},input:{type:'object',additionalProperties:true},expectedRevision:{type:'integer',minimum:1},workspaceId:{type:'string',maxLength:240},workspaceIds:{type:'array',maxItems:100,items:{type:'string',maxLength:240}},capabilities:{type:'array',maxItems:10,items:{type:'string',enum:['read','task','write']}},pinganEnabled:{type:'boolean'},pinganTime:{type:'string',maxLength:10},codeword:{type:'string',maxLength:40},urgent:{type:'boolean'},relay:{type:'boolean'},ask:{type:'boolean'},digest:{type:'boolean'},quietHoursEnabled:{type:'boolean'},quietStart:{type:'string',maxLength:10},quietEnd:{type:'string',maxLength:10},habitId:{type:'string',maxLength:120},ownerBriefEnabled:{type:'boolean'},ownerBriefTime:{type:'string',maxLength:10},provider:{type:'string',maxLength:120},model:{type:'string',maxLength:200}}},output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>{
+ return{name:'family_assistant',description:'乐乐已验证 Owner 原生会话的家庭全权管理工具（与电脑端工作台 1:1 对齐最高权限）。先 status 获得成员ID。Owner可在当前微信直接完成电脑工作台的全部管理操作：add_person 新增席位（可设 persona="elder_care"|"partner"|"pro_peer" 与 proSandbox=true）、update_person 修改成员资料与日报设置、bind_qr 生成微信绑定二维码并直接以聊天图片发回Owner微信（若已连接则自动防误杀保护，换绑传 forceRebind=true）、verify_login 提交登录数字验证码、connect/disconnect 重连或断开通道、member_reminder 管理成员提醒、tool_manage 查看目录/发现日报来源(digest_sources)/分配工具(assign)/调用工具(invoke)、access_manage 授权或收回成员项目权限、elevated_manage 为成员开启/查看/收回独立沙箱满血 Agent 模式（grant 默认常驻 permanent=true，也可设 1-168 小时）、custom_digest_manage 查看/配置/试跑推送/暂停成员专属定制简报（支持 template="crossborder_ma"|"topic_radar"）、hearth_manage 设置角色画像/平安问候/守护勿扰/照料习惯、system_manage 配置简报或启动暂停。原有能力全部保留：send_message 直发成员消息、library_query 查资料库、history_page 查电脑保存的归档、draft_management/confirm_management 整理与确认安排、important_update/reply/alert 处理重要事项、family_reply 答复托问、workflow_reply 答复工具需求、dismiss_relay 销掉转告、service_request/service_confirm 开通或调整服务、reminder 管理主人自己的提醒。api_accepted 仅表示微信API接受，不代表手机收到；历史归档不等于微信全部历史。',parameters:{type:'object',additionalProperties:false,required:['action'],properties:{action:{type:'string',enum:Object.keys(operationKeys)},personId:{type:'string',maxLength:100},text:{type:'string',maxLength:6000},contextId:{type:'string',maxLength:120},cardId:{type:'string',maxLength:100},draftId:{type:'string',maxLength:100},revision:{type:'integer',minimum:1},date:{type:'string',maxLength:40},kind:{type:'string',enum:['diary','fact','preference','task','file']},before:{type:'string',pattern:'^(?:fh1_[A-Za-z0-9_-]{43}|entry-[a-f0-9]{48})$'},limit:{type:'integer',minimum:1,maximum:100},query:{type:'string',maxLength:200},incidentId:{type:'string',maxLength:100},status:{type:'string',maxLength:20},enabled:{type:'boolean'},requestId:{type:'string',maxLength:512},request:{type:'string',pattern:'^wf-[a-f0-9]{12}$'},relayId:{type:'string',maxLength:100},note:{type:'string',maxLength:2000},permanent:{type:'boolean'},proSandbox:{type:'boolean'},forceRebind:{type:'boolean'},deliverNow:{type:'boolean'},persona:{type:'string',enum:['elder_care','partner','pro_peer']},slug:{type:'string',maxLength:50},title:{type:'string',maxLength:120},scheduleTime:{type:'string',maxLength:10},scheduleDays:{type:'string',enum:['daily','workdays']},template:{type:'string',enum:['crossborder_ma','topic_radar']},keywords:{type:'array',maxItems:10,items:{type:'string',maxLength:80}},collectorScript:{type:'string',maxLength:512},editorialPrompt:{type:'string',maxLength:12000},durationHours:{type:'integer',minimum:1,maximum:168},op:{type:'string',enum:['list','add','cancel','skip_once','catalog','assignments','assign','invoke','digest_sources','grant','revoke','save','run_now','member_update','guard_update','habit_save','habit_delete','configure','start','pause','send_brief']},dueAt:{type:'string',maxLength:80},repeat:{type:'string',enum:['once','daily']},reminderId:{type:'string',maxLength:100},label:{type:'string',maxLength:80},timeZone:{type:'string',maxLength:100},interests:{type:'array',maxItems:20,items:{type:'string',maxLength:100}},notes:{type:'string',maxLength:2000},shareWithOwner:{type:'string',enum:['none','summary','full']},dailyEnabled:{type:'boolean'},dailyTime:{type:'string',maxLength:10},code:{type:'string',maxLength:20},time:{type:'string',maxLength:10},skip:{type:'boolean'},toolId:{type:'string',maxLength:80},resource:{type:'object',additionalProperties:true},allowInvoke:{type:'boolean'},schedule:{type:'object',additionalProperties:true},input:{type:'object',additionalProperties:true},expectedRevision:{type:'integer',minimum:1},workspaceId:{type:'string',maxLength:240},workspaceIds:{type:'array',maxItems:100,items:{type:'string',maxLength:240}},capabilities:{type:'array',maxItems:10,items:{type:'string',enum:['read','task','write']}},pinganEnabled:{type:'boolean'},pinganTime:{type:'string',maxLength:10},codeword:{type:'string',maxLength:40},urgent:{type:'boolean'},relay:{type:'boolean'},ask:{type:'boolean'},digest:{type:'boolean'},quietHoursEnabled:{type:'boolean'},quietStart:{type:'string',maxLength:10},quietEnd:{type:'string',maxLength:10},habitId:{type:'string',maxLength:120},ownerBriefEnabled:{type:'boolean'},ownerBriefTime:{type:'string',maxLength:10},provider:{type:'string',maxLength:120},model:{type:'string',maxLength:200}}},output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>{
   const text=typeof value?.text==='string'?value.text:JSON.stringify(value);
   const reference=wireServiceDraft(value?.serviceDraft);
   if(!reference)return[{type:'text',text}];

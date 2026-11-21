@@ -2,7 +2,7 @@ import {installOwnerMobileControl} from './src/owner-mobile-control.mjs';
 import {homedir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createRuntime} from './src/runtime.mjs';
-import {createHostResponder,modelCatalog} from './src/model.mjs';
+import {createHostResponder,createCustomDigestSynthesizer,modelCatalog} from './src/model.mjs';
 import {createHttpHandler,registerHostRoutes} from './src/http.mjs';
 import {createHostWorkbenchPlanner} from './src/workbench-model.mjs';
 import {createHostOwnerPlanner} from './src/owner-commands.mjs';
@@ -36,6 +36,7 @@ export function apply(ctx,config={}){
   let runtime,mobileControl;
   const ownerPromptScope=createOwnerPromptScope({section:ownerPromptSection(),onStateChange:change=>{try{recordScope(storageDir,change);}catch{}}});
   const respond=createHostResponder(ctx,()=>runtime.store.snapshot().config);
+  const llmSynthesize=createCustomDigestSynthesizer(ctx,()=>runtime.store.snapshot().config);
   const planOwner=createHostOwnerPlanner(ctx,()=>runtime.store.snapshot().config);
   const planWorkbench=createHostWorkbenchPlanner(ctx,()=>runtime.store.snapshot().config);
   const planHarness=createHostHarnessPlanner(ctx,()=>runtime.store.snapshot().config);
@@ -65,7 +66,7 @@ export function apply(ctx,config={}){
       memberNativeRuntime=createNativeMemberRuntime({createAgent:createHostMemberSessionFactory({agents:nativeAgents,sessionController:nativeSessions,cwd:storageDir+'-member-workspace'})});
     }
   }catch{memberNativeRuntime=null;}
-  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,ownerMobileControl:{handle:args=>mobileControl?.handle(args),hasPendingTask:id=>mobileControl?.hasPendingTask(id)},toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
+  runtime=createRuntime({directory:storageDir,respond,planOwner,planWorkbench,planHarness,generatePresentation,extractMaterial:extractPresentationMaterial,ownerAgent,ownerMobileControl:{handle:args=>mobileControl?.handle(args),hasPendingTask:id=>mobileControl?.hasPendingTask(id)},toolExecutors,weatherSearch:weather.search,familyProjectExecutor,ownerTaskArtifacts,workspaceCurrentSync,digestSources,memberAgent,memberReportFeedback,classifyImportantEvent,transcribeVoice,memberNativeRuntime,llmSynthesize,elevatedControllers:{getWorkspaceController:()=>ctx.get('workspaceController',false),getSessionController:()=>ctx.get('sessionController',false),getAgents:()=>ctx.get('agents',false)},ownerPromptStatus:sessionId=>ownerPromptScope.status().find(row=>row.sessionId===sessionId)??null,memberPublicTools:()=>createMemberPublicTools({weatherSearch:weather.search,weatherExecute:weather.execute})});
   mobileControl=installOwnerMobileControl({ctx,resolveTask:runtime.resolveOwnerMobileTask,sendNotice:runtime.sendOwnerMobileNotice});
   let unregister,disposal;
   const dispose=()=>disposal??=(async()=>{
@@ -129,13 +130,13 @@ export function apply(ctx,config={}){
   // there is no second registration of the same section name, so a duplicate-name
   // probe can never race the real one and produce a false negative.
   if(scopedToolHost){
-    offAgentCreated=ctx.on('agent/created',({agent}={})=>{try{registerOwnerTools(agent);}catch{}try{void ownerPromptScope.attach(agent);}catch{}});
-    offAgentDisposed=ctx.on('agent/disposed',({agent}={})=>{try{releaseOwnerTools(agent);}catch{}try{void ownerPromptScope.detach(agent?.id);}catch{}});
+    offAgentCreated=ctx.on('agent/created',({agent}={})=>{try{registerOwnerTools(agent);}catch{}try{runtime.memberElevatedHost?.attachAgent?.(agent);}catch{}try{void ownerPromptScope.attach(agent);}catch{}});
+    offAgentDisposed=ctx.on('agent/disposed',({agent}={})=>{try{releaseOwnerTools(agent);}catch{}try{runtime.memberElevatedHost?.detachAgent?.(agent);}catch{}try{void ownerPromptScope.detach(agent?.id);}catch{}});
     // Agents created before this plugin loaded still need their Owner tools,
     // and their scope is the only honest place to run the prompt probe: no
     // synthetic identity, no second agent.
     let existing=[];try{existing=agentRegistry.list()??[];}catch{}
-    for(const agent of Array.isArray(existing)?existing:[]){try{registerOwnerTools(agent);}catch{}try{void ownerPromptScope.attach(agent);}catch{}}
+    for(const agent of Array.isArray(existing)?existing:[]){try{registerOwnerTools(agent);}catch{}try{runtime.memberElevatedHost?.attachAgent?.(agent);}catch{}try{void ownerPromptScope.attach(agent);}catch{}}
   }else{
     // A Host without scoped registration keeps the previous global behaviour.
     for(const definition of ownerTools)ctx.tools.register(definition);

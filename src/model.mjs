@@ -15,7 +15,7 @@ const streamError=(message,options)=>{throw new ModelStreamError(message,options
 export const familyModelControls=config=>['deepseek-account','deepseek-official'].includes(config?.provider)&&['deepseek-flash','deepseek-pro'].includes(config?.model)?{reasoningEffort:'off'}:{};
 export const modelFailureReply=error=>error instanceof ModelStreamError||error instanceof ModelReplyFormatError?'刚才回复时出了点问题，你的消息我已经收到了。这次没有执行任何操作，请稍后再试。':null;
 
-async function readModelText(llm,options,signal){
+async function readModelText(llm,options,signal,{maxChars=12000}={}){
   const blocks=new Map(),sealed=new Set();let terminal,total=0;
   try{for await(const chunk of llm.stream(options)){
     signal?.throwIfAborted();
@@ -28,7 +28,7 @@ async function readModelText(llm,options,signal){
       if(typeof chunk.block.text!=='string'||!Number.isSafeInteger(chunk.index)||chunk.index<0)streamError('模型流格式不正确，未执行操作。');
       total-=blocks.get(chunk.index)?.length??0;blocks.set(chunk.index,chunk.block.text);total+=chunk.block.text.length;sealed.add(chunk.index);
     }
-    if(total>12000)streamError('模型回复过长，未执行操作。');
+    if(total>maxChars)streamError('模型回复过长，未执行操作。');
     if(chunk.type==='finish'){
       const reason=typeof chunk.reason==='string'?chunk.reason:chunk.reason?.kind;
       if(!['stop','max-tokens'].includes(reason)||terminal)streamError(`模型回复未完整结束（${['error','aborted','tool-calls'].includes(reason)?reason:'unknown'}），未执行操作。`);
@@ -141,6 +141,52 @@ export function createHostResponder(ctx,readConfig){
       const output=await readModelText(llm,{...controls,system:recoverySystem,messages:[{role:'user',content:[{type:'text',text:JSON.stringify({label:person.label,history:payload.history.slice(-12),request:text})}]}],maxTokens:1200},signal);
       return conversationalReply(output);
     }catch(error){signal?.throwIfAborted();throw error instanceof ModelStreamError?error:new ModelStreamError('模型恢复回复未通过校验，未执行操作。');}
+  };
+}
+
+export function createCustomDigestSynthesizer(ctx,readConfig){
+  return async({title,today,timeZone,editorialPrompt,rawMaterial='',recentHeadlines=[],model:preferredModel=null,signal}={})=>{
+    signal?.throwIfAborted();
+    const llm=ctx.get('llm'),config=readConfig();
+    if(!llm?.stream||!config.provider||!config.model)throw new Error('请先在家庭助手工作台选择 Harness 模型。');
+    const system=[
+      `你是专属定制简报《${title}》的主笔编辑。今天是 ${today}（时区 ${timeZone}）。`,
+      '硬性事实准则：严格依据 rawMaterial 中提供的真实采集素材与 editorialPrompt 编辑要求成稿；每条交易或动态必须能对应到 rawMaterial 中的真实企业、事件与来源媒体/链接，若某细分板块今日在素材中暂无新增，直接如实写“今日暂无新增可核实动态”，严禁凭记忆编造交易、金额或链接。',
+      '排版与互动准则：尽量避免与 recentHeadlines 最近已发条目重复；输出适合微信直接阅读的清晰分段纯文本（不用 Markdown 表格或代码块，重点字段加粗或用竖线分隔）；文末固定附一行简短互动提示（例如：💡 回复交易序号可展开看架构与融资详拆；直接发消息可随时调整关注方向或推送时间），总字数控制在 4500 字以内。',
+    ].join('\n');
+    const userPayload=JSON.stringify({
+      title,
+      today,
+      timeZone,
+      editorialPrompt:String(editorialPrompt??'').slice(0,12000),
+      recentHeadlines:(recentHeadlines??[]).slice(-20),
+      rawMaterial:String(rawMaterial??'').slice(0,44000),
+    });
+    const candidateModels=[];
+    if(typeof preferredModel==='string'&&preferredModel.trim())candidateModels.push(preferredModel.trim());
+    if(['deepseek-account','deepseek-official'].includes(config.provider)&&config.model==='deepseek-flash'&&!candidateModels.includes('deepseek-pro')){
+      candidateModels.push('deepseek-pro');
+    }
+    if(!candidateModels.includes(config.model))candidateModels.push(config.model);
+    let lastErr;
+    for(const targetModel of candidateModels){
+      try{
+        return await readModelText(llm,{
+          provider:config.provider,
+          model:targetModel,
+          ...familyModelControls({...config,model:targetModel}),
+          tools:[],
+          signal,
+          system,
+          messages:[{role:'user',content:[{type:'text',text:userPayload}]}],
+          maxTokens:4096,
+        },signal,{maxChars:18000});
+      }catch(err){
+        signal?.throwIfAborted();
+        lastErr=err;
+      }
+    }
+    throw lastErr;
   };
 }
 
