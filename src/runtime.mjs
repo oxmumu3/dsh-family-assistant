@@ -1,8 +1,9 @@
 import {randomUUID,randomBytes,createHash,createHmac} from 'node:crypto';
-import {mkdirSync,openSync,writeFileSync,closeSync,readFileSync,unlinkSync,fstatSync,fsyncSync,realpathSync,constants} from 'node:fs';
-import {join,resolve} from 'node:path';
+import {mkdirSync,openSync,writeFileSync,closeSync,readFileSync,unlinkSync,fstatSync,fsyncSync,realpathSync,existsSync,lstatSync,renameSync,constants} from 'node:fs';
+import {join,resolve,dirname} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
+import QRCode from 'qrcode';
 import {createStore,recordMatchesBinding} from './store.mjs';
 import {createWorkbench} from './workbench.mjs';
 import {buildOwnerBrief,buildElderDaily,localDate,localDateTimeToInstant} from './brief.mjs';
@@ -71,7 +72,7 @@ const helpIntent=text=>/^(?:你(?:现在)?(?:能|可以)帮我(?:做什么|干�
 const ownerArtifactIntent=text=>!/发(?:一条|一则|个)?消息|转告|告诉|通知|先问我|先给我看|等我确认|先核对/.test(text)&&/整理|生成|制作|起草|写一|准备|读取|查找|找到|搜索|日报|PPT|幻灯片/i.test(text);
 const ownerWaitingText=text=>/日报|digest/i.test(text)?'我还在查找这份日报，找到后会在这里回复你。':/查|找|读|搜/.test(text)?'我还在查找你要的资料，找到后会在这里回复你。':/PPT|幻灯片/i.test(text)?'这份演示稿还在整理，做好后会在这里回复你。':'这件事还在处理，我会把结果回复在这里。';
 const inputKeys={
-  add_person:['role','label','timeZone','interests','shareWithOwner'],
+  add_person:['id','role','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
   update_person:['personId','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
   configure:['paused','ownerBriefEnabled','ownerBriefTime','timeZone','provider','model'],
   login:['personId'],verify_login:['personId','code'],connect:['personId'],disconnect:['personId'],
@@ -151,7 +152,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   const reminderAdmission=createInboundTimingLedger({directory,fileName:'owner-reminder-admission.json'});
   let ownerLibrarySources;try{ownerLibrarySources=createOwnerLibrarySources({directory,now});}catch(error){unlock();throw error;}
   let ownerServiceViews;try{ownerServiceViews=createOwnerServiceLedger({directory,now});}catch(error){unlock();throw error;}
-  let closed=false,timer=null,ticking=null,lastBrief=null,lastBriefAccess=null,lastError=null,runtimeReady=false;let lastPruneAt=0;
+  let closed=false,timer=null,localControlTimer=null,localControlBusy=false,ticking=null,lastBrief=null,lastBriefAccess=null,lastError=null,runtimeReady=false;let lastPruneAt=0;
   const managementLifecycle=new AbortController();
   let lifecycle=new AbortController();const peopleWork=new Map(),ownerMessageWork=new Map(),presentationWork=new Map(),flushWork=new Map(),toolWork=new Map(),memberWork=new Map(),memberQueued=new Map(),outboxAuthorities=new Map(),ownerObservers=new Map(),reconnectAttempt=new Map(),reconnectSerial=new Map();
   const safeError=error=>{
@@ -164,7 +165,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   let onboarding,deferredNotices,hearth;
   const channels=channelFactory({directory:join(directory,'channels'),api,now,...(transcribeVoice?{transcribeVoice}:{}),
     lookupInboundVoice:(personId,messageId)=>{const binding=store.binding(personId),row=store.messages(personId).find(value=>value.dir==='in'&&value.id===messageId&&recordMatchesBinding(value,binding));return row?{text:row.text,at:row.at,...(row.text==='[未能识别的语音]'?{voiceError:'failed'}:{})}:null;},
-    onBound:(id,identity,options={})=>{const newBinding=!store.binding(id),wasSuspended=suspended(id);if(wasSuspended&&!reconnectArmed(id,options?.resumeToken))throw new Error('这位成员的微信已手动断开，只有本人当前这次恢复连接或重新扫码成功后才会接回。');const binding=store.bindPerson(id,identity);if(wasSuspended)suspensions.clear(id);reconnectAttempt.delete(id);onboarding?.markBound(id,identity,{newBinding});return binding;},
+    onBound:(id,identity,options={})=>{const previous=store.binding(id),newBinding=!previous,changed=Boolean(previous&&(previous.accountId!==identity.accountId||previous.peerId!==identity.peerId)),wasSuspended=suspended(id);if(wasSuspended&&!reconnectArmed(id,options?.resumeToken))throw new Error('这位成员的微信已手动断开，只有本人当前这次恢复连接或重新扫码成功后才会接回。');const binding=store.bindPerson(id,identity);if(wasSuspended)suspensions.clear(id);reconnectAttempt.delete(id);onboarding?.markBound(id,identity,{newBinding});if(runtimeReady&&(newBinding||changed)&&store.person(id)?.role==='elder'){const owner=store.snapshot().people.find(p=>p.role==='owner');if(owner&&!suspended(owner.id)){try{store.route(owner.id);const label=store.person(id).label;store.enqueue({personId:owner.id,kind:'harness_notice',sourceKey:`member-bound:${id}:${binding.generation}:${Date.now()}`,text:`✅ 「${label}」已完成微信扫码绑定，状态已变为已连接，现在可以直接给他发消息或配置日报/报表了。`,expiresAt:new Date(Date.parse(now())+30*60000).toISOString()});void flush(owner.id).catch(err=>{lastError=safeError(err);});}catch{}}}return binding;},
     onStatus:(id,patch)=>{if(!closed&&store.person(id)){store.setConnection(id,patch);if(runtimeReady&&patch.status==='connected')void resumeMemberAdmissions(id).catch(error=>{lastError=safeError(error);});}},
     onMessage:(id,message)=>receive(id,message),
   });
@@ -234,6 +235,8 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
   // 单点拦截：即使异步重连把通道短暂标成 connected，也不能从已停用通道发出任何内容。
   const channelSend=typeof channels.send==='function'?channels.send.bind(channels):null;
   if(channelSend)channels.send=async(route,text,options)=>{if(suspended(route?.personId))throw Object.assign(new Error('这位成员的微信已由本人断开，没有发送。'),{sendOutcome:'failed'});return channelSend(route,text,options);};
+  const channelSendImage=typeof channels.sendImage==='function'?channels.sendImage.bind(channels):null;
+  if(channelSendImage)channels.sendImage=async(route,image,options)=>{if(suspended(route?.personId))throw Object.assign(new Error('这位成员的微信已由本人断开，没有发送。'),{sendOutcome:'failed'});return channelSendImage(route,image,options);};
   const currentMember=(person,route)=>current(route)&&channels.status(route.personId)?.status==='connected'&&store.person(person.id)?.role==='elder'&&store.person(person.id)?.createdAt===person.createdAt;
   const memberHistory=(personId,limit)=>store.messages(personId).filter(message=>recordMatchesBinding(message,store.binding(personId))).slice(-limit);
   function memberReports(personId,route){
@@ -1283,6 +1286,70 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
     const authority=await ownerAuthorityForSession({sessionId,callId,signal});
     return confirmOwnerServiceDraft({authority,sessionId,draftId,revision,serviceSetup,ledger:ownerServiceViews,previousTurnDelivered:shown=>previousOwnerTurnDelivered(authority,sessionId,shown)});
   }
+  async function ownerBindQr({personId,sendToOwnerWechat=true,savePngPath,signal}={}){
+    alive();signal?.throwIfAborted();
+    const target=store.person(personId);
+    await action({action:'login',personId:target.id});
+    const live=channels.status(target.id);
+    if(typeof live?.qrUrl!=='string'||!live.qrUrl.trim())throw new Error('二维码尚未生成，请稍后重试。');
+    const pngBytes=await QRCode.toBuffer(live.qrUrl,{type:'png',width:520,margin:3,errorCorrectionLevel:'M'});
+    if(typeof savePngPath==='string'&&savePngPath.trim()){
+      const resolved=resolve(savePngPath.trim());
+      mkdirSync(dirname(resolved),{recursive:true,mode:0o700});
+      const tmp=join(dirname(resolved),`.qr-${randomUUID()}.tmp`),fd=openSync(tmp,'wx',0o600);
+      try{writeFileSync(fd,pngBytes);fsyncSync(fd);}finally{closeSync(fd);}
+      renameSync(tmp,resolved);
+    }
+    let wechatImageStatus='not_requested';
+    if(sendToOwnerWechat){
+      const owner=store.snapshot().people.find(p=>p.role==='owner');
+      if(owner&&!suspended(owner.id)&&typeof channels.sendImage==='function'){
+        try{
+          const ownerRoute=store.route(owner.id);
+          const sent=await channels.sendImage(ownerRoute,{bytes:pngBytes},{signal:signal??managementLifecycle.signal,authorize:()=>!closed&&sameRoute(store.route(owner.id),ownerRoute)});
+          wechatImageStatus=sent?.status??'unknown';
+        }catch(error){
+          wechatImageStatus='failed';
+          lastError=safeError(error);
+        }
+      }else{
+        wechatImageStatus='owner_unavailable';
+      }
+    }
+    return{status:live.status??'awaiting_scan',personId:target.id,label:target.label,qrUrl:live.qrUrl,wechatImageStatus,expiresInSeconds:300};
+  }
+  async function ownerBindQrForSession({sessionId,callId,personId,signal}={}){
+    const authority=await ownerAuthorityForSession({sessionId,callId,signal});
+    if(await authority.authorize()!==true||store.person(authority.personId)?.role!=='owner')throw new Error('Owner 身份、请求或微信绑定已改变。');
+    return ownerBindQr({personId,sendToOwnerWechat:authority.origin==='wechat',signal});
+  }
+  async function pollLocalControl(){
+    if(closed||localControlBusy)return;
+    const reqFile=join(directory,'owner-local-control.json'),outFile=join(directory,'owner-local-control-result.json');
+    if(!existsSync(reqFile))return;
+    localControlBusy=true;
+    let requestId=null;
+    try{
+      const stat=lstatSync(reqFile);
+      const uid=typeof process.getuid==='function'?process.getuid():stat.uid;
+      if(stat.isSymbolicLink()||!stat.isFile()||stat.uid!==uid||(stat.mode&0o077)||stat.size>65536)throw new Error('本地控制文件权限或类型无效。');
+      const req=JSON.parse(readFileSync(reqFile,'utf8'));
+      try{unlinkSync(reqFile);}catch{}
+      requestId=typeof req?.requestId==='string'?req.requestId:null;
+      const op=req?.action,args=req?.args&&typeof req.args==='object'&&!Array.isArray(req.args)?req.args:{};
+      const result=op==='bind_qr'?await ownerBindQr(args):await action({action:op,...args});
+      const tmp=`${outFile}.${randomUUID()}.tmp`,fd=openSync(tmp,'wx',0o600);
+      try{writeFileSync(fd,JSON.stringify({requestId,ok:true,result,completedAt:now()},null,2)+'\n');fsyncSync(fd);}finally{closeSync(fd);}
+      renameSync(tmp,outFile);
+    }catch(error){
+      try{unlinkSync(reqFile);}catch{}
+      try{
+        const tmp=`${outFile}.${randomUUID()}.tmp`,fd=openSync(tmp,'wx',0o600);
+        try{writeFileSync(fd,JSON.stringify({requestId,ok:false,error:safeError(error),completedAt:now()},null,2)+'\n');fsyncSync(fd);}finally{closeSync(fd);}
+        renameSync(tmp,outFile);
+      }catch{}
+    }finally{localControlBusy=false;}
+  }
   function resolveOwnerMobileTask(sessionId,requestId){
     const captured=gateway.mobileTaskScope({sessionId,requestId});
     if(captured){
@@ -1800,19 +1867,21 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       void gateway.tick().catch(error=>{lastError=safeError(error);});
       for(const task of gateway.nativeNoticeTasks().filter(task=>['queued','running'].includes(task.state)))observeOwnerTask(task);
       if(!timer){timer=setInterval(()=>tick().catch(error=>{lastError=safeError(error);}),intervalMs);timer.unref?.();}
+      if(!localControlTimer){localControlTimer=setInterval(()=>void pollLocalControl(),1000);localControlTimer.unref?.();}
       // Clear the flag only once the service can actually run: a failed start
       // must not report "running" with no timer and no channel.
       store.configure({paused:false});
       return status();
     }catch(error){
       if(timer){clearInterval(timer);timer=null;}
+      if(localControlTimer){clearInterval(localControlTimer);localControlTimer=null;}
       try{store.configure({paused:true});}catch{}
       lastError=safeError(error);
       throw error;
     }
   }
   async function pause(){
-    alive();store.configure({paused:true});if(timer){clearInterval(timer);timer=null;}
+    alive();store.configure({paused:true});if(timer){clearInterval(timer);timer=null;}if(localControlTimer){clearInterval(localControlTimer);localControlTimer=null;}
     lifecycle.abort();reconnectAttempt.clear();
     // Don't wait on a model call here: it will recheck pause/route before any send.
     await Promise.allSettled(store.snapshot().people.map(async p=>{try{await channels.disconnect(p.id);}catch(error){lastError=safeError(error);}}));return status();
@@ -1901,7 +1970,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       case'attention_respond':return respondImportant({incidentId:args.incidentId,status:args.status,text:args.text});
       case'owner_reminder':return ownerReminder(args);
       case'service_request':return serviceRequest({text:args.text,requestId:args.requestId});
-      case'add_person':store.addPerson(args);break;
+      case'add_person':{const added=store.addPerson(args);return status({personId:added.id});}
       case'update_person':{const{personId,...patch}=args;store.updatePerson(personId,patch);break;}
       case'configure':{const{paused,...patch}=args;store.configure(patch);if(paused===true)await pause();else if(paused===false)await start();break;}
       case'login':{const token=beginReconnect(args.personId,300000);try{await channels.login(args.personId,{resumeToken:token});}catch(error){endReconnect(args.personId,token);throw error;}break;}
@@ -1995,6 +2064,7 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       const failures=[];
       const step=async(label,action)=>{try{await action();}catch(error){failures.push(label);lastError=safeError(error);}};
       if(timer){clearInterval(timer);timer=null;}
+      if(localControlTimer){clearInterval(localControlTimer);localControlTimer=null;}
       lifecycle.abort();managementLifecycle.abort();
       await step('dot-owner-read',()=>dotOwnerRead.close());
       await step('presentations',()=>presentations.close());
@@ -2019,5 +2089,5 @@ export function createRuntime({directory,api,respond,planOwner,planWorkbench,pla
       await delay(20);
     }
   }
-  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,ownerServiceDraftForSession,ownerServiceConfirmForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge};
+  return{store,channels,status,action,start,stop:pause,close,tick,receive,settled,ownerProjectsForSession,ownerAuthorityForSession,ownerSendForSession,ownerConfirmForSession,ownerServiceDraftForSession,ownerServiceConfirmForSession,ownerBindQr,ownerBindQrForSession,resolveOwnerMobileTask,sendOwnerMobileNotice,familyDotBridge};
 }

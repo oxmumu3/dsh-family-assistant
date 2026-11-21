@@ -177,6 +177,21 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
       if (s.epoch === epoch && !closed) status(s, signal.aborted && Date.now() >= deadline ? 'expired' : 'error', '微信登录未完成，请重新扫码');
     } finally { clearTimeout(expiry); s.verifyCode = undefined; s.wakeVerify = null; }
   }
+  async function sendOutboundMedia(route, { clientId = randomUUID(), signal, authorize = () => true } = {}, { invalid, invalidMessage, dispatch }) {
+    const s = route && states.get(route.personId);
+    const valid = () => !closed && s && s.connected && s.route && s.controller && !s.controller.signal.aborted &&
+      ['personId', 'accountId', 'peerId', 'generation'].every(key => route[key] === s.route[key]);
+    const allowed = () => valid() && !signal?.aborted && authorize() === true;
+    if (!allowed() || invalid) throw Object.assign(new Error(invalidMessage), { sendOutcome: 'failed' });
+    const combinedSignal = signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal;
+    const task = s.outbound.catch(() => {}).then(async () => {
+      if (!allowed()) throw Object.assign(new Error('发送已取消、绑定或指令授权已变化'), { sendOutcome: 'failed' });
+      const result = await dispatch({ s, clientId, signal: combinedSignal, allowed });
+      if (result?.status !== 'api_accepted') throw Object.assign(new Error('发送结果尚未确认'), { sendOutcome: 'uncertain' });
+      s.lastOutboundAt = now(); if (valid()) status(s, 'connected'); return result;
+    });
+    s.outbound = task; return task;
+  }
   return {
     async login(personId, { resumeToken } = {}) {
       if (closed) throw new Error('家庭助手已停止');
@@ -224,22 +239,25 @@ export function createChannelManager({ directory, api = createWeixinApi(), trans
       check(); const combined = signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal;
       const result = await api.downloadFile({ attachment, signal: combined }); check(); return result;
     },
-    async sendFile(route, file, { clientId = randomUUID(), signal, authorize = () => true } = {}) {
-      const s = route && states.get(route.personId);
-      const valid = () => !closed && s && s.connected && s.route && s.controller && !s.controller.signal.aborted &&
-        ['personId', 'accountId', 'peerId', 'generation'].every(key => route[key] === s.route[key]);
-      const allowed = () => valid() && !signal?.aborted && authorize() === true;
-      if (!allowed() || !file || !present(file.name) || !Buffer.isBuffer(file.bytes) || !file.bytes.length || file.bytes.length > MAX_FILE_BYTES) throw Object.assign(new Error('微信文件接收人未连接、文件无效或授权已变化'), { sendOutcome: 'failed' });
-      const bytes = Buffer.from(file.bytes), name = file.name;
-      const task = s.outbound.catch(() => {}).then(async () => {
-        if (!allowed()) throw Object.assign(new Error('发送已取消、绑定或指令授权已变化'), { sendOutcome: 'failed' });
-        const result = await api.sendFile({ token: s.auth.token, baseUrl: s.auth.baseUrl, peerId: s.auth.peerId,
-          contextToken: s.auth.contextToken, name, bytes, clientId, authorize: allowed,
-          signal: signal ? AbortSignal.any([signal, s.controller.signal]) : s.controller.signal });
-        if (result?.status !== 'api_accepted') throw Object.assign(new Error('发送结果尚未确认'), { sendOutcome: 'uncertain' });
-        s.lastOutboundAt = now(); if (valid()) status(s, 'connected'); return result;
+    async sendFile(route, file, options = {}) {
+      return sendOutboundMedia(route, options, {
+        invalid: !file || !present(file.name) || !Buffer.isBuffer(file.bytes) || !file.bytes.length || file.bytes.length > MAX_FILE_BYTES,
+        invalidMessage: '微信文件接收人未连接、文件无效或授权已变化',
+        dispatch: ({ s, clientId, signal, allowed }) => api.sendFile({
+          token: s.auth.token, baseUrl: s.auth.baseUrl, peerId: s.auth.peerId, contextToken: s.auth.contextToken,
+          name: file.name, bytes: Buffer.from(file.bytes), clientId, authorize: allowed, signal,
+        }),
       });
-      s.outbound = task; return task;
+    },
+    async sendImage(route, image, options = {}) {
+      return sendOutboundMedia(route, options, {
+        invalid: !image || !Buffer.isBuffer(image.bytes) || !image.bytes.length || image.bytes.length > MAX_FILE_BYTES,
+        invalidMessage: '微信图片接收人未连接、图片无效或授权已变化',
+        dispatch: ({ s, clientId, signal, allowed }) => api.sendImage({
+          token: s.auth.token, baseUrl: s.auth.baseUrl, peerId: s.auth.peerId, contextToken: s.auth.contextToken,
+          bytes: Buffer.from(image.bytes), clientId, authorize: allowed, signal,
+        }),
+      });
     },
     async send(route, text, { clientId = randomUUID(), signal, authorize = () => true } = {}) {
       const s = route && states.get(route.personId);

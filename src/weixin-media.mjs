@@ -115,21 +115,37 @@ export async function downloadWeixinFile(fetchImpl, { attachment, signal }) {
   } catch { throw mediaFailure(); }
 }
 
+async function uploadEncryptedMedia(fetchImpl, getUploadUrl, { bytes, mediaType, peerId, clientId, signal, authorize = () => true }) {
+  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_FILE_BYTES || !nonempty(peerId) || !nonempty(clientId) || clientId.length > 200) throw mediaFailure();
+  const combined = boundedSignal(signal), check = () => { combined.throwIfAborted(); if (authorize() !== true) throw mediaFailure(); };
+  check(); const key = randomBytes(16), aeskey = key.toString('hex');
+  const cipher = createCipheriv('aes-128-ecb', key, null), encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
+  const result = await getUploadUrl({ filekey: clientId, media_type: mediaType, to_user_id: peerId, rawsize: bytes.length,
+    rawfilemd5: createHash('md5').update(bytes).digest('hex'), filesize: encrypted.length, no_need_thumb: true, aeskey }, combined);
+  check(); const url = result.upload_full_url !== undefined ? cdnUrl(result.upload_full_url, 'upload') : parameterUrl(result.upload_param, 'upload', clientId);
+  const response = await fetchImpl(url, { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/octet-stream' }, body: encrypted, signal: combined });
+  const parameter = response.headers?.get('x-encrypted-param');
+  if (response.status !== 200 || !nonempty(parameter) || parameter.length > 4096) throw mediaFailure();
+  check();
+  return {
+    encryptedSize: encrypted.length,
+    media: { encrypt_query_param: parameter, aes_key: Buffer.from(aeskey).toString('base64'), encrypt_type: 1 },
+  };
+}
+
 /** Uploads only; caller owns the separate, possibly uncertain message submission. */
 export async function uploadWeixinFile(fetchImpl, getUploadUrl, { bytes, name, peerId, clientId, signal, authorize = () => true }) {
   try {
     validateFileName(name);
-    if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_FILE_BYTES || !nonempty(peerId) || !nonempty(clientId) || clientId.length > 200) throw mediaFailure();
-    const combined = boundedSignal(signal), check = () => { combined.throwIfAborted(); if (authorize() !== true) throw mediaFailure(); };
-    check(); const key = randomBytes(16), aeskey = key.toString('hex');
-    const cipher = createCipheriv('aes-128-ecb', key, null), encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
-    const result = await getUploadUrl({ filekey: clientId, media_type: 3, to_user_id: peerId, rawsize: bytes.length,
-      rawfilemd5: createHash('md5').update(bytes).digest('hex'), filesize: encrypted.length, no_need_thumb: true, aeskey }, combined);
-    check(); const url = result.upload_full_url !== undefined ? cdnUrl(result.upload_full_url, 'upload') : parameterUrl(result.upload_param, 'upload', clientId);
-    const response = await fetchImpl(url, { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/octet-stream' }, body: encrypted, signal: combined });
-    const parameter = response.headers?.get('x-encrypted-param');
-    if (response.status !== 200 || !nonempty(parameter) || parameter.length > 4096) throw mediaFailure();
-    check(); return { type: 4, file_item: { file_name: name, len: String(bytes.length), media: {
-      encrypt_query_param: parameter, aes_key: Buffer.from(aeskey).toString('base64'), encrypt_type: 1 } } };
+    const { media } = await uploadEncryptedMedia(fetchImpl, getUploadUrl, { bytes, mediaType: 3, peerId, clientId, signal, authorize });
+    return { type: 4, file_item: { file_name: name, len: String(bytes.length), media } };
+  } catch { throw mediaFailure(); }
+}
+
+/** Uploads an inline WeChat image (media_type=1, type=2 image_item). */
+export async function uploadWeixinImage(fetchImpl, getUploadUrl, { bytes, peerId, clientId, signal, authorize = () => true }) {
+  try {
+    const { media, encryptedSize } = await uploadEncryptedMedia(fetchImpl, getUploadUrl, { bytes, mediaType: 1, peerId, clientId, signal, authorize });
+    return { type: 2, image_item: { media, mid_size: encryptedSize } };
   } catch { throw mediaFailure(); }
 }

@@ -118,11 +118,25 @@ function journalFor(directory){
 }
 
 const operationKeys={status:['action'],preview_brief:['action'],history_page:['action','personId','before','limit','query'],library_query:['action','personId','before','limit','query','date','kind'],draft_management:['action','text','contextId'],send_message:['action','personId','text'],confirm_management:['action','cardId','revision'],
- important_update:['action','incidentId','status'],important_reply:['action','incidentId','text'],important_alert:['action','enabled'],family_reply:['action','requestId','text'],workflow_reply:['action','request','status','note'],dismiss_relay:['action','relayId'],service_request:['action','text','requestId'],service_confirm:['action','draftId','revision'],reminder:['action','op','text','dueAt','repeat','reminderId']};
+ important_update:['action','incidentId','status'],important_reply:['action','incidentId','text'],important_alert:['action','enabled'],family_reply:['action','requestId','text'],workflow_reply:['action','request','status','note'],dismiss_relay:['action','relayId'],service_request:['action','text','requestId'],service_confirm:['action','draftId','revision'],reminder:['action','op','text','dueAt','repeat','reminderId'],
+ add_person:['action','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
+ update_person:['action','personId','label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'],
+ bind_qr:['action','personId'],
+ verify_login:['action','personId','code'],
+ connect:['action','personId'],
+ disconnect:['action','personId'],
+ member_reminder:['action','personId','op','text','dueAt','repeat','time','reminderId','date','skip'],
+ tool_manage:['action','op','personId','toolId','resource','allowInvoke','schedule','input','expectedRevision','workspaceId','query'],
+ access_manage:['action','op','personId','workspaceIds','capabilities'],
+ hearth_manage:['action','op','personId','pinganEnabled','pinganTime','codeword','urgent','relay','ask','digest','quietHoursEnabled','quietStart','quietEnd','habitId','text'],
+ system_manage:['action','op','ownerBriefEnabled','ownerBriefTime','timeZone','provider','model']};
 function checkArgs(args){
  if(!plain(args)||!Object.hasOwn(operationKeys,args.action)||Object.keys(args).some(key=>!operationKeys[args.action].includes(key)))fail('不支持的操作或参数。','owner_management_invalid');
  if(['draft_management','send_message'].includes(args.action)&&!content(args.text,args.action==='send_message'?2800:6000))fail('请提供完整且长度适当的正文。','owner_management_invalid');
- if(['history_page','library_query','send_message'].includes(args.action)&&!string(args.personId,100))fail('请先用 status 核对目标成员。','owner_management_invalid');
+ if(['history_page','library_query','send_message','update_person','bind_qr','verify_login','connect','disconnect','member_reminder'].includes(args.action)&&!string(args.personId,100))fail('请先用 status 核对目标成员。','owner_management_invalid');
+ if(args.action==='add_person'&&!string(args.label,80))fail('请提供要开通的新成员称呼。','owner_management_invalid');
+ if(['add_person','update_person'].includes(args.action)&&(args.label!==undefined&&!string(args.label,80)||args.timeZone!==undefined&&!string(args.timeZone,100)||args.interests!==undefined&&(!Array.isArray(args.interests)||args.interests.length>20||args.interests.some(v=>!string(v,100)))||args.notes!==undefined&&(typeof args.notes!=='string'||args.notes.length>2000)||args.shareWithOwner!==undefined&&!['none','summary','full'].includes(args.shareWithOwner)||args.dailyEnabled!==undefined&&typeof args.dailyEnabled!=='boolean'||args.dailyTime!==undefined&&!string(args.dailyTime,10)))fail('成员资料或日报设置参数无效。','owner_management_invalid');
+ if(args.action==='verify_login'&&!string(args.code,20))fail('请提供微信登录验证码数字。','owner_management_invalid');
  if(args.action==='important_update'&&(!string(args.incidentId,100)||!['acknowledged','resolved','muted'].includes(args.status)))fail('请用事项编号和已知悉/已解决/不再提醒。','owner_management_invalid');
  if(args.action==='important_alert'&&typeof args.enabled!=='boolean')fail('请说明是开启还是关闭重要事项提醒。','owner_management_invalid');
  if(args.action==='important_reply'&&(!string(args.incidentId,100)||!content(args.text,2800)))fail('请用事项编号和要转给家人的正文。','owner_management_invalid');
@@ -131,6 +145,11 @@ function checkArgs(args){
  if(args.action==='dismiss_relay'&&!string(args.relayId,100))fail('请用背景里的转告编号。','owner_management_invalid');
  if(args.action==='service_request'&&!content(args.text,6000))fail('请说明要给哪位家人开通或调整什么服务。','owner_management_invalid');
  if(args.action==='reminder'&&(!['list','add','cancel'].includes(args.op)||args.op==='add'&&(!content(args.text,200)||!string(args.dueAt,80))||args.op==='cancel'&&!string(args.reminderId,100)||args.repeat!==undefined&&!['once','daily'].includes(args.repeat)))fail('请说明提醒操作、内容、时间和重复方式。','owner_management_invalid');
+ if(args.action==='member_reminder'&&(!['list','add','cancel','skip_once'].includes(args.op)||args.op==='add'&&(!content(args.text,1000)||!string(args.dueAt,80))||['cancel','skip_once'].includes(args.op)&&!string(args.reminderId,100)||args.repeat!==undefined&&!['once','daily'].includes(args.repeat)||args.time!==undefined&&!string(args.time,10)||args.skip!==undefined&&typeof args.skip!=='boolean'))fail('请说明成员提醒操作、内容、时间和提醒编号。','owner_management_invalid');
+ if(args.action==='tool_manage'&&(!['catalog','assignments','assign','invoke','digest_sources'].includes(args.op)||['assignments','assign','invoke'].includes(args.op)&&!string(args.personId,100)||['assign','invoke'].includes(args.op)&&!string(args.toolId,80)||args.op==='assign'&&!plain(args.resource)||args.allowInvoke!==undefined&&typeof args.allowInvoke!=='boolean'||args.schedule!==undefined&&args.schedule!==null&&!plain(args.schedule)||args.input!==undefined&&!plain(args.input)||args.expectedRevision!==undefined&&(!Number.isSafeInteger(args.expectedRevision)||args.expectedRevision<1)||args.workspaceId!==undefined&&!string(args.workspaceId,240)))fail('请说明工具管理操作及完整参数。','owner_management_invalid');
+ if(args.action==='access_manage'&&(!['list','grant','revoke'].includes(args.op)||['grant','revoke'].includes(args.op)&&!string(args.personId,100)||args.op==='grant'&&(!Array.isArray(args.workspaceIds)||!Array.isArray(args.capabilities))))fail('请说明项目权限操作（list/grant/revoke）、成员与权限范围。','owner_management_invalid');
+ if(args.action==='hearth_manage'&&(!['member_update','guard_update','habit_save','habit_delete'].includes(args.op)||['member_update','habit_save','habit_delete'].includes(args.op)&&!string(args.personId,100)||args.op==='habit_save'&&!content(args.text,240)||args.op==='habit_delete'&&!string(args.habitId,120)))fail('请说明家庭守护操作及成员或规则参数。','owner_management_invalid');
+ if(args.action==='system_manage'&&!['configure','start','pause','send_brief'].includes(args.op))fail('请说明系统操作（configure/start/pause/send_brief）。','owner_management_invalid');
  if(args.contextId!==undefined&&(!string(args.contextId,120)||!/^(?:card|person):[A-Za-z0-9_-]{1,100}$/.test(args.contextId)))fail('草稿对象参数无效。','owner_management_invalid');
  if(args.action==='confirm_management'&&(!string(args.cardId,100)||!Number.isSafeInteger(args.revision)||args.revision<1))fail('确认需要当前草稿标识和精确版本。','owner_management_invalid');
  if(args.action==='service_confirm'&&(!string(args.draftId,100)||!Number.isSafeInteger(args.revision)||args.revision<1))fail('确认服务草稿需要当前草稿标识和精确版本。','owner_management_invalid');
@@ -161,8 +180,8 @@ export function createOwnerManagementTool({runtime,directory}={}){
  async function execute(args,execution){
   checkArgs(args);const scope=await authorityFor(execution),{authority,guard,sessionId,callId,signal}=scope;
   if(args.action==='status'){
-   const state=runtime.status(),people=state.people.map(person=>({id:person.id,label:person.label,role:person.role,timeZone:person.timeZone,status:person.binding?.status??'unbound'}));await guard();
-   const value={paused:state.config.paused,people,attention:state.attention??{enabled:false,incidents:[]},capabilities:{directOwnerMessages:true,ownerLocalHistory:'full',inlineDraftConfirmation:true,briefSharingOnlyControlsAutomaticBrief:true,importantEventAlerts:Boolean(state.attention?.enabled)}};return{...value,text:JSON.stringify(value)};
+   const state=runtime.status(),people=state.people.map(person=>({id:person.id,label:person.label,role:person.role,timeZone:person.timeZone,status:person.binding?.status??'unbound',notes:person.notes??'',interests:person.interests??[],shareWithOwner:person.shareWithOwner??'none',dailyEnabled:Boolean(person.dailyEnabled),dailyTime:person.dailyTime??'08:00',...(person.reach?{reach:person.reach}:{})}));await guard();
+   const value={paused:state.config.paused,people,attention:state.attention??{enabled:false,incidents:[]},capabilities:{directOwnerMessages:true,ownerLocalHistory:'full',inlineDraftConfirmation:true,briefSharingOnlyControlsAutomaticBrief:true,importantEventAlerts:Boolean(state.attention?.enabled),fullDesktopParity:true,wechatQrBinding:true}};return{...value,text:JSON.stringify(value)};
   }
   if(args.action==='history_page'){
    const value=await runtime.action({action:'history_page',personId:args.personId,...(args.before?{before:args.before}:{}),...(args.limit!==undefined?{limit:args.limit}:{}),...(args.query!==undefined?{query:args.query}:{})});await guard();return{...value,text:JSON.stringify(value)};
@@ -276,8 +295,111 @@ export function createOwnerManagementTool({runtime,directory}={}){
    const value=await runtime.action({action:'owner_reminder',op:args.op,...(args.text!==undefined?{text:args.text}:{}),...(args.dueAt!==undefined?{dueAt:args.dueAt}:{}),...(args.repeat!==undefined?{repeat:args.repeat}:{}),...(args.reminderId!==undefined?{reminderId:args.reminderId}:{})});await guard();
    return{...value,text:value.text??'已处理。'};
   }
+  if(args.action==='add_person'){
+   const beforeIds=new Set((runtime.status()?.people??[]).map(p=>p.id));
+   const state=await runtime.action({action:'add_person',role:'elder',label:args.label.trim(),...(args.timeZone?{timeZone:args.timeZone}:{}),...(args.interests?{interests:args.interests}:{}),...(args.notes!==undefined?{notes:args.notes}:{}),...(args.shareWithOwner?{shareWithOwner:args.shareWithOwner}:{}),...(args.dailyEnabled!==undefined?{dailyEnabled:args.dailyEnabled}:{}),...(args.dailyTime?{dailyTime:args.dailyTime}:{})});await guard();
+   const person=(state?.people??[]).find(p=>!beforeIds.has(p.id))||(state?.people??[]).filter(p=>p.label===args.label.trim()).at(-1);
+   return{status:'completed',personId:person?.id??null,label:person?.label??args.label.trim(),text:`已新增成员「${person?.label??args.label.trim()}」（personId: ${person?.id??'unknown'}）。如需微信扫码绑定，请紧接着调用 bind_qr。`};
+  }
+  if(args.action==='update_person'){
+   const patch=Object.fromEntries(['label','timeZone','interests','notes','shareWithOwner','dailyEnabled','dailyTime'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
+   await runtime.action({action:'update_person',personId:args.personId,...patch});await guard();
+   return{status:'completed',personId:args.personId,text:'已更新该成员资料与日报设置。'};
+  }
+  if(args.action==='bind_qr'){
+   if(typeof runtime.ownerBindQrForSession!=='function')fail('微信扫码绑定接口尚未就绪。');
+   const res=await runtime.ownerBindQrForSession({sessionId,callId,personId:args.personId,signal});await guard();
+   const text=res.wechatImageStatus==='api_accepted'
+    ?`已为「${res.label}」生成微信绑定二维码并直接发送到你的微信聊天图片中（5分钟内有效）。请转发给${res.label}或当面扫码确认；扫码成功后我会自动发消息通知你。若手机提示输入数字验证码，直接把数字发给我即可。`
+    :`已为「${res.label}」启动微信扫码绑定（5分钟内有效），二维码地址：${res.qrUrl}（图片直推状态：${res.wechatImageStatus}）。`;
+   return{...res,text};
+  }
+  if(args.action==='verify_login'){
+   await runtime.action({action:'verify_login',personId:args.personId,code:args.code.trim()});await guard();
+   return{status:'completed',personId:args.personId,text:'已提交微信登录验证码，正在等待连接确认。'};
+  }
+  if(args.action==='connect'||args.action==='disconnect'){
+   await runtime.action({action:args.action,personId:args.personId});await guard();
+   return{status:'completed',personId:args.personId,text:args.action==='connect'?'已重新连接该成员的微信通道。':'已断开该成员的微信通道。'};
+  }
+  if(args.action==='member_reminder'){
+   if(args.op==='list'){
+    const rows=runtime.store.reminders(args.personId).filter(row=>['active','scheduled'].includes(row.status));await guard();
+    return{reminders:rows,text:JSON.stringify({personId:args.personId,reminders:rows})};
+   }
+   if(args.op==='add'){
+    await runtime.action({action:'add_reminder',personId:args.personId,text:args.text.trim(),dueAt:args.dueAt,...(args.repeat?{repeat:args.repeat}:{}),...(args.time?{time:args.time}:{})});await guard();
+    return{status:'completed',personId:args.personId,text:'已为该成员创建提醒。'};
+   }
+   if(args.op==='cancel'){
+    await runtime.action({action:'cancel_reminder',personId:args.personId,reminderId:args.reminderId});await guard();
+    return{status:'completed',personId:args.personId,reminderId:args.reminderId,text:'已取消该成员的这条提醒。'};
+   }
+   await runtime.action({action:'reminder_skip_once',personId:args.personId,reminderId:args.reminderId,...(args.date?{date:args.date}:{}),...(args.skip!==undefined?{skip:args.skip}:{})});await guard();
+   return{status:'completed',personId:args.personId,reminderId:args.reminderId,text:args.skip===false?'已恢复该成员本次提醒。':'已为该成员跳过这一次提醒。'};
+  }
+  if(args.action==='tool_manage'){
+   if(args.op==='catalog'){
+    const value=await runtime.action({action:'tool_catalog',...(args.personId?{personId:args.personId}:{})});await guard();
+    return{catalog:value,text:JSON.stringify(value)};
+   }
+   if(args.op==='assignments'){
+    const value=await runtime.action({action:'tool_assignments',personId:args.personId});await guard();
+    return{assignments:value,text:JSON.stringify(value)};
+   }
+   if(args.op==='assign'){
+    const value=await runtime.action({action:'tool_assign',personId:args.personId,toolId:args.toolId,resource:args.resource,allowInvoke:args.allowInvoke??true,schedule:args.schedule??null});await guard();
+    return{assignment:value,text:`已为成员配置工具 ${args.toolId}。`};
+   }
+   if(args.op==='invoke'){
+    const toolCallId=string(execution?.callId)?execution.callId:callId;
+    const value=await runtime.action({action:'tool_invoke',personId:args.personId,toolId:args.toolId,requestId:`owner-tool-${toolCallId}`,input:args.input??null,...(args.expectedRevision!==undefined?{expectedRevision:args.expectedRevision}:{})});await guard();
+    return{...value,text:JSON.stringify(value)};
+   }
+   const value=await runtime.action({action:'digest_sources',...(args.workspaceId?{workspaceId:args.workspaceId}:{}),...(args.query!==undefined?{query:args.query}:{})});await guard();
+   return{sources:value,text:JSON.stringify(value)};
+  }
+  if(args.action==='access_manage'){
+   if(args.op==='list'){
+    const value=await runtime.action({action:'family_access_list'});await guard();
+    return{policies:value,text:JSON.stringify(value)};
+   }
+   if(args.op==='grant'){
+    const value=await runtime.action({action:'family_access_grant',personId:args.personId,workspaceIds:args.workspaceIds,capabilities:args.capabilities});await guard();
+    return{policy:value,text:'已更新该成员的项目访问权限。'};
+   }
+   const value=await runtime.action({action:'family_access_revoke',personId:args.personId});await guard();
+   return{policy:value,text:'已收回该成员的项目访问权限。'};
+  }
+  if(args.action==='hearth_manage'){
+   if(args.op==='member_update'){
+    const patch=Object.fromEntries(['pinganEnabled','pinganTime','codeword'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
+    await runtime.action({action:'hearth_member_update',personId:args.personId,...patch});await guard();
+    return{status:'completed',personId:args.personId,text:'已更新该成员的守护与平安问候设置。'};
+   }
+   if(args.op==='guard_update'){
+    const patch=Object.fromEntries(['urgent','relay','ask','digest','quietHoursEnabled','quietStart','quietEnd'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
+    await runtime.action({action:'hearth_guard_update',...patch});await guard();
+    return{status:'completed',text:'已更新家庭守护与勿扰规则。'};
+   }
+   if(args.op==='habit_save'){
+    await runtime.action({action:'hearth_habit_save',personId:args.personId,...(args.habitId?{id:args.habitId}:{}),text:args.text.trim()});await guard();
+    return{status:'completed',personId:args.personId,text:'已保存该成员的照料习惯。'};
+   }
+   await runtime.action({action:'hearth_habit_delete',personId:args.personId,id:args.habitId});await guard();
+   return{status:'completed',personId:args.personId,text:'已删除该成员的这条照料习惯。'};
+  }
+  if(args.action==='system_manage'){
+   if(args.op==='configure'){
+    const patch=Object.fromEntries(['ownerBriefEnabled','ownerBriefTime','timeZone','provider','model'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]));
+    await runtime.action({action:'configure',...patch});await guard();
+    return{status:'completed',text:'已更新家庭助手全局配置。'};
+   }
+   await runtime.action({action:args.op});await guard();
+   return{status:'completed',text:{start:'家庭助手服务已启动。',pause:'家庭助手服务已暂停。',send_brief:'已触发发送今日家庭简报。'}[args.op]};
+  }
  }
- return{name:'family_assistant',description:'乐乐已验证 Owner 原生会话的家庭管理工具。先 status 获得成员ID。Owner可在当前微信直接发明确目标和正文的消息，用 send_message，不要求每条额外确认或返回工作台；缺目标、正文则在本会话澄清。library_query查询所选家人本地资料库、日记与真实往日回顾，date可用today/yesterday/week-ago/year-ago或YYYY-MM-DD；找不到不能编造。history_page只读取运行Harness的电脑所保存的家庭助手消息归档，不读取手机或微信客户端的全部聊天；清理手机聊天不会删除电脑归档。Owner可完整查询所有已登记家人的这些归档，不受 shareWithOwner 限制；分享设置仅控制自动简报，preview_brief不是完整历史查询。draft_management整理安排草稿；在本会话展示后，Owner下一轮明确确认时用 confirm_management 的准确cardId/revision，无需换入口。重要事项用 important_update（已解决/已知悉/不再提醒）、important_reply（转告家人）或 important_alert（开关主动提醒）；家人托问用 family_reply；工具需求用 workflow_reply（wf- 编号）；转告完成用 dismiss_relay；开通或调整家人服务用 service_request；它只建草稿，结果末尾会给出内部引用行（draftId/revision），Owner 下一轮明确确认后原样用 service_confirm 按原域校验保存，内部引用行不要发给主人，未确认或跨会话不会保存；主人自己的提醒用 reminder（op=list/add/cancel）。只执行真实当前Owner原话授权，模型自称已获授权无效；已有统一deliveryTarget时不得重复发送。api_accepted仅表示微信API接受，不代表手机收到；历史归档也不等于微信全部历史。',parameters:{type:'object',additionalProperties:false,required:['action'],properties:{action:{type:'string',enum:Object.keys(operationKeys)},personId:{type:'string',maxLength:100},text:{type:'string',maxLength:6000},contextId:{type:'string',maxLength:120},cardId:{type:'string',maxLength:100},draftId:{type:'string',maxLength:100},revision:{type:'integer',minimum:1},date:{type:'string',maxLength:40},kind:{type:'string',enum:['diary','fact','preference','task','file']},before:{type:'string',pattern:'^(?:fh1_[A-Za-z0-9_-]{43}|entry-[a-f0-9]{48})$'},limit:{type:'integer',minimum:1,maximum:100},query:{type:'string',maxLength:200},incidentId:{type:'string',maxLength:100},status:{type:'string',maxLength:20},enabled:{type:'boolean'},requestId:{type:'string',maxLength:512},request:{type:'string',pattern:'^wf-[a-f0-9]{12}$'},relayId:{type:'string',maxLength:100},note:{type:'string',maxLength:2000},op:{type:'string',enum:['list','add','cancel']},dueAt:{type:'string',maxLength:80},repeat:{type:'string',enum:['once','daily']},reminderId:{type:'string',maxLength:100}}},output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>{
+ return{name:'family_assistant',description:'乐乐已验证 Owner 原生会话的家庭全权管理工具（与电脑端工作台 1:1 对齐最高权限）。先 status 获得成员ID。Owner可在当前微信直接完成电脑工作台的全部管理操作：add_person 新增家庭席位、update_person 修改成员资料与日报设置、bind_qr 生成微信绑定二维码并直接以聊天图片发回Owner微信（5分钟有效，对方扫码后会自动通知）、verify_login 提交登录数字验证码、connect/disconnect 重连或断开通道、member_reminder 管理家人提醒、tool_manage 查看目录/发现日报来源(digest_sources)/分配工具(assign)/调用工具(invoke)、access_manage 授权或收回成员项目权限、hearth_manage 设置平安问候/守护勿扰/照料习惯、system_manage 配置简报或启动暂停。原有能力全部保留：send_message 直发家人消息（仅限真实当前Owner原话授权；已有统一deliveryTarget时不得重复发送）、library_query 查家人资料库、history_page 查电脑保存的归档、draft_management/confirm_management 整理与确认安排、important_update/reply/alert 处理重要事项、family_reply 答复家人托问、workflow_reply 答复工具需求、dismiss_relay 销掉转告、service_request/service_confirm 开通或调整服务、reminder 管理主人自己的提醒。api_accepted 仅表示微信API接受，不代表手机收到；历史归档不等于微信全部历史。',parameters:{type:'object',additionalProperties:false,required:['action'],properties:{action:{type:'string',enum:Object.keys(operationKeys)},personId:{type:'string',maxLength:100},text:{type:'string',maxLength:6000},contextId:{type:'string',maxLength:120},cardId:{type:'string',maxLength:100},draftId:{type:'string',maxLength:100},revision:{type:'integer',minimum:1},date:{type:'string',maxLength:40},kind:{type:'string',enum:['diary','fact','preference','task','file']},before:{type:'string',pattern:'^(?:fh1_[A-Za-z0-9_-]{43}|entry-[a-f0-9]{48})$'},limit:{type:'integer',minimum:1,maximum:100},query:{type:'string',maxLength:200},incidentId:{type:'string',maxLength:100},status:{type:'string',maxLength:20},enabled:{type:'boolean'},requestId:{type:'string',maxLength:512},request:{type:'string',pattern:'^wf-[a-f0-9]{12}$'},relayId:{type:'string',maxLength:100},note:{type:'string',maxLength:2000},op:{type:'string',enum:['list','add','cancel','skip_once','catalog','assignments','assign','invoke','digest_sources','grant','revoke','member_update','guard_update','habit_save','habit_delete','configure','start','pause','send_brief']},dueAt:{type:'string',maxLength:80},repeat:{type:'string',enum:['once','daily']},reminderId:{type:'string',maxLength:100},label:{type:'string',maxLength:80},timeZone:{type:'string',maxLength:100},interests:{type:'array',maxItems:20,items:{type:'string',maxLength:100}},notes:{type:'string',maxLength:2000},shareWithOwner:{type:'string',enum:['none','summary','full']},dailyEnabled:{type:'boolean'},dailyTime:{type:'string',maxLength:10},code:{type:'string',maxLength:20},time:{type:'string',maxLength:10},skip:{type:'boolean'},toolId:{type:'string',maxLength:80},resource:{type:'object',additionalProperties:true},allowInvoke:{type:'boolean'},schedule:{type:'object',additionalProperties:true},input:{type:'object',additionalProperties:true},expectedRevision:{type:'integer',minimum:1},workspaceId:{type:'string',maxLength:240},workspaceIds:{type:'array',maxItems:100,items:{type:'string',maxLength:240}},capabilities:{type:'array',maxItems:10,items:{type:'string',enum:['read','task','write']}},pinganEnabled:{type:'boolean'},pinganTime:{type:'string',maxLength:10},codeword:{type:'string',maxLength:40},urgent:{type:'boolean'},relay:{type:'boolean'},ask:{type:'boolean'},digest:{type:'boolean'},quietHoursEnabled:{type:'boolean'},quietStart:{type:'string',maxLength:10},quietEnd:{type:'string',maxLength:10},habitId:{type:'string',maxLength:120},ownerBriefEnabled:{type:'boolean'},ownerBriefTime:{type:'string',maxLength:10},provider:{type:'string',maxLength:120},model:{type:'string',maxLength:200}}},output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>{
   const text=typeof value?.text==='string'?value.text:JSON.stringify(value);
   const reference=wireServiceDraft(value?.serviceDraft);
   if(!reference)return[{type:'text',text}];

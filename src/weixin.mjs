@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { normalizeFileItem, normalizeVoiceItem, downloadWeixinFile, downloadWeixinVoice, uploadWeixinFile, mediaFailure } from './weixin-media.mjs';
+import { normalizeFileItem, normalizeVoiceItem, downloadWeixinFile, downloadWeixinVoice, uploadWeixinFile, uploadWeixinImage, mediaFailure } from './weixin-media.mjs';
 
 const DEFAULT_BASE = 'https://ilinkai.weixin.qq.com';
 const CHANNEL_VERSION = '2.4.10';
@@ -115,21 +115,33 @@ export function createWeixinApi({ fetchImpl = globalThis.fetch, baseUrl = DEFAUL
       throw error;
     }
   }
+  async function sendMediaItem({ token, host, peerId, contextToken, clientId, signal, authorize, upload }) {
+    if (![token, peerId, clientId].every(nonempty)) throw mediaFailure();
+    const item = await upload((body, uploadSignal) => request(host, 'ilink/bot/getuploadurl', {
+      token, signal: uploadSignal, body: { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' } },
+    }));
+    try { signal?.throwIfAborted(); if (authorize() !== true) throw mediaFailure(); } catch { throw mediaFailure(); }
+    const value = await request(host, 'ilink/bot/sendmessage', { token, signal, send: true, body: {
+      msg: { from_user_id: '', to_user_id: peerId, client_id: clientId, message_type: 2, message_state: 2,
+        item_list: [item], ...(contextToken ? { context_token: contextToken } : {}) },
+      base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' },
+    } });
+    return { status: 'api_accepted', ...(nonempty(value.message_id) ? { messageId: value.message_id } : {}) };
+  }
   return {
     downloadFile(options) { return downloadWeixinFile(fetchImpl, options); },
     downloadVoice(options) { return downloadWeixinVoice(fetchImpl, options); },
-    async sendFile({ token, baseUrl: host, peerId, contextToken, bytes, name, clientId = randomUUID(), signal, authorize = () => true }) {
-      if (![token, peerId, clientId].every(nonempty)) throw mediaFailure();
-      const item = await uploadWeixinFile(fetchImpl, (body, uploadSignal) => request(host, 'ilink/bot/getuploadurl', {
-        token, signal: uploadSignal, body: { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' } },
-      }), { bytes, name, peerId, clientId, signal, authorize });
-      try { signal?.throwIfAborted(); if (authorize() !== true) throw mediaFailure(); } catch { throw mediaFailure(); }
-      const value = await request(host, 'ilink/bot/sendmessage', { token, signal, send: true, body: {
-        msg: { from_user_id: '', to_user_id: peerId, client_id: clientId, message_type: 2, message_state: 2,
-          item_list: [item], ...(contextToken ? { context_token: contextToken } : {}) },
-        base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSHFamily/0.1.0' },
-      } });
-      return { status: 'api_accepted', ...(nonempty(value.message_id) ? { messageId: value.message_id } : {}) };
+    sendFile({ token, baseUrl: host, peerId, contextToken, bytes, name, clientId = randomUUID(), signal, authorize = () => true }) {
+      return sendMediaItem({
+        token, host, peerId, contextToken, clientId, signal, authorize,
+        upload: getUploadUrl => uploadWeixinFile(fetchImpl, getUploadUrl, { bytes, name, peerId, clientId, signal, authorize }),
+      });
+    },
+    sendImage({ token, baseUrl: host, peerId, contextToken, bytes, clientId = randomUUID(), signal, authorize = () => true }) {
+      return sendMediaItem({
+        token, host, peerId, contextToken, clientId, signal, authorize,
+        upload: getUploadUrl => uploadWeixinImage(fetchImpl, getUploadUrl, { bytes, peerId, clientId, signal, authorize }),
+      });
     },
     async getQr({ signal } = {}) {
       const value = await request(initialBase, 'ilink/bot/get_bot_qrcode?bot_type=3', { signal, body: { local_token_list: [] } });
