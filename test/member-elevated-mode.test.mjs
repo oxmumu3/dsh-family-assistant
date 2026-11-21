@@ -7,6 +7,14 @@ import { createRuntime } from '../src/runtime.mjs';
 import { createOwnerManagementTool } from '../src/owner-management-tool.mjs';
 import { checkElevatedToolExecution, isPathConfinedToWorkspace } from '../src/member-elevated-host.mjs';
 import { createFamilyToolExecutors } from '../src/family-tool-executors.mjs';
+import {
+  SKILL_PACK_IDS,
+  listSkillPackCatalog,
+  readWorkspaceAgentsMd,
+  readWorkspaceSkillPacks,
+  syncWorkspaceSkillPacks,
+  writeWorkspaceAgentsMd,
+} from '../src/member-skill-packs.mjs';
 
 const waitFor = async (check, timeoutMs = 4000) => {
   const deadline = Date.now() + timeoutMs;
@@ -295,10 +303,18 @@ test('elevated_manage on family_assistant grants, lists, expires, and revokes is
   currentTimeMs += 49 * 3600_000;
   assert.equal(runtime.memberElevated.isActive('wkb', { at: new Date(currentTimeMs).toISOString(), bindingGeneration: 1 }), false);
 
-  // Re-grant & then revoke explicitly
+  // Re-grant & configure skill packs + AGENTS.md via ownerTool, then revoke explicitly
   currentTimeMs = Date.parse('2026-11-21T05:00:00Z');
   await ownerTool.execute({ action: 'elevated_manage', op: 'grant', personId: 'wkb', durationHours: 24 }, exec);
   assert.equal(runtime.memberElevated.isActive('wkb', { at: new Date(currentTimeMs).toISOString(), bindingGeneration: 1 }), true);
+
+  const packsRes = await ownerTool.execute({ action: 'elevated_manage', op: 'set_packs', personId: 'wkb', skillPacks: ['executive-reporting', 'bi-analysis'] }, exec);
+  assert.equal(packsRes.status, 'completed');
+  assert.deepEqual(packsRes.skillPacks.installed, ['bi-analysis', 'executive-reporting']);
+
+  const agentsRes = await ownerTool.execute({ action: 'elevated_manage', op: 'set_agents_md', personId: 'wkb', agentsMd: '# Banker Scope\nM&A Loans' }, exec);
+  assert.equal(agentsRes.status, 'completed');
+  assert.equal(agentsRes.hasAgentsMd, true);
 
   const revoked = await ownerTool.execute({ action: 'elevated_manage', op: 'revoke', personId: 'wkb' }, exec);
   assert.equal(revoked.status, 'completed');
@@ -668,4 +684,133 @@ test('pro_sandbox permanent seat, anti-clobber bind_qr, QR expiry auth fallback,
   await waitFor(() => sentTexts.some(m => m.peerId === 'wkb@im.wechat' && m.text.includes('已按跨境并购贷款口径收录')));
   assert.equal(sentTexts.some(m => m.text.includes('先别转账') || m.text.includes('110')), false);
   assert.match(bankerPromptSeen, /跨境并购贷款/);
+});
+
+test('skill packs privacy hygiene, private plugin blocklist, AGENTS.md injection & sendImage work end-to-end', async t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'family-skill-packs-026-')));
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir + '-member-workspaces', { recursive: true, force: true });
+  });
+
+  // 1. All 5 curated skill packs must be 100% free of Owner private/host identifiers
+  const catalog = listSkillPackCatalog();
+  assert.deepEqual(catalog.map(c => c.id), SKILL_PACK_IDS);
+  assert.equal(catalog.length, 5);
+  const srcText = readFileSync(new URL('../src/member-skill-packs.mjs', import.meta.url), 'utf8');
+  for (const forbidden of ['/Users/shan', 'miclip', 'mexico', 'oxmumu', 'piggy00544', 'finvo', 'ego-browser', 'remote-debugging-port', '--user-data-dir']) {
+    assert.equal(new RegExp(forbidden, 'iu').test(srcText), false, `Forbidden token leaked into skill packs: ${forbidden}`);
+  }
+
+  // 2. syncWorkspaceSkillPacks & writeWorkspaceAgentsMd preserve member custom files & skills
+  const sentTexts = [];
+  const sentFiles = [];
+  const sentImages = [];
+  const host = createFakeHostControllers();
+  const runtime = createRuntime({
+    directory: dir,
+    api: {
+      ...createFakeApi(sentTexts, sentFiles),
+      async sendImage({ peerId, bytes }) {
+        sentImages.push({ peerId, bytes });
+        return { status: 'api_accepted', messageId: 'img-' + sentImages.length };
+      },
+    },
+    intervalMs: 600_000,
+    elevatedControllers: {
+      getWorkspaceController: () => host.workspaceController,
+      getSessionController: () => host.sessionController,
+      getAgents: () => host.agentsRegistry,
+    },
+  });
+  t.after(() => runtime.close());
+
+  setupConnectedPerson(dir, runtime, {
+    id: 'owner-1', role: 'owner', label: '我',
+    accountId: 'owner@im.bot', peerId: 'owner@im.wechat', token: 'tok-owner',
+  });
+  setupConnectedPerson(dir, runtime, {
+    id: 'wkb', role: 'elder', label: '王凯伯',
+    accountId: 'wkb@im.bot', peerId: 'wkb@im.wechat', token: 'tok-wkb',
+  });
+  await runtime.start();
+  await runtime.action({ action: 'hearth_member_update', personId: 'wkb', persona: 'pro_peer', pinganEnabled: false });
+  const granted = await runtime.action({ action: 'member_elevated_grant', personId: 'wkb', permanent: true, note: 'pro_peer' });
+  const wsPath = granted.grant.workspacePath;
+
+  // Create member's own custom skill & report file
+  mkdirSync(join(wsPath, 'skills', 'my-custom'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(wsPath, 'skills', 'my-custom', 'SKILL.md'), '---\nname: my-custom\ndescription: Custom banker workflow\n---\n# Custom\n');
+  mkdirSync(join(wsPath, 'reports'), { recursive: true, mode: 0o700 });
+  const chartPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+  writeFileSync(join(wsPath, 'reports', 'deal-chart.png'), chartPng);
+
+  // Sync via runtime action, then shrink, ensuring custom skill & reports remain untouched
+  await runtime.action({ action: 'member_skill_packs_set', personId: 'wkb', packIds: ['executive-reporting', 'bi-analysis', 'visual-one-pager'] });
+  assert.deepEqual(readWorkspaceSkillPacks(wsPath).installed, ['bi-analysis', 'executive-reporting', 'visual-one-pager']);
+  assert.deepEqual(readWorkspaceSkillPacks(wsPath).custom, ['my-custom']);
+
+  await runtime.action({ action: 'member_skill_packs_set', personId: 'wkb', packIds: ['executive-reporting', 'visual-one-pager'] });
+  assert.equal(existsSync(join(wsPath, 'skills', 'bi-analysis')), false);
+  assert.equal(existsSync(join(wsPath, 'skills', 'my-custom', 'SKILL.md')), true);
+  assert.equal(existsSync(join(wsPath, 'reports', 'deal-chart.png')), true);
+
+  await runtime.action({
+    action: 'member_workspace_agents_set',
+    personId: 'wkb',
+    content: '# 王凯伯专属口径\n建行总行国际业务 · 专注跨境并购贷款商机。',
+  });
+  assert.match(readWorkspaceAgentsMd(wsPath), /建行总行国际业务/);
+
+  const hearthStatus = runtime.status().hearth;
+  assert.equal(hearthStatus.skillPackCatalog.length, 5);
+  assert.equal(hearthStatus.members.wkb.hasAgentsMd, true);
+  assert.deepEqual(hearthStatus.members.wkb.skillPacks.installed, ['executive-reporting', 'visual-one-pager']);
+
+  // 3. Tool guard blocks Owner-private plugin tools & Chrome CDP hijacks, while keeping general tools open
+  const activeGrant = runtime.memberElevated.get('wkb', { bindingGeneration: 1 });
+  for (const blockedTool of ['companion', 'send_wechat', 'sa_dispatch', 'kb_board', 'board_list', 'delivery_receipts', 'evidence_ledger']) {
+    const blocked = checkElevatedToolExecution({ name: blockedTool, arguments: {} }, activeGrant);
+    assert.equal(typeof blocked, 'string', `Expected private tool ${blockedTool} to be blocked`);
+  }
+  for (const blockedCmd of [
+    'open /Applications/Google\\ Chrome.app --args --remote-debugging-port=9222',
+    'google-chrome --user-data-dir=/Users/foo/Library/Application\\ Support/Google/Chrome',
+    'npx chrome-devtools-mcp',
+  ]) {
+    const blocked = checkElevatedToolExecution({ name: 'bash', arguments: { command: blockedCmd } }, activeGrant);
+    assert.equal(typeof blocked, 'string', `Expected Chrome/CDP command to be blocked: ${blockedCmd}`);
+  }
+  for (const allowedExec of [
+    { name: 'web_search', arguments: { query: 'Puma Anta M&A' } },
+    { name: 'read_file', arguments: { path: join(wsPath, 'AGENTS.md') } },
+    { name: 'bash', arguments: { command: 'node scripts/collect.mjs' } },
+    { name: 'whale_travel', arguments: { query: 'Frankfurt' } },
+    { name: 'guizang_design', arguments: { mode: 'svg' } },
+  ]) {
+    const res = checkElevatedToolExecution(allowedExec, activeGrant);
+    assert.equal(res, undefined, `Expected general tool ${allowedExec.name} to remain allowed, got: ${res}`);
+  }
+
+  // 4. Prompt injects AGENTS.md + skills list, and member_send_workspace_file routes .png -> sendImage
+  let capturedPrompt = '';
+  host.setOnPrompt(async ctx => {
+    runtime.memberElevatedHost.attachAgent(ctx.agent);
+    capturedPrompt = ctx.text;
+    const fileTool = ctx.agent.registered.find(r => r.name === 'member_send_workspace_file');
+    const imgReceipt = await fileTool.execute({ relativePath: 'reports/deal-chart.png', caption: '交易架构图' }, { agent: ctx.agent, signal: new AbortController().signal });
+    assert.equal(imgReceipt.status, 'api_accepted');
+    assert.equal(imgReceipt.isImage, true);
+    ctx.pushEvent('assistant/message', { turn: ctx.turn, message: { content: [{ type: 'text', text: '架构图已发给你。' }] } });
+    ctx.pushEvent('turn/end', { turn: ctx.turn, reason: { kind: 'completed' } });
+  });
+
+  await runtime.receive('wkb', { id: 'msg-wkb-chart', peerId: 'wkb@im.wechat', text: '帮我画个并购融资结构图发过来' });
+  await waitFor(() => sentImages.length === 1 && sentTexts.some(m => m.text.includes('架构图已发给你')));
+  assert.equal(sentImages[0].peerId, 'wkb@im.wechat');
+  assert.equal(Buffer.compare(sentImages[0].bytes, chartPng), 0);
+  assert.match(capturedPrompt, /专属背景与工作口径（AGENTS\.md）/);
+  assert.match(capturedPrompt, /建行总行国际业务/);
+  assert.match(capturedPrompt, /skills\/executive-reporting\/SKILL\.md/);
+  assert.match(capturedPrompt, /skills\/my-custom\/SKILL\.md/);
 });

@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
 import { installCollectorTemplate } from './digest-collectors.mjs';
+import { readWorkspaceAgentsMd, summarizeWorkspaceSkills } from './member-skill-packs.mjs';
 
 const DEFAULT_TIMEOUT_MS = 480_000;
 const WAITING_NOTICE_MS = 45_000;
@@ -18,7 +19,23 @@ const RESTRICTED_TOOL_NAMES = [
   'subagent',
   'spawn_agent',
   'delegate',
+  'companion',
+  'send_wechat',
+  'sa_dispatch',
+  'kb_board',
+  'kb_card',
+  'kb_create',
+  'kb_export',
+  'delivery_receipts',
+  'evidence_ledger',
 ];
+
+const PRIVATE_TOOL_PREFIX_RE = /^(?:family_|kb_|dot_|sa_|board_)/iu;
+
+function isRestrictedToolName(name) {
+  if (!name || name.startsWith('member_')) return false;
+  return RESTRICTED_TOOL_NAMES.includes(name) || PRIVATE_TOOL_PREFIX_RE.test(name);
+}
 
 const FS_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'multi_edit', 'glob', 'grep',
@@ -43,6 +60,7 @@ const SENSITIVE_COMMAND_PATTERNS = [
   /(?:~\/|\$HOME\/|\$\{HOME\}\/|\/Users\/[^/\s"'`]+\/)(?:\.dsh|\.ssh|\.gnupg|\.aws|\.appstoreconnect|\.gemini|\.codex|\.claude|\.openclaw|\.kube|\.npmrc|\.netrc|\.gitconfig|Library\/Mobile\s*Documents|Library\/Keychains|Library\/LaunchAgents|Library\/LaunchDaemons|Library\/Application\s*Support|Desktop|Documents|Downloads|Pictures|Mail|Messages)/iu,
   /dsh-family-assistant|dsh-wechat|ag-wechat|asc-publish|superagent-ledger|family-toolbox|member-elevated-access|family\.json/iu,
   /\b(?:launchctl|crontab|osascript|sudo|su|security\s+(?:find-|dump-|unlock-)|sqlite3\b[^;\n]*(?:chat\.db|Messages|Keychain)|defaults\s+write)\b/iu,
+  /(?:--remote-debugging-port|--user-data-dir|Google\/Chrome|chrome-devtools)/iu,
   /file:\/\/\//iu,
 ];
 
@@ -191,8 +209,8 @@ export function checkElevatedToolExecution(exec, grant) {
     return '临时高权限未生效、已到期或已被 Owner 收回，本次操作已停止。';
   }
   const execName = String(exec?.name ?? '');
-  if (['family_assistant', 'family_owner_projects', 'ask_user_question', 'invoke_subagent', 'subagent', 'spawn_agent', 'delegate'].includes(execName)) {
-    return '当前成员临时高权限会话不可调用主人管理或交互阻塞工具。';
+  if (isRestrictedToolName(execName)) {
+    return '当前成员高权限会话不可调用主人私人插件或交互阻塞工具。';
   }
   const issue = collectObjectIssues(exec?.arguments, execName, grant.workspacePath);
   if (issue) return issue;
@@ -225,10 +243,11 @@ function inspectWorkspaceRelativeFile(workspacePath, relativePath, { maxBytes = 
   const stat = lstatSync(realFile);
   if (stat.size <= 0 || stat.size > maxBytes) throw new Error('文件为空或超过 10MB 限制。');
   const name = parts.at(-1);
-  if (!/\.(?:md|txt|csv|json|pdf|docx|pptx|xlsx|html)$/iu.test(name)) {
-    throw new Error('仅支持发送 md/txt/csv/json/pdf/docx/pptx/xlsx/html 文档。');
+  if (!/\.(?:md|txt|csv|json|pdf|docx|pptx|xlsx|html|png|jpg|jpeg|webp|svg)$/iu.test(name)) {
+    throw new Error('仅支持发送 md/txt/csv/json/pdf/docx/pptx/xlsx/html/png/jpg/jpeg/webp/svg 文档与图片。');
   }
-  return { relativePath: clean, absolutePath: realFile, name, bytes: readFileSync(realFile) };
+  const isImage = /\.(?:png|jpg|jpeg|webp)$/iu.test(name);
+  return { relativePath: clean, absolutePath: realFile, name, isImage, bytes: readFileSync(realFile) };
 }
 
 function buildElevatedPrompt({ person, grant, text, attachments = [] }) {
@@ -240,12 +259,24 @@ function buildElevatedPrompt({ person, grant, text, attachments = [] }) {
   const modeDesc = grant.permanent
     ? '常驻独立沙箱专业席位（长期有效）'
     : `独立沙箱自助高权限（有效期至 ${grant.expiresAt}）`;
-  return [
+  const agentsMd = grant.workspacePath ? readWorkspaceAgentsMd(grant.workspacePath).trim() : '';
+  const installedSkills = grant.workspacePath ? summarizeWorkspaceSkills(grant.workspacePath) : [];
+  const blocks = [
     `【乐乐 · 专属独立沙箱 Agent 席位】你正在微信上直接服务「${person.label}」（${tz}，当前当地时间 ${localNow}，当前模式：${modeDesc}）。`,
-    `你的能力边界与武器库：你可以直接读写专属工作区「${grant.workspacePath}」、联网深度检索与抓取中英文公开权威资讯/公告、在 scripts/ 中编写或安装多源采集脚本、用 member_digest_service（支持内置模板 template="crossborder_ma" 跨境并购多源采集或 "topic_radar" 行业雷达、save_schedule 建定时、update_preferences 随时追加修改偏好口径、run_now 立即试跑推送）搭建和持续调教每日自动简报、用 member_send_workspace_file 直接把生成的 Word/Excel/CSV/PDF/Markdown 报告发到他微信、用 member_reminder_service 为他安排或管理微信提醒。`,
+    `你的能力边界与武器库：你可以直接读写专属工作区「${grant.workspacePath}」、联网深度检索与抓取中英文公开权威资讯/公告、在 scripts/ 中编写或安装多源采集脚本、用 member_digest_service（支持内置模板 template="crossborder_ma" 跨境并购多源采集或 "topic_radar" 行业雷达、save_schedule 建定时、update_preferences 随时追加修改偏好口径、run_now 立即试跑推送）搭建和持续调教每日自动简报、用 member_send_workspace_file 直接把生成的 Word/Excel/CSV/PDF/HTML/Markdown 报告或 PNG/JPG 图表图片发到他微信、用 member_reminder_service 为他安排或管理微信提醒。`,
     `重要大管家原则：\n1. 只给结果、绝不甩锅或讲内部黑话：微信那头的「${person.label}」不需要知道任何终端、脚本、工具名、sessionId 或权限分层；绝不要让他自己去电脑执行操作，也不要回复空洞的框架敷衍——他要日报或调研，你就当场拉取真实可核实信源把干货做出来并配好定时。\n2. 真实溯源与持续调教：所有交易、数据、监管动态必须标注真实来源媒体，拿不到的如实写“未获取到可核实公开披露”，严禁编造；当对方回复修改意见（如调整金额门槛、重点区域、工作日/每日推送时间）时，立即调用 member_digest_service(op="update_preferences") 落盘生效。\n3. 微信阅读友好与去重：分段清晰、重点突出、不用冗余代码块；若已通过 member_digest_service(deliverNow=true) 或 member_send_workspace_file 将完整正文/文档发至微信，本轮回复只需简洁说明亮点与可微调项，不要把几千字全文重复粘第二遍（不要调用阻塞式弹窗提问工具，如需确认 1-2 个偏好直接在微信文字末尾轻问一句）。\n4. 严禁访问或提及工作区之外的宿主或主人私人目录、密钥与配置。`,
-    `${person.label}本轮发来的原话：\n${text}${attachedNote}`,
-  ].join('\n\n');
+  ];
+  if (agentsMd) {
+    blocks.push(`【专属背景与工作口径（AGENTS.md）】\n${agentsMd.slice(0, 3500)}`);
+  }
+  if (installedSkills.length) {
+    blocks.push(
+      `【当前工作区已装备专业能力包（执行对应深度分析、路演稿、一页纸或长文任务前，请先用 read_file 阅读相应 SKILL.md 再动手）】\n`
+      + installedSkills.map(s => `- ${s.title}（${s.relativePath}）：${s.description}`).join('\n'),
+    );
+  }
+  blocks.push(`${person.label}本轮发来的原话：\n${text}${attachedNote}`);
+  return blocks.join('\n\n');
 }
 
 export function extractTurnOutcome(records, { rpcId, minTurn = 0 } = {}) {
@@ -534,7 +565,7 @@ export function createMemberElevatedHost({
 
     tools.push({
       name: 'member_send_workspace_file',
-      description: '把你隔离工作区里生成好的完整文档（如 .md/.txt/.csv/.json/.pdf/.docx/.pptx/.xlsx/.html）直接作为文件消息发到该成员的微信聊天中。',
+      description: '把你隔离工作区里生成好的完整文档或图片（.md/.txt/.csv/.json/.pdf/.docx/.pptx/.xlsx/.html/.png/.jpg/.jpeg/.webp/.svg，其中图片将自动作为微信原图发送）直接发到该成员的微信聊天中。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -555,17 +586,20 @@ export function createMemberElevatedHost({
           personId: liveGrant.personId,
           name: file.name,
           bytes: file.bytes,
+          isImage: file.isImage,
           caption: typeof args.caption === 'string' ? args.caption.trim() : '',
           signal: execution?.signal,
         });
+        const kindWord = file.isImage ? '图片' : '文件';
         return {
           status: receipt?.status ?? 'unknown',
           relativePath: file.relativePath,
           name: file.name,
+          isImage: file.isImage,
           bytes: file.bytes.length,
           text: receipt?.status === 'api_accepted'
-            ? `已把工作区文件「${file.name}」提交到微信文件发送接口。`
-            : `工作区文件「${file.name}」发送尚未确认（状态：${receipt?.status ?? 'unknown'}）。`,
+            ? `已把工作区${kindWord}「${file.name}」提交到微信${kindWord}发送接口。`
+            : `工作区${kindWord}「${file.name}」发送尚未确认（状态：${receipt?.status ?? 'unknown'}）。`,
         };
       },
     });
@@ -621,8 +655,8 @@ export function createMemberElevatedHost({
     if (scopedTools) {
       if (typeof scopedTools.definitions === 'function' && typeof scopedTools.restrict === 'function') {
         try {
-          const present = new Set((scopedTools.definitions(agent) ?? []).map(def => def?.name));
-          const toDeny = RESTRICTED_TOOL_NAMES.filter(name => present.has(name));
+          const present = (scopedTools.definitions(agent) ?? []).map(def => def?.name).filter(Boolean);
+          const toDeny = [...new Set(present.filter(isRestrictedToolName))];
           if (toDeny.length) disposers.push(scopedTools.restrict({ deny: toDeny }));
         } catch {}
       }

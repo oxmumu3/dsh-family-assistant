@@ -3097,6 +3097,9 @@ function renderHearthWorkbench(React, model) {
     const isElderCare = persona === 'elder_care';
     const elevated = selectedHearth.elevated ?? null;
     const proSandboxActive = Boolean(elevated?.active);
+    const skillCatalog = Array.isArray(hearth.skillPackCatalog) ? hearth.skillPackCatalog : [];
+    const installedPacks = Array.isArray(selectedHearth.skillPacks?.installed) ? selectedHearth.skillPacks.installed : [];
+    const hasAgentsMd = Boolean(selectedHearth.hasAgentsMd);
     const customDigests = Array.isArray(selectedHearth.customDigests) ? selectedHearth.customDigests : [];
 
     return h('div', { className: 'hearth-container' },
@@ -3178,7 +3181,28 @@ function renderHearthWorkbench(React, model) {
                     className: 'seg-btn' + (persona === val ? ' active' : ''),
                     disabled: busyAction,
                     onClick: () => void runControl({ action: 'hearth_member_update', personId: pid, persona: val, ...(val !== 'elder_care' ? { pinganEnabled: false } : {}) }, `已设为「${lbl}」`),
-                  }, lbl))))),
+                  }, lbl))),
+            proSandboxActive && skillCatalog.length > 0 && h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border-subtle, #e6dfd5)' } },
+              h('div', { className: 'section-head', style: { marginBottom: '6px' } },
+                h('span', { className: 'section-sub' }, '精准赋能能力包（只共享方法论，绝不穿透主人数据）：'),
+                hasAgentsMd && h('span', { className: 'pill pill-open' }, '专属背景卡 AGENTS.md 已生效')),
+              h('div', { className: 'btn-row', style: { flexWrap: 'wrap', gap: '6px' } },
+                skillCatalog.map(pack => {
+                  const active = installedPacks.includes(pack.id);
+                  return h('button', {
+                    key: pack.id,
+                    type: 'button',
+                    title: pack.summary,
+                    className: 'hearth-btn hearth-btn-sm ' + (active ? 'hearth-btn-primary' : 'hearth-btn-soft'),
+                    disabled: busyAction,
+                    onClick: () => {
+                      const next = active
+                        ? installedPacks.filter(id => id !== pack.id)
+                        : [...installedPacks, pack.id];
+                      void runControl({ action: 'member_skill_packs_set', personId: pid, packIds: next }, active ? `已停用「${pack.title}」` : `已装备「${pack.title}」`);
+                    },
+                  }, (active ? '✓ ' : '+ ') + pack.title);
+                }))))),
 
           h('div', { className: 'cap-card' },
             h('div', { className: 'section-head', style: { marginBottom: '6px' } },
