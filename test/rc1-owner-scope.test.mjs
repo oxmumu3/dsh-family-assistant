@@ -18,8 +18,8 @@ import * as plugin from '../index.js';
 
 async function fixture(t,{native=true}={}){
  const ctx=new Context();t.after(()=>ctx.fiber.dispose());
- await ctx.plugin(SystemPrompt,{includeHarnessIdentity:false});
  await ctx.plugin(SessionProjectionRegistry);
+ await ctx.plugin(SystemPrompt,{includeHarnessIdentity:false});
  await ctx.plugin(AgentRegistry);
  await ctx.plugin(ToolRuntime);
  if(native)await ctx.plugin(Native);

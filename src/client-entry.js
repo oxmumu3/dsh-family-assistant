@@ -274,7 +274,7 @@ window.__ModuleLoader__.load({
             const target = body?.ownerConversation;
             if (!response.ok || !target || typeof target.sessionId !== 'string' || !target.sessionId.startsWith('family_owner_')) throw new Error('owner_conversation_unavailable');
             if (!live) return;
-            reference = ctx.sessions.retain(target.sessionId, { source: 'controllerOperation' });
+            reference = ctx.sessions.retain(target.sessionId, { source: 'controllerOperation', facets: { conversation: true } });
             await reference.ready;
             if (!live) return;
             if (reference.binding?.sessionId !== target.sessionId) throw new Error('owner_conversation_mismatch');

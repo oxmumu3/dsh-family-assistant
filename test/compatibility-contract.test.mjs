@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {validateCompatibility} from '../scripts/compatibility.mjs';
 const metadata=JSON.parse(readFileSync(new URL('../package.json',import.meta.url)));
-for(const version of ['0.2.1-rc.4','0.2.1-rc.5','0.2.2-rc.1','0.2.2-rc.2','0.2.2-rc.3','0.2.2-rc.4','0.2.2-rc.5'])test('validated official SDK '+version,()=>assert.equal(validateCompatibility(metadata,version),version));
+for(const version of ['0.2.1-rc.4','0.2.1-rc.5','0.2.2-rc.1','0.2.2-rc.2','0.2.2-rc.3','0.2.2-rc.4','0.2.2-rc.5','0.2.3-alpha.2'])test('validated official SDK '+version,()=>assert.equal(validateCompatibility(metadata,version),version));
 test('unknown official SDK fails closed',()=>assert.throws(()=>validateCompatibility(metadata,'0.2.1-rc.6'),/absent/));
 test('drifting SDK peers fail closed',()=>{const altered=structuredClone(metadata);altered.peerDependencies['@deepseek-ai/dsh']='*';assert.throws(()=>validateCompatibility(altered,'0.2.1-rc.5'),/exactly match/);});
 test('host peer missing a matrix version fails closed',()=>{const altered=structuredClone(metadata);altered.peerDependencies['@deepseek-ai/dsh']=altered.peerDependencies['@deepseek-ai/dsh'].replace(' || 0.2.2-rc.2','');assert.throws(()=>validateCompatibility(altered,'0.2.2-rc.2'),/exactly match/);});

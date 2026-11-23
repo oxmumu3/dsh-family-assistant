@@ -50,7 +50,7 @@ test('official guard reads Desktop independently when npm latest still names rc5
  assert.equal(result.sdkLatest,'0.2.1-rc.5');assert.equal(result.desktopVersion,'0.2.2-rc.1');assert.equal(result.desktopSdkVersion,'0.2.2-rc.1');assert.equal(result.compatibilityOverride,false);
 });
 test('a new Desktop outside the verified matrix blocks even while npm latest is known',async()=>{
- const fixture=fetchFixture({version:'0.2.2-rc.4'});
+ const fixture=fetchFixture({version:'0.2.2-rc.99'});
  await assert.rejects(()=>check(metadata,{fetchImpl:fixture.fetch}),/absent from the tested matrix/);
 });
 test('exact corresponding SDK metadata must match the independently observed Desktop',async()=>{

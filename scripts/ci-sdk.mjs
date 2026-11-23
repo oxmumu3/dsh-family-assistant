@@ -13,8 +13,10 @@ export async function planSdk(args) {
   const metadata = JSON.parse(await readFile(join(source, 'package.json')));
   const sdk = validateCompatibility(metadata, args[1]);
   const dependencies = { ...metadata.dependencies, ...metadata.devDependencies };
-  const scopedOwner = sdk.startsWith('0.2.2-rc.');
-  dependencies['@deepseek-ai/cordis'] = scopedOwner ? '4.1.0' : sdk === '0.2.0-rc.2' ? '4.0.4' : '4.0.5';
+  const usesCordis42 = sdk.startsWith('0.2.3-');
+  const scopedOwner = sdk.startsWith('0.2.2-rc.') || usesCordis42;
+  dependencies['@deepseek-ai/cordis'] = usesCordis42 ? '4.2.0-alpha.1' : scopedOwner ? '4.1.0' : sdk === '0.2.0-rc.2' ? '4.0.4' : '4.0.5';
+  dependencies['@deepseek-ai/schemastery'] = usesCordis42 ? '3.20.0-alpha.1' : scopedOwner ? '3.19.0' : sdk === '0.2.0-rc.2' ? '3.18.4' : '3.18.5';
   if(!scopedOwner)for(const name of ['dsh-agent','dsh-session-projection','dsh-system-prompt','dsh-scope','dsh-tool-executor-native','dsh-tool-executor-ptc'])delete dependencies['@deepseek-ai/'+name];
   for (const name of Object.keys(dependencies)) if (name.startsWith('@deepseek-ai/dsh-')) dependencies[name] = sdk;
   for (const name of Object.keys(metadata.peerDependencies ?? {})) if (name.startsWith('@deepseek-ai/dsh-')) dependencies[name] = sdk;
