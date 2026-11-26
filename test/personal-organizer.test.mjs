@@ -72,7 +72,7 @@ test('calendar dates use current member timezone and reject invented reschedule 
  const {organizer:o,store}=await setup();
  const r=store.addReminder({personId:'me',text:'散步',dueAt:'2026-10-26T15:00:00Z'});
  const action={type:'update_reminder',reminderId:r.id,patch:{dueAt:'2026-10-25T21:00:00Z'},evidence:'把散步改到明天下午三点',timeEvidence:'明天下午三点'};
- command(o,'把散步改到明天下午三点',action,'move'); // Mexico tomorrow is Oct 25, not Oct 26 UTC.
+ command(o,'把散步改到明天下午三点',action,'move'); // Mexico City tomorrow is Oct 25, not Oct 26 UTC.
  assert.equal(store.reminders('me')[0].dueAt,'2026-10-25T21:00:00.000Z');
  for(const [text,dueAt] of [['把散步改到明天','2026-10-26T21:00:00Z'],['把散步改到明天下午三点','2026-10-26T21:00:00Z'],['把散步改一下','2026-10-25T21:30:00Z']])assert.throws(()=>command(o,text,{...action,patch:{dueAt},evidence:text,timeEvidence:text},'bad'+text),/时间|明确|原话|一致/);
 });
@@ -146,7 +146,7 @@ test('calendar list can query an explicit date or literal subject across all rem
  const subjectResult=command(o,'散步安排在什么时候',{type:'list',query:'散步'},'subject-list');assert.match(subjectResult.reply,/公园散步/);assert.doesNotMatch(subjectResult.reply,/买菜/);
 });
 
-const localWeekBoundary='2026-10-26T01:00:00.000Z'; // Mexico Sunday evening; Shanghai Monday morning.
+const localWeekBoundary='2026-10-26T01:00:00.000Z'; // Mexico City Sunday evening; Shanghai Monday morning.
 async function atLocalWeek(timeZone){const setupResult=await setup();setupResult.store.updatePerson('me',{timeZone});const {createPersonalOrganizer}=await import('../src/personal-organizer.mjs');return{...setupResult,organizer:createPersonalOrganizer({directory:setupResult.directory,store:setupResult.store,now:()=>localWeekBoundary})};}
 
 test('next weekday calendar creation uses each member local ISO week around UTC midnight',async()=>{

@@ -128,6 +128,55 @@ jobs:
            with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write(output_key+'='+digest+'\n')
            print(json.dumps(manifest))
           PY
+      - name: Scan release tarball against private denylist secret
+        env:
+          PUBLIC_DENYLIST_REGEX: ${{ secrets.PUBLIC_DENYLIST_REGEX }}
+        run: |-
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,re,tarfile
+          from pathlib import Path
+          raw_pattern=os.environ.get('PUBLIC_DENYLIST_REGEX','').strip()
+          assert raw_pattern,'Missing repository secret PUBLIC_DENYLIST_REGEX (fail closed)'
+          rx=re.compile(raw_pattern,re.IGNORECASE)
+          rec_dirs=[Path(os.environ.get('RUNNER_TEMP',''))/'release-artifact',Path('dist'),Path('dist-release'),Path('dist-pack'),Path('release')]
+          tarballs=[]
+          seen_paths=set()
+          for d in rec_dirs:
+            if d.is_dir():
+              for f in sorted(d.rglob('*.tgz')):
+                rp=str(f.resolve())
+                if rp not in seen_paths:
+                  seen_paths.add(rp)
+                  tarballs.append(f)
+          for f in sorted(Path('.').glob('*.tgz')):
+            rp=str(f.resolve())
+            if rp not in seen_paths:
+              seen_paths.add(rp)
+              tarballs.append(f)
+          assert tarballs,'No release tarball found to scan (fail closed)'
+          hits=[]
+          for artifact in tarballs:
+            with tarfile.open(artifact,'r:gz') as tar:
+              for member in tar.getmembers():
+                if not member.isfile():
+                  continue
+                if rx.search(member.name):
+                  hits.append(f'{artifact.name}:path:{member.name}')
+                  continue
+                if member.size>12*1024*1024:
+                  continue
+                data=tar.extractfile(member).read()
+                if b'\x00' in data[:4096]:
+                  continue
+                text=data.decode('utf-8','ignore')
+                for idx,line in enumerate(text.splitlines(),1):
+                  if rx.search(line):
+                    hits.append(f'{artifact.name}:{member.name}:{idx}')
+                    break
+          assert not hits,f'Blocked release: denylist matched {len(hits)} location(s): ' + ', '.join(hits[:10])
+          print(f'PUBLIC_DENYLIST_SCAN_PASSED (scanned {len(tarballs)} tarball(s), 0 matches)')
+          PY
       - name: Upload the immutable artifact for this run
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

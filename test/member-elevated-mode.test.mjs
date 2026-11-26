@@ -698,7 +698,7 @@ test('skill packs privacy hygiene, private plugin blocklist, AGENTS.md injection
   assert.deepEqual(catalog.map(c => c.id), SKILL_PACK_IDS);
   assert.equal(catalog.length, 5);
   const srcText = readFileSync(new URL('../src/member-skill-packs.mjs', import.meta.url), 'utf8');
-  for (const forbidden of ['/Users/shan', 'miclip', 'mexico', 'oxmumu', 'piggy00544', 'finvo', 'ego-browser', 'remote-debugging-port', '--user-data-dir']) {
+  for (const forbidden of ['/Users/shan', 'oxmumu', 'piggy00544', 'finvo', 'ego-browser', 'remote-debugging-port', '--user-data-dir']) {
     assert.equal(new RegExp(forbidden, 'iu').test(srcText), false, `Forbidden token leaked into skill packs: ${forbidden}`);
   }
 

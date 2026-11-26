@@ -554,7 +554,7 @@ test('a confirmed daily digest follows the latest generated report in the source
   assert.equal(f.toolbox.assignments({actorId:'owner'})[0].resource.selection,'latest');
 });
 
-test('source date follows Mexico even while the recipient is already on the next calendar day', async t => {
+test('source date follows Mexico City timezone even while the recipient is already on the next calendar day', async t => {
   const f=fixture(t,{now:()=> '2026-10-26T01:00:00.000Z'});
   f.files.daily=[{relativePath:'output/ai-digest/2026-10-25-wechat.txt',bytes:90,updatedAt:'2026-10-25T12:00:00.000Z'}];
   f.projects.push({workspaceId:'other',title:'其他'});
